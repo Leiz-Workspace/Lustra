@@ -1,0 +1,5 @@
+#!/bin/sh
+python lustra/vcs/genrev.py
+git add lustra/vcs/version.py
+git add pyproject.toml
+ruff check --fix --unsafe-fixes --show-fixes
