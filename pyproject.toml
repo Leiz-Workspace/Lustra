@@ -66,6 +66,9 @@ Lustra = 'lustra:main'
 [tool.setuptools]
 py-modules = ['lustra']
 
+[tool.setuptools.package-data]
+lustra = ['builtin_ext/*/manifest.json']
+
 [tool.setuptools.packages]
 find = {include = ['lustra*'], exclude= ['lustra.release', 'lustra.tests', 'lustra.un']}
 

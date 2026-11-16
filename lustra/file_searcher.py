@@ -61,7 +61,7 @@ def find_duplicated_files(dest_dict: dict[str, list[pathlib.Path]], basepath: pa
                             bf.flush()
                             bf.seek(0)
                     read_buffer_size = READ_BUFFER_SIZE_BASE
-                    while exacts_fi[0].tell() + 1 < filesize and len(exacts_fi) > 1:
+                    while exacts_fi[0].tell() < filesize and len(exacts_fi) > 1:
                         rbyteslist = [bf.read(read_buffer_size) for bf in exacts_fi]
                         read_buffer_size = min(read_buffer_size * 2, READ_BUFFER_SIZE_MAX)
                         nexacts = [exacts_fi[ri] for ri in range(1, len(rbyteslist)) if rbyteslist[ri] != rbyteslist[0]]

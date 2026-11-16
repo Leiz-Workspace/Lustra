@@ -6,14 +6,17 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 #
 #
 
+import bisect
 import json
 import os
 import pathlib
+from collections.abc import Iterable
 
 from .defines import FILE_NAME_ALIASES, MODULE_CHOICES, TAG_AUTOCOMPLETE_LENGTH_MIN, TAG_AUTOCOMPLETE_NUMBER_MAX, UTF8
 from .logger import trace
+from .module import ProcModule
 from .rex import re_wtag
-from .tags import TagInfo, tag_type_from_name
+from .tags import TagInfo, TagTypes, tag_type_from_name
 from .utils import format_exception
 
 __all__ = ('TAG_ALIASES', 'TagsDB', 'is_wtag', 'load_tag_aliases')
@@ -24,6 +27,8 @@ TAG_ALIASES: dict[str, str] = {}
 class TagsDB:
     """TagsDB !Static!"""
     DB: dict[str, dict[str, TagInfo]] = {}
+    DBKeys: dict[str, list[str]] = {}
+    '''sorted tag names per module (binary search for autocompletion)'''
     DBFiles: dict[str, pathlib.Path] = {}
     AuxDB: dict[str, pathlib.Path] = {}
     AuxDBFiles: dict[str, pathlib.Path] = {}
@@ -57,7 +62,7 @@ class TagsDB:
     @staticmethod
     def try_set_basepath(basepath: pathlib.Path, *, traverse=True) -> int:
         def collect_taglist_names(fpath: pathlib.Path, paths_dict: dict[str, pathlib.Path]) -> None:
-            for module in MODULE_CHOICES:
+            for module in dict.fromkeys((*MODULE_CHOICES, *ProcModule.known_names())):
                 taglist_path = fpath / f'{module}_tags.json'
                 if taglist_path.is_file():
                     paths_dict[module] = taglist_path
@@ -86,6 +91,7 @@ class TagsDB:
     @staticmethod
     def clear() -> None:
         TagsDB.DB.clear()
+        TagsDB.DBKeys.clear()
         TagsDB.DBFiles.clear()
 
     @staticmethod
@@ -108,11 +114,13 @@ class TagsDB:
                     except Exception:
                         continue
         except FileNotFoundError:
-            return
+            pass
+        # tag list files are not guaranteed to be sorted exactly as python compares strings
+        TagsDB.DBKeys[module] = sorted(TagsDB.DB[module].keys())
 
     @staticmethod
     def _get_tag_matches(module: str, tag: str) -> list[tuple[str, TagInfo]]:
-        arr = list(TagsDB.DB[module].keys())
+        arr = TagsDB.DBKeys.get(module) or []
         lb, ub = 0, len(arr) - 1
         while lb < ub:
             mid = lb + (ub - lb) // 2
@@ -124,7 +132,8 @@ class TagsDB:
         while lb < len(arr) and arr[lb].startswith(tag):
             gmatches.append(arr[lb])
             lb += 1
-        glist = [(g, TagsDB.DB[module][g]) for g in sorted(gmatches, reverse=True, key=lambda gmatch: TagsDB.DB[module][gmatch])]
+        # most popular tags first (TagInfo compares by tag type first, so sort by posts count explicitly)
+        glist = [(g, TagsDB.DB[module][g]) for g in sorted(gmatches, reverse=True, key=lambda gmatch: TagsDB.DB[module][gmatch].posts_count)]
         return glist
 
     @staticmethod
@@ -135,6 +144,26 @@ class TagsDB:
             base_matches = TagsDB._get_tag_matches(module, tag)
             matches.extend((mtag[len(tag):], tag_info) for mtag, tag_info in base_matches[:TAG_AUTOCOMPLETE_NUMBER_MAX])
         return matches
+
+    @staticmethod
+    def browse(module: str, prefix: str = '', *, offset=0, limit=100, min_posts=0, tag_types: Iterable[TagTypes] = (),
+               ) -> tuple[int, list[tuple[str, TagInfo]]]:
+        """A-Z tag browser: returns (total matches, page of tags sorted alphabetically) starting with prefix"""
+        TagsDB._load(module)
+        arr = TagsDB.DBKeys.get(module) or []
+        lb = bisect.bisect_left(arr, prefix)
+        types = set(tag_types)
+        matches: list[str] = []
+        for i in range(lb, len(arr)):
+            name = arr[i]
+            if not name.startswith(prefix):
+                break
+            info = TagsDB.DB[module][name]
+            if info.posts_count < min_posts or (types and info.tag_type not in types):
+                continue
+            matches.append(name)
+        page = matches[offset:offset + limit]
+        return len(matches), [(name, TagsDB.DB[module][name]) for name in page]
 
     @staticmethod
     def get_tag_info(module: str, tag: str) -> TagInfo | None:

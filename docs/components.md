@@ -1,0 +1,113 @@
+# Lustra — Components (kiến trúc & thành phần)
+
+> Phiên bản tài liệu: 2.0 r1 · Cập nhật: 2026-11-16 · Liên quan: [specs](specs.md), [user stories](user-stories.md), [use cases](use-cases.md), [acceptance criteria](acceptance-criteria.md), [dev log](dev_log.md)
+
+Lustra là bản phái sinh của **Ruxx** (trickerer01, MIT). Lõi tải xuống bằng Python được giữ lại và tái cấu trúc thành **registry extension**. Giao diện mới dùng **Electron**, nói chuyện với lõi qua **sidecar JSON-RPC**. Mỗi lượt tải chạy trong **một tiến trình CLI riêng**.
+
+## 1. Sơ đồ tổng thể
+
+```mermaid
+flowchart LR
+  subgraph Electron["Electron app (app/)"]
+    R["Renderer<br/>renderer/app.js<br/>(UI: search, A–Z, preview, jobs, settings)"]
+    P["preload.js<br/>contextBridge: window.lustra"]
+    M["main.js<br/>settings · secrets · jobs · thumbnails · appearance"]
+  end
+  subgraph Python["Lõi Python (lustra/)"]
+    S["server.py<br/>sidecar JSON-RPC (stdio)"]
+    C["lustra_cmd.py<br/>CLI + IPC mode"]
+    REG["extensions.py + modspec.py<br/>registry"]
+    D["download.py / download_base.py<br/>pipeline"]
+    N["network.py<br/>HTTP, retry, proxy, CF detect"]
+    T["tagsdb.py / tags_updater.py<br/>tag lists"]
+  end
+  subgraph Ext["Extensions"]
+    B1["builtin_ext/rule34 (rx)"]
+    B2["builtin_ext/danbooru (db)"]
+    X["extensions/* (catalog)<br/>user data dir/extensions/*"]
+  end
+  R -- IPC invoke/events --> P --> M
+  M -- "spawn: python -m lustra.server" --> S
+  M -- "spawn: LUSTRA_IPC=1 python -m lustra ..." --> C
+  M -- "lustra-thumb://" --> CDN[(Booru CDN)]
+  S --> REG --> D --> N --> API[(Booru API)]
+  C --> REG
+  S --> T
+  REG --> B1 & B2 & X
+  CRON["tools/cron · systemd timer"] --> T
+```
+
+## 2. Thành phần Python (`lustra/`)
+
+| Thành phần | File | Trách nhiệm |
+|---|---|---|
+| Entry | `__main__.py`, `lustra.py` | Có tham số → CLI, không có → GUI Tk cũ (legacy) |
+| CLI | `lustra_cmd.py`, `cmdargs.py` | Parse tham số (argparse), chọn module, chạy downloader. Khi `LUSTRA_IPC=1`: in dòng `@@LUSTRA_PROGRESS {json}` mỗi 0,4 s, nhận lệnh `cancel` qua stdin |
+| Sidecar | `server.py` | JSON-RPC 2.0 trên stdio cho UI: tags, preview, count, extension, cập nhật tag. Chuyển toàn bộ `print` sang stderr để giữ kênh giao thức sạch |
+| Registry module | `module.py` | `ProcModule`: id ổn định cho module mà lõi biết sẵn (rx=1 … bb=7, db=8); extension mới nhận id từ 100 trở lên (`register()`) |
+| Registry extension | `extensions.py`, `modspec.py` | Đọc `manifest.json`, kiểm tra schema, import class downloader (`importlib`), đăng ký cú pháp tag, giới hạn tag, tiền tố file. Cài từ catalog, thư mục, zip (bắt buộc sha256, chống zip-slip) hoặc URL; gỡ cài đặt |
+| Factory | `downloaders.py` | `DOWNLOADERS_BY_PROC_MODULE` do registry điền; `_make_downloader()` tự nạp catalog cho CLI/GUI cũ |
+| Pipeline | `download.py`, `download_base.py` | Parse tag → chia task → đếm → chia đôi (bisection) theo ngày/ID → quét trang song song → chuỗi bộ lọc → tải song song → ghi info JSON. Hook và `CAPABILITIES` thay cho các kiểm tra tên module viết cứng |
+| Mạng | `network.py` | `requests.Session` riêng cho mỗi thread. Retry có giới hạn, đọc `Retry-After`, dừng ngay khi gặp `cf-mitigated: challenge`, giãn cách request theo module, tải file theo `Range`, tuỳ chọn tải không qua proxy |
+| Cú pháp tag | `tags_parser.py`, `task.py`, `rex*.py` | Kiểm tra cú pháp; tách nhóm OR thành nhiều task; nhóm loại trừ `-(a,b)` thành regex; khi vượt giới hạn tag thì đẩy phần dư sang lọc cục bộ (cả tag phủ định lẫn tag dương, với module cho phép) |
+| Tag DB | `tagsdb.py` | Nạp `<abbr>_tags.json` theo kiểu lazy; autocomplete xếp theo số post; duyệt A–Z (`browse`) bằng tìm kiếm nhị phân trên danh sách khoá đã sắp xếp |
+| Cập nhật tag | `tags_updater.py`, `tools/update_tags.py` | Tải danh sách tag từ API: Rule34/Gelbooru dùng con trỏ `after_id`, Danbooru dùng `page=a<id>`, e621 dùng file export hằng ngày. Ghi file atomic, có kiểm tra sanity |
+| Module tích hợp sẵn | `download_rx.py` (+`download_gelbooru.py`), `download_db.py` | Rule34 (DAPI XML) và Danbooru (JSON API) |
+| Lọc giới tính (tầng 0) | `gender.py`, `gender_rules/{db,rx,en,gelbooru_generic}.json` | Suy nhãn `only_female/only_male/both/none/unknown` + độ tin cậy + cờ (futa, trap, other, anthro, pov, real) từ tag; `decide()` theo ngưỡng và chế độ strict. Bộ lọc `_filter_items_by_gender` chạy cuối chuỗi, không áp cho task parent |
+| An toàn | `safety.py` | Danh sách chặn cứng (token + tag cụ thể). `_filter_items_safety` chỉ chạy khi bật bộ lọc giới tính, cho mọi task kể cả parent. Không có API gỡ; extension chỉ thêm |
+| Tiện ích file | `file_tagger.py`, `file_sorter.py`, `file_searcher.py`, `file_parser.py` | Gỡ/gắn lại tag trên tên file, phân loại vào thư mục, tìm file trùng, đọc danh sách ID/info |
+| GUI cũ (Tk) | `gui.py`, `gui_base.py`, `gui_defines.py` | Giữ để tương thích; tkinter giờ là tuỳ chọn với lõi (`utils.confirm_yes_no` import lazy) |
+
+### 2.1. Hook và capability của downloader (mới)
+
+| Hook / thuộc tính | Mặc định | Ghi đè bởi |
+|---|---|---|
+| `CAPABILITIES` (`ModuleCaps`) | sources, date_filter, comments | mỗi module (rx: api_key, api_key_required, parent_child…; db: api_key, parent_child, preview…) |
+| `_parses_raw_pages()` | False | en, db (JSON) |
+| `_supports_native_date_filter()` | False | db (dùng metatag `date:a..b`) |
+| `_get_page_fetch_delay()` | 0 | rp, en, xb, bb: 1,0 s |
+| `_get_page_scan_threads_divisor()` | 2 | rp: 4 |
+| `_get_min_request_interval()` | 0 | en: 0,5 s; db: 0,25 s (dùng chung cho mọi thread) |
+| `_use_chunked_download()` | True | rx: chỉ với video |
+| `_fix_link_after_download_error()` | giữ link | rx: chuyển sang link gốc khi 404; rs: bỏ CDN |
+| `_solve_module_specific_conflicts()` | — | en: giới hạn 2 thread khi lấy bình luận |
+| `extract_preview_url()` | `preview_url` → `sample_url` → `<img src>` | — |
+
+## 3. Extension
+
+```
+lustra/builtin_ext/rule34/manifest.json      entry: lustra.download_rx:DownloaderRx  (default)
+lustra/builtin_ext/danbooru/manifest.json    entry: lustra.download_db:DownloaderDb  (default)
+extensions/<id>/{manifest.json, downloader.py}   catalog cục bộ: rule34hentai, rule34us, paheal, e621, xbooru, bbooru
+<data dir>/extensions/<id>/                  extension người dùng đã cài
+```
+
+- Thứ tự nạp: builtin → user → (catalog, chỉ cho CLI/GUI cũ hoặc khi gọi `_make_downloader` với module chưa nạp).
+- Extension ngoài chỉ được dùng entry dạng file (`downloader.py:Class`). Entry dạng module Python chỉ dành cho builtin.
+- Schema: [`schemas/extension-manifest.schema.json`](schemas/extension-manifest.schema.json).
+
+## 4. Electron (`app/`)
+
+| Thành phần | File | Trách nhiệm |
+|---|---|---|
+| Main | `main.js` | Vòng đời cửa sổ; dò Python (`settings.advanced.pythonPath` → `LUSTRA_PYTHON` → `.venv` → `python3`); quản lý sidecar (khởi động lại theo backoff, tối đa 5 lần); `Jobs` (hàng đợi, giới hạn số job song song, huỷ qua stdin, kill sau 15 s); settings JSON atomic; API key mã hoá bằng `safeStorage` (async); protocol `lustra-thumb://` (cache đĩa tối đa 512 MB, gửi Referer của site); proxy cho session thumbnail; đổi icon/nền; tạo launcher `.desktop`; chế độ tự kiểm thử `LUSTRA_SELFTEST_DIR` |
+| Preload | `preload.js` | Chỉ expose `window.lustra` (rpc, search, jobs, settings, secrets, dialogs, appearance, app, on). Renderer không thấy API key và không tự spawn tiến trình |
+| Renderer | `renderer/index.html`, `styles.css`, `app.js` | Ô nhập tag dạng chip + autocomplete; gộp tag (OR, nhóm loại trừ, đảo, tách); ngăn và trang A–Z; Đếm; Preview (lưới, chọn post, lightbox thêm tag); hàng đợi tải; Tags A–Z (trạng thái danh sách và cập nhật); Extensions; Settings (4 theme, icon, nền); Nhật ký |
+| Mock | `renderer/mock.js` | Giả lập `window.lustra` để chạy UI trong trình duyệt thường (thiết kế, kiểm thử) với thumbnail SVG trung tính |
+| Assets | `assets/icons/*.png` | 4 icon (512 px + 64 px) lấy từ bộ Lustra_8_Icons_1024 |
+
+### 4.1. Icon & hình nền
+- **Nền mặc định** là toàn bộ icon đang chọn, đặt giữa vùng nội dung và làm mờ (mặc định blur 4 px: hơi mờ nhưng vẫn rõ nét viền; độ hiện 90%, lớp phủ tối 18%). Nền nằm sau mọi panel; panel kính chỉ blur 3 px nên vẫn thấy rõ viền icon qua chúng. Thanh trượt độ mờ có dải 0–40 px.
+- **Nền tuỳ chọn** là ảnh do người dùng chọn, được copy vào `<userData>/backgrounds/` và **không làm mờ**.
+- **Đổi icon** có hiệu lực ngay trong app: logo, nền, `BrowserWindow.setIcon` (Windows/X11), `app.dock.setIcon` (macOS). Riêng trên **Wayland**, compositor lấy icon từ desktop entry, nên icon trên taskbar chỉ đổi sau khi mở lại app. Đây là lý do trước đây "phải relaunch mới load được". UI báo rõ điều này, có nút **Cập nhật launcher** (ghi `~/.local/share/applications/lustra.desktop` trỏ tới icon mới) và nút **Khởi động lại**.
+
+## 5. Công cụ & vận hành
+
+| Thành phần | Đường dẫn |
+|---|---|
+| Cập nhật tag (CLI) | `tools/update_tags.py` |
+| Đo độ phủ nhãn giới tính | `tools/gender_coverage.py` (chỉ đọc tag, không tải ảnh) → `docs/reports/gender-coverage-*.json` |
+| Cronjob | `tools/cron/lustra-update-tags.sh`, `tools/cron/crontab.example` |
+| systemd user timer | `tools/systemd/lustra-update-tags.{service,timer}` |
+| Test | `lustra/tests/tests.py` (gốc Ruxx), `lustra/tests/test_lustra.py`, `lustra/tests/test_gender.py` (mới) |
+| Build exe | `python lustra/release` (PyInstaller, kèm manifest builtin) |

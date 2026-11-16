@@ -13,10 +13,15 @@ from multiprocessing.dummy import current_process
 
 from bs4 import BeautifulSoup
 
-from .defines import FILE_NAME_FULL_MAX_LEN, FMT_DATE, DownloadModes, ItemInfo
+from .defines import (
+    FILE_NAME_FULL_MAX_LEN,
+    FMT_DATE,
+    DownloadModes,
+    ItemInfo,
+    ModuleCaps,
+)
 from .download import Downloader
 from .logger import trace
-from .module import ProcModule
 from .network import thread_exit
 from .rex import re_item_info_part_xml, re_orig_file_link, re_sample_file_link
 
@@ -29,6 +34,8 @@ class DownloaderGelbooru(Downloader):
     """
     DownloaderGelbooru !Abstract!
     """
+    CAPABILITIES = frozenset((ModuleCaps.PARENT_CHILD, ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS, ModuleCaps.PREVIEW))
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -154,7 +161,7 @@ class DownloaderGelbooru(Downloader):
             try:
                 return int(raw_html.html.find('posts').get('count'))
             except Exception:
-                if ProcModule.is_rx() and 'Missing authentication' in str(raw_html):
+                if self._has_capability(ModuleCaps.API_KEY) and 'Missing authentication' in str(raw_html):
                     thread_exit('FATAL: Invalid RX API key!', code=-478)
 
     def _get_image_address(self, h: str) -> tuple[str, str]:

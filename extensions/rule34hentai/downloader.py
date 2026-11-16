@@ -1,5 +1,6 @@
 # coding=UTF-8
 """
+Lustra extension 'rule34hentai' (rn). Originally part of Ruxx core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -14,7 +15,7 @@ from typing import Never, final
 
 from bs4 import BeautifulSoup
 
-from .defines import (
+from lustra.defines import (
     FILE_NAME_FULL_MAX_LEN,
     FILE_NAME_PREFIX_RN,
     FMT_DATE,
@@ -26,11 +27,12 @@ from .defines import (
     Comment,
     DownloadModes,
     ItemInfo,
+    ModuleCaps,
 )
-from .download import Downloader
-from .logger import trace
-from .network import HTMLContent, thread_exit
-from .rex import (
+from lustra.download import Downloader
+from lustra.logger import trace
+from lustra.network import HTMLContent, thread_exit
+from lustra.rex import (
     re_item_info_part_rn,
     re_shimmie_image_href,
     re_shimmie_image_href_full,
@@ -55,6 +57,8 @@ class DownloaderRn(Downloader):
     """
     DownloaderRn
     """
+    CAPABILITIES = frozenset((ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS))
+
     def __init__(self) -> None:
         super().__init__()
 

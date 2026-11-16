@@ -9,6 +9,7 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 from __future__ import annotations
 
 import datetime
+import email.utils
 import os
 import pathlib
 import re
@@ -17,9 +18,8 @@ import time
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from multiprocessing.dummy import current_process
-from threading import Lock, Thread
+from threading import Lock, Thread, local
 from typing import NamedTuple
-from urllib import parse as url_parse
 from warnings import filterwarnings
 
 from bs4 import BeautifulSoup
@@ -28,15 +28,16 @@ from requests import Response, Session, adapters, exceptions, structures
 from .defines import (
     CONNECT_RETRIES_BASE,
     CONNECT_RETRIES_CHUNK,
+    CONNECT_RETRIES_PROXY_MULT,
     CONNECT_TIMEOUT_BASE,
     DOWNLOAD_CHUNK_SIZE,
     KNOWN_EXTENSIONS_VID,
+    RETRY_AFTER_MAX_SECONDS,
     WRITE_CHUNK_SIZE,
     DownloadModes,
     ThreadInterruptException,
 )
 from .logger import trace
-from .module import ProcModule
 from .useragent import UAManager
 from .utils import format_exception
 
@@ -45,6 +46,40 @@ __all__ = ('DownloadInterruptException', 'HTMLContent', 'ThreadedHtmlWorker', 't
 filterwarnings('ignore', category=UserWarning)
 
 CLIENT_CONNECTOR_ERRORS = (exceptions.ProxyError, exceptions.SSLError)
+PART_SUFFIX = '.part'
+'''incomplete downloads'''
+'''errors which do not consume normal retries (proxy hiccups), see CONNECT_RETRIES_PROXY_MULT for their cap'''
+
+
+def parse_retry_after(value: str | None) -> float:
+    """Parses 'Retry-After' header (delta-seconds or HTTP-date), returns 0 if absent or invalid"""
+    if not value:
+        return 0.0
+    value = value.strip()
+    try:
+        return min(float(max(0, int(value))), RETRY_AFTER_MAX_SECONDS)
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+        delta = (when - datetime.datetime.now(when.tzinfo)).total_seconds()
+        return min(max(0.0, delta), RETRY_AFTER_MAX_SECONDS)
+    except Exception:
+        return 0.0
+
+
+def is_cloudflare_challenge(response: Response | None) -> bool:
+    """True if the response is a Cloudflare bot challenge page (cannot be passed by a plain HTTP client)"""
+    if response is None or response.status_code not in (403, 429, 503):
+        return False
+    return response.headers.get('cf-mitigated', '').lower() == 'challenge'
+
+
+CF_CHALLENGE_HINT = (
+    'Website responded with a bot challenge page (cf-mitigated: challenge). Lustra does not bypass bot protection. '
+    'If you have an account: log in using your browser, then copy your \'cf_clearance\' cookie and browser \'User-Agent\' '
+    'into Connection -> Headers / Cookies. Otherwise try again later.'
+)
 
 re_content_range_str = re.compile(r'bytes (\d+)-(\d+)?(?:/(\d+))?')
 
@@ -118,6 +153,14 @@ class ThreadedHtmlWorker(ThreadedWorker):
         self.retries: int = CONNECT_RETRIES_BASE
         self.etags: dict[str, str] = {}
         self.session: Session | None = None
+        self._tls = local()
+        self._sessions_lock: Lock = Lock()
+        self._thread_sessions: list[Session] = []
+        self._cookies_lock: Lock = Lock()
+        self._rate_lock: Lock = Lock()
+        self._last_request_ts: float = 0.0
+        self.cf_challenge_hit: bool = False
+        '''set if the website responded with a bot challenge, UI may show a hint'''
 
     @abstractmethod
     def _get_sitename(self) -> str:
@@ -131,7 +174,19 @@ class ThreadedHtmlWorker(ThreadedWorker):
     def _get_module_specific_default_cookies(self) -> dict[str, str]:
         ...
 
-    def make_session(self) -> Session:
+    def _get_min_request_interval(self) -> float:
+        """Minimal interval between API/html requests across all threads (seconds), modules override to respect site rate limits"""
+        return 0.0
+
+    def _use_chunked_download(self, is_video_ext: bool) -> bool:
+        """Whether file should be downloaded using multiple ranged requests"""
+        return True
+
+    def _fix_link_after_download_error(self, link: str, original_link: str, err: Exception) -> str:
+        """Module hook: returns a new link to retry with (ex. alternative cdn host) or the same link"""
+        return link
+
+    def make_session(self, *, for_download=False) -> Session:
         s = Session()
         s.adapters.clear()
         s.mount('http://', adapters.HTTPAdapter(pool_maxsize=1, max_retries=0))
@@ -141,9 +196,40 @@ class ThreadedHtmlWorker(ThreadedWorker):
         s.headers['User-Agent'] = UAManager.orig_user_agent()
         s.headers.update(self.add_headers.copy())
         s.cookies.update(self.add_cookies.copy())
-        if self.proxies and not self.ignore_proxy:
+        if self.proxies and not self.ignore_proxy and not (for_download and self.ignore_proxy_dwn):
             s.proxies.update(self.proxies.copy())
         return s
+
+    def _thread_session(self) -> Session:
+        """requests.Session is not guaranteed to be thread-safe: every worker thread gets its own session"""
+        if current_process() == self.my_root_thread or self.my_root_thread is None:
+            if self.session is None:
+                self.session = self.make_session()
+            return self.session
+        s: Session | None = getattr(self._tls, 'session', None)
+        if s is None:
+            s = self.make_session()
+            self._tls.session = s
+            with self._sessions_lock:
+                self._thread_sessions.append(s)
+        return s
+
+    def close_sessions(self) -> None:
+        with self._sessions_lock:
+            for s in self._thread_sessions:
+                s.close()
+            self._thread_sessions.clear()
+        self._tls = local()
+
+    def _respect_rate_limit(self) -> None:
+        interval = self._get_min_request_interval()
+        if interval <= 0:
+            return
+        with self._rate_lock:
+            wait = self._last_request_ts + interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_ts = time.monotonic()
 
     def _parse_args(self, args: Namespace) -> None:
         self.verbose = args.verbose or self.verbose
@@ -164,6 +250,7 @@ class ThreadedHtmlWorker(ThreadedWorker):
                 container_base[pair[0]] = pair[1]
         self.add_headers.update(self._get_module_specific_default_headers())
         self.add_cookies.update(self._get_module_specific_default_cookies())
+        self.close_sessions()
         self.session = self.make_session()
 
     # threaded
@@ -177,11 +264,19 @@ class ThreadedHtmlWorker(ThreadedWorker):
         result = FileDownloadResult()
         result.result_str = f'[{current_process().name}]{" <touch>" if mode == DownloadModes.TOUCH else ""} {item_id}({ext_char})... '
 
+        # data is written to '<name>.part' and renamed only when complete: an interrupted run never leaves
+        # a truncated file under the final name (which later runs would treat as already downloaded)
+        part = dest.with_name(f'{dest.name}{PART_SUFFIX}')
+        if mode == DownloadModes.FULL and dest.is_file() and dest.stat().st_size > 0:
+            result.file_size = result.expected_size = dest.stat().st_size
+            result.result_str = f'{result.result_str}already exists, '
+            return result
+
         if mode == DownloadModes.TOUCH:
-            with open(dest, 'wb'):
-                pass
+            dest.touch(exist_ok=True)  # never truncates an existing file
         elif mode == DownloadModes.FULL:
-            with self.make_session() as s:
+            conn_errors = 0
+            with self.make_session(for_download=True) as s:
                 s.stream = True
                 while (not (dest.is_file() and result.file_size == result.expected_size)) and result.retries < self.retries:
                     if self.is_killed():
@@ -253,11 +348,11 @@ class ThreadedHtmlWorker(ThreadedWorker):
                             err_msg = f'Warning (W2): fetched {item_id}({ext_char}) file is empty.'
                             raise ValueError(err_msg)
 
-                        use_chunked = is_video_ext if ProcModule.is_rx() else True
+                        use_chunked = self._use_chunked_download(is_video_ext)
                         chunks = list(range(0, result.expected_size, DOWNLOAD_CHUNK_SIZE if use_chunked else result.expected_size))
                         single_chunk = len(chunks) == 1
-                        with open(dest, 'wb') as outf:
-                            creation_time_ns = int(dest.stat().st_ctime_ns) if modification_time_ns else 0
+                        with open(part, 'wb') as outf:
+                            creation_time_ns = int(part.stat().st_ctime_ns) if modification_time_ns else 0
                             i = 0
                             chunk_tries = 0
                             while i < len(chunks):
@@ -284,51 +379,40 @@ class ThreadedHtmlWorker(ThreadedWorker):
                                 chunk_tries = 0
                                 i += 1
 
-                        result.file_size = dest.stat().st_size
+                        result.file_size = part.stat().st_size
                         if result.file_size != result.expected_size:
                             trace(f'Warning (W3): size mismatch for {item_id} ({result.file_size:d} / {result.expected_size:d}).'
                                   f' Retrying file.', True)
-                            dest.unlink(missing_ok=True)
+                            part.unlink(missing_ok=True)
                             result.file_size = 0
                             raise OSError
+                        os.replace(part, dest)
                         if creation_time_ns and modification_time_ns:
                             os.utime(dest, ns=(creation_time_ns, modification_time_ns))
                     except (KeyboardInterrupt, ThreadInterruptException):
-                        if dest.is_file():
-                            result.file_size = dest.stat().st_size
-                            if result.file_size != result.expected_size:
-                                dest.unlink()
-                                result.file_size = 0
+                        part.unlink(missing_ok=True)
+                        result.file_size = 0
                         trace(f'{result.result_str}{("interrupted by user." if current_process() == self.my_root_thread else "")}', True)
                         raise DownloadInterruptException
                     except Exception as err:
-                        if isinstance(err, exceptions.HTTPError) and err.response.status_code == 404:  # RS cdn error
-                            if ProcModule.is_rs():
-                                hostname: str = url_parse.urlparse(link).hostname or 'unk'
-                                if hostname.startswith('video') and '-cdn' in hostname:
-                                    trace(f'Warning (W3): {item_id} catched HTTPError 404 (host: {hostname})! '
-                                          f'Trying no-cdn source...', True)
-                                    re_vhost_cdn = re.compile(r'-cdn\d')  # video-cdn1.rs
-                                    link = re_vhost_cdn.sub('', link)
-                            elif ProcModule.is_rx():
-                                if link != oldlink:
-                                    trace(f'Warning (W3): {item_id} catched HTTPError 404 for normalized link. '
-                                          f'Switching to slow link \'{oldlink}\'...', True)
-                                    link = oldlink
-                        if isinstance(err, exceptions.ConnectionError) and err.response is None:  # RS cdn error
-                            if ProcModule.is_rs():
-                                hostname: str = url_parse.urlparse(link).hostname or 'unk'
-                                if hostname.startswith('video') and '-cdn' in hostname:
-                                    trace(f'Warning (W3): {item_id} catched ConnectionError (host: {hostname})! '
-                                          f'Trying no-cdn source...', True)
-                                    re_vhost_cdn = re.compile(r'-cdn\d')  # video-cdn1.rs
-                                    link = re_vhost_cdn.sub('', link)
+                        if isinstance(err, exceptions.HTTPError) and is_cloudflare_challenge(err.response):
+                            self.cf_challenge_hit = True
+                            trace(f'{result.result_str}failed: {CF_CHALLENGE_HINT}', True)
+                            result.retries = self.retries
+                            break
+                        link = self._fix_link_after_download_error(link, oldlink, err)
                         if isinstance(err, exceptions.HTTPError) and err.response.status_code == 416:  # Requested range is not satisfiable
                             trace(f'Warning (W3): {item_id} catched HTTPError 416!', True)
-                            dest.unlink(missing_ok=True)
+                            part.unlink(missing_ok=True)
                             result.file_size = 0
                         if not isinstance(err, CLIENT_CONNECTOR_ERRORS):
                             result.retries += 1
+                        else:
+                            conn_errors += 1
+                            if conn_errors >= self.retries * CONNECT_RETRIES_PROXY_MULT:
+                                trace(f'{result.result_str}too many proxy / ssl errors ({conn_errors:d}), giving up', True)
+                                result.retries = self.retries
+                                break
                         trace(f'{result.result_str}{format_exception("row")} retry {result.retries:d}...', True)
                         if not self.is_killed():
                             time.sleep(2)
@@ -339,29 +423,44 @@ class ThreadedHtmlWorker(ThreadedWorker):
     def wrap_request(self, url: str, tries: int, method: str, **kwargs) -> Response | None:
         r: Response | None = None
         retries = 0
+        conn_errors = 0
+        max_conn_errors = max(1, tries) * CONNECT_RETRIES_PROXY_MULT
+        session = self._thread_session()
         while retries < tries:
             self.catch_cancel_or_ctrl_c()
             r = None
             try:
-                r = self.session.request(method, url, timeout=self.timeout, stream=False, allow_redirects=True, **kwargs)
+                self._respect_rate_limit()
+                r = session.request(method, url, timeout=self.timeout, stream=False, allow_redirects=True, **kwargs)
                 r.raise_for_status()
                 break
             except (KeyboardInterrupt, ThreadInterruptException):
                 thread_exit('interrupted by user.', code=1)
             except Exception as err:
-                if not isinstance(err, CLIENT_CONNECTOR_ERRORS):
+                if isinstance(err, CLIENT_CONNECTOR_ERRORS):
+                    conn_errors += 1
+                    if conn_errors >= max_conn_errors:
+                        trace(f'Too many proxy / ssl errors ({conn_errors:d}), check your proxy settings. Aborting {url}', True)
+                        return None
+                else:
                     retries += 1
                 sleep_time = 1.0
                 threadname = f'{current_process().name}: ' if current_process() != self.my_root_thread else ''
-                if isinstance(err, exceptions.HTTPError) and err.response.status_code == 404:
-                    if r is not None and r.content and len(r.content.decode()) > 2:
+                response = err.response if isinstance(err, exceptions.HTTPError) else None
+                if is_cloudflare_challenge(response):
+                    self.cf_challenge_hit = True
+                    trace(f'{threadname}{CF_CHALLENGE_HINT}\nAborting {url}', True)
+                    return None
+                if response is not None and response.status_code == 404:
+                    if r is not None and r.content and len(r.content.decode(errors='replace')) > 2:
                         trace(f'{threadname}received code 404 but received html'
                               f'\n{format_exception("row").strip()}.\nContinuing...', True)
                         break
                     trace(f'{threadname}catched err 404 {format_exception("row")}. Aborting...', True)
                     return None
-                elif isinstance(err, exceptions.HTTPError) and err.response.status_code == 429:  # Too Many Requests
-                    sleep_time += float(min(9, retries))
+                elif response is not None and response.status_code in (429, 503):  # Too Many Requests / Service Unavailable
+                    retry_after = parse_retry_after(response.headers.get('Retry-After'))
+                    sleep_time = retry_after if retry_after > 0 else sleep_time + float(min(9, retries))
                     trace(f'{threadname}catched {format_exception("row")}.'
                           f'{f" Reconnecting in {sleep_time:.1f} sec... {retries:d}" if retries < tries else ""}', True)
                 else:
@@ -377,9 +476,10 @@ class ThreadedHtmlWorker(ThreadedWorker):
         elif r is None:
             trace('ERROR: Failed to receive any data', True)
         elif len(r.cookies) > 0:
-            t = self.add_cookies.copy()
-            self.add_cookies = r.cookies.copy()
-            self.add_cookies.update(t)
+            with self._cookies_lock:
+                t = self.add_cookies.copy()
+                self.add_cookies = r.cookies.copy()
+                self.add_cookies.update(t)
 
         return r
 

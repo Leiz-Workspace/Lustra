@@ -37,11 +37,13 @@ from .defines import (
     DownloadModes,
     ItemInfo,
     Mem,
+    ModuleCaps,
     ModuleConfigType,
     ThreadInterruptException,
 )
 from .download_base import DownloaderBase
 from .file_parser import prepare_item_infos_dict
+from .gender import GenderConf
 from .gui_defines import NEWLINE, OPTION_CMD_APIKEY_CMD, UNDERSCORE
 from .logger import trace
 from .module import ProcModule
@@ -80,6 +82,8 @@ class Downloader(DownloaderBase):
         self._thread_exception_lock = Lock()
         self._thread_exceptions: dict[str, list[str]] = {}
         self._file_name_ext_cache: dict[str, tuple[str, str]] = {}
+        self.no_conflict_delay: bool = False
+        '''interactive frontends (desktop sidecar) skip the 2s pause after argument conflict warnings'''
 
     @property
     def total_count_all(self) -> int:
@@ -233,7 +237,7 @@ class Downloader(DownloaderBase):
                         trace(f'Warning (W2): search was dropped on page {pnum:d} (too many threads?), retrying...', True)
                         raise KeyError
 
-                    items_raw_temp = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, ProcModule.is_en())
+                    items_raw_temp = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, self._parses_raw_pages())
                     if len(items_raw_temp) == 0:
                         trace(f'ERROR: ProcPage: cannot find picture or video on page {pnum:d}, retrying...', True)
                         if __LUSTRA_DEBUG__:
@@ -253,8 +257,8 @@ class Downloader(DownloaderBase):
             with self.items_all_lock:
                 self.total_count = sum(len(self.items_raw_per_page[_]) for _ in self.items_raw_per_page)
 
-            if ProcModule.is_rp() or ProcModule.is_en() or ProcModule.is_xb() or ProcModule.is_bb():
-                time.sleep(1.0)
+            if (page_delay := self._get_page_fetch_delay()) > 0:
+                time.sleep(page_delay)
         except Exception:
             self._on_thread_exception(current_process().name)
             raise
@@ -311,7 +315,7 @@ class Downloader(DownloaderBase):
 
             def page_filter(st: DownloaderStates, di: bool) -> int:
                 self.current_state = st
-                if not self.favorites_search_user and not self.pool_search_str:
+                if not self.favorites_search_user and not self.pool_search_str and not self._supports_native_date_filter():
                     trace(f'Looking for {"min" if di else "max"} page by date...')
                     return self._get_page_boundary_by_date(di)
                 else:
@@ -335,7 +339,7 @@ class Downloader(DownloaderBase):
                 arr_temp = [(n, n - self.minpage + 1, self.maxpage) for n in range(self.minpage, self.maxpage + 1)]
 
                 active_pool: ThreadPool
-                with Pool(max(2, self.maxthreads_items // (4 if ProcModule.is_rp() else 2))) as active_pool:
+                with Pool(max(2, self.maxthreads_items // max(1, self._get_page_scan_threads_divisor()))) as active_pool:
                     ress = deque(active_pool.apply_async(self._get_page_items, args=larr) for larr in arr_temp)
                     while len(ress) > 0:
                         self.catch_cancel_or_ctrl_c()
@@ -450,10 +454,15 @@ class Downloader(DownloaderBase):
         # custom filters may exclude certain items from the infos dict
         task_parents: set[str] = set()
         self._extract_cur_task_infos(task_parents)
+        # safety blacklist: every task incl. parent tasks, only while the content filter is enabled (no-op otherwise)
+        self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_safety, task_parents)
 
         if self.current_task_num <= self.orig_tasks_count:
             self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_matching_negative_and_groups, task_parents)
+            self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_missing_required_tags, task_parents)
             self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_by_module_filters, task_parents)
+            # gender filter last: runs on the fewest items; parent tasks are user-requested context and are not gender-filtered
+            self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_by_gender, task_parents)
 
         self.items_raw_all: list[str] = unique_ordered(itertools.chain(self.items_raw_all, self.items_raw_per_task))
         self.item_info_dict_all.update(self.item_info_dict_per_task)
@@ -531,7 +540,8 @@ class Downloader(DownloaderBase):
 
     def _extract_negative_and_groups(self) -> None:
         split_always = self._split_or_group_into_tasks_always()
-        self.tags_str_arr[:], self.neg_and_groups = extract_neg_and_groups(' '.join(self.tags_str_arr), split_always)
+        self.required_tags.clear()
+        self.tags_str_arr[:], self.neg_and_groups = extract_neg_and_groups(' '.join(self.tags_str_arr), split_always, self.required_tags)
 
     def _parse_tags(self) -> None:
         cc = self._get_tags_concat_char()
@@ -557,6 +567,8 @@ class Downloader(DownloaderBase):
         trace(f'Starting {self._get_module_abbr().upper()} downloader', timestamp=True)
         trace(f'\nDownload mode: \'{self.download_mode}\'')
         trace(f'{len(self.neg_and_groups):d} \'excluded tags combination\' custom filter(s) parsed')
+        if self.required_tags:
+            trace(f'{len(self.required_tags):d} tag(s) will be checked locally: {" ".join(self.required_tags)}')
         trace(f'{self._tasks_count():d} task(s) scheduled:\n{NEWLINE.join(self.tags_str_arr)}\n\n{BR}')
         self.current_task_num = 0
         while self.current_task_num < self._tasks_count():  # tasks count may increase during this loop
@@ -678,6 +690,10 @@ class Downloader(DownloaderBase):
         self.subfolder_img = args.imgsub or self.subfolder_img
         self.warn_nonempty = args.warn_nonempty or self.warn_nonempty
         self.api_key = APIKey(args.api_key) or self.api_key
+        self.gender_select = frozenset(getattr(args, 'gender', None) or ()) or self.gender_select
+        self.gender_mode = getattr(args, 'gender_mode', None) or self.gender_mode
+        self.gender_min_conf = GenderConf.parse(args.gender_conf) if getattr(args, 'gender_conf', None) else self.gender_min_conf
+        self.gender_strict = getattr(args, 'gender_strict', False) or self.gender_strict
         self.tags_str_arr[:] = [] if self.get_max_id else convert_taglist(args.tags)
         self._extract_negative_and_groups()
         self._extract_custom_argument_tags()
@@ -685,7 +701,7 @@ class Downloader(DownloaderBase):
             self._try_preprocess_favorites()
             self._try_preprocess_pool()
         self._parse_tags()
-        if self._solve_argument_conflicts():
+        if self._solve_argument_conflicts() and not self.no_conflict_delay:
             time.sleep(2.0)
 
     def _solve_argument_conflicts(self) -> bool:
@@ -701,45 +717,43 @@ class Downloader(DownloaderBase):
             trace('Warning (W1): argument \'-warn_nonempty\' is ignored in non-GUI mode')
             self.warn_nonempty = False
             ret = True
-        if ProcModule.is_rx():
-            if not self.api_key:
-                trace(f'Warning (W3): NO \'{ProcModule.name().upper()}\' API KEY PROVIDED! DEFAULT API KEY MAY STOP WORKING AT ANY MOMENT!')
-                ret = True
-        if not ProcModule.is_rx():
-            if self.api_key:
-                trace(f'Warning (W1): \'-api_key\' option is not available for \'{ProcModule.name().upper()}\' module. Ignored!')
-                ret = True
-        if not ProcModule.is_rs():
+        abbr = ProcModule.name().upper()
+        if self._has_capability(ModuleCaps.API_KEY_REQUIRED) and not self.api_key:
+            trace(f'Warning (W3): NO \'{abbr}\' API KEY PROVIDED! DEFAULT API KEY MAY STOP WORKING AT ANY MOMENT!')
+            ret = True
+        if not self._has_capability(ModuleCaps.API_KEY) and self.api_key:
+            trace(f'Warning (W1): \'-api_key\' option is not available for \'{abbr}\' module. Ignored!')
+            ret = True
+        if not self._has_capability(ModuleCaps.VIDEO_FORMAT_CHOICE):
             if self.prefer_webm:
-                trace(f'Warning (W1): \'-webm\' option is not available for \'{ProcModule.name().upper()}\' module. Ignored!')
+                trace(f'Warning (W1): \'-webm\' option is not available for \'{abbr}\' module. Ignored!')
                 ret = True
             if self.prefer_mp4:
-                trace(f'Warning (W1): \'-mp4\' option is not available for \'{ProcModule.name().upper()}\' module. Ignored!')
+                trace(f'Warning (W1): \'-mp4\' option is not available for \'{abbr}\' module. Ignored!')
                 ret = True
-        if not ProcModule.is_rx() and not ProcModule.is_en() and not ProcModule.is_xb() and not ProcModule.is_bb():
-            if self.include_parchi:
-                trace('Warning (W1): only RX, EN, XB, and BB modules are able to collect parent posts. Disabled!')
-                self.include_parchi = False
+        if not self._has_capability(ModuleCaps.PARENT_CHILD) and self.include_parchi:
+            trace(f'Warning (W1): \'{abbr}\' module is unable to collect parent posts. Disabled!')
+            self.include_parchi = False
+            ret = True
+        if not self._has_capability(ModuleCaps.SOURCES) and self.dump_sources:
+            trace(f'Warning (W1): \'{abbr}\' module is unable to collect sources. Disabled!')
+            self.dump_sources = False
+            ret = True
+        if not self._has_capability(ModuleCaps.DATE_FILTER) and (self.date_min != DATE_MIN_DEFAULT or self.date_max != DATE_MAX_DEFAULT):
+            trace(f'Warning (W1): \'{abbr}\' module is unable to filter by date. Disabled!')
+            self.date_min, self.date_max = DATE_MIN_DEFAULT, DATE_MAX_DEFAULT
+            ret = True
+        if not self._has_capability(ModuleCaps.COMMENTS) and self.dump_comments:
+            trace(f'Warning (W1): \'{abbr}\' module comments collection is disabled.')
+            self.dump_comments = False
+            ret = True
+        if self.gender_select:
+            if self.gender_mode == 'model':
+                thread_exit('Error: \'-gender_mode model\' needs the gender model which is not available yet. Use \'-gender_mode tags\'')
+            if not self._has_capability(ModuleCaps.GENDER_TAGS):
+                trace(f'Warning (W2): \'{abbr}\' module has no measured gender tag rules, most posts will be labeled \'unknown\'')
                 ret = True
-        if ProcModule.is_rs():
-            if self.dump_sources:
-                trace('Warning (W1): RS module is unable to collect sources. Disabled!')
-                self.dump_sources = False
-                ret = True
-            if self.date_min != DATE_MIN_DEFAULT or self.date_max != DATE_MAX_DEFAULT:
-                trace('Warning (W1): RS module is unable to filter by date. Disabled!')
-                self.date_min, self.date_max = DATE_MIN_DEFAULT, DATE_MAX_DEFAULT
-                ret = True
-        if ProcModule.is_en():
-            if self.dump_comments and self.maxthreads_items > 2 and not self.check_tags and not self.get_max_id:
-                trace('Warning (W1): EN module can\'t fetch comments faster than 2/sec due to API limitation. Forcing 2 download threads!')
-                self.maxthreads_items = 2
-                ret = True
-        if ProcModule.is_xb() or ProcModule.is_bb():
-            if self.dump_comments:
-                trace('Warning (W1): XB and BB module comments collection is disabled.')
-                self.dump_comments = False
-                ret = True
+        ret |= self._solve_module_specific_conflicts()
         return ret
 
     def _extract_cur_task_infos(self, parents: MutableSet[str]) -> None:

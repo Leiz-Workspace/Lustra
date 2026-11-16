@@ -14,10 +14,11 @@ from .defines import (
     DMODE_CHOICES,
     DMODE_DEFAULT,
     MODULE_ABBR_RX,
-    MODULE_CHOICES,
     THREADS_MAX_ITEMS,
 )
 from .gui_defines import (
+    GENDER_CONFS,
+    GENDER_MODES,
     OPTION_CMD_APIKEY_CMD,
     OPTION_CMD_APPEND_SOURCE_AND_TAGS,
     OPTION_CMD_COOKIES_CMD,
@@ -27,6 +28,10 @@ from .gui_defines import (
     OPTION_CMD_DOWNLOAD_ORDER,
     OPTION_CMD_DOWNMODE_CMD,
     OPTION_CMD_FNAMEPREFIX,
+    OPTION_CMD_GENDER_CMD,
+    OPTION_CMD_GENDER_CONF_CMD,
+    OPTION_CMD_GENDER_MODE_CMD,
+    OPTION_CMD_GENDER_STRICT,
     OPTION_CMD_GET_MAXID_CMD,
     OPTION_CMD_HEADERS_CMD,
     OPTION_CMD_HIDE_PERSONAL_INFO,
@@ -66,6 +71,10 @@ from .help import (
     HELP_ARG_DUMP_PER_ITEM,
     HELP_ARG_DUMP_SOURCES,
     HELP_ARG_DUMP_TAGS,
+    HELP_ARG_GENDER,
+    HELP_ARG_GENDER_CONF,
+    HELP_ARG_GENDER_MODE,
+    HELP_ARG_GENDER_STRICT,
     HELP_ARG_GET_MAXID,
     HELP_ARG_HEADER,
     HELP_ARG_HEADERS,
@@ -102,6 +111,7 @@ from .validators import (
     valid_date,
     valid_folder_name,
     valid_folder_path,
+    valid_gender_list,
     valid_json,
     valid_kwarg,
     valid_positive_int,
@@ -152,7 +162,7 @@ def _create_parsers() -> dict[str, ArgumentParser]:
 
 def _add_common_args(par: ArgumentParser) -> None:
     op = par.add_argument_group(title='options')
-    op.add_argument(OPTION_CMD_MODULE_CMD, default=MODULE_ABBR_RX, help=HELP_ARG_MODULE, choices=MODULE_CHOICES)
+    op.add_argument(OPTION_CMD_MODULE_CMD, default=MODULE_ABBR_RX, help=HELP_ARG_MODULE, choices=ProcModule.known_names())
     op.add_argument(dest='tags', nargs=ZERO_OR_MORE, action='extend', help=HELP_ARG_TAGS)
     co = par.add_argument_group(title='connection options')
     co.add_argument(OPTION_CMD_PROXY_CMD, metavar='#type://[user:pass@]a.d.d.r:port', help=HELP_ARG_PROXY, type=valid_proxy)
@@ -193,6 +203,10 @@ def _add_common_args(par: ArgumentParser) -> None:
     dofi = par.add_argument_group(title='filtering options')
     dofi.add_argument(OPTION_CMD_DATEAFTER_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MINDATE, type=valid_date)
     dofi.add_argument(OPTION_CMD_DATEBEFORE_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MAXDATE, type=valid_date)
+    dofi.add_argument(OPTION_CMD_GENDER_CMD, metavar='#LABEL[,LABEL...]', help=HELP_ARG_GENDER, type=valid_gender_list)
+    dofi.add_argument(OPTION_CMD_GENDER_MODE_CMD, choices=GENDER_MODES, help=HELP_ARG_GENDER_MODE)
+    dofi.add_argument(OPTION_CMD_GENDER_CONF_CMD, choices=GENDER_CONFS, help=HELP_ARG_GENDER_CONF)
+    dofi.add_argument(OPTION_CMD_GENDER_STRICT[True], action=ACTION_STORE_TRUE, help=HELP_ARG_GENDER_STRICT)
     dona = par.add_argument_group(title='naming options')
     dona.add_argument(OPTION_CMD_FNAMEPREFIX[True], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFIX)
     dona.add_argument(OPTION_CMD_APPEND_SOURCE_AND_TAGS[True], action=ACTION_STORE_TRUE, help=HELP_ARG_APPEND_SOURCE_AND_TAGS)
@@ -231,6 +245,8 @@ def _validate_parsed(parser: ArgumentParser, args: list[str] | tuple[str, ...]) 
 
 
 def prepare_arglist(args: list[str] | tuple[str, ...]) -> Namespace:
+    from .extensions import Extensions
+    Extensions.ensure_loaded(include_catalog=True)  # extensions may add module abbreviations
     parsers = _create_parsers()
     parser_root = parsers[PARSER_TITLE_NONE]
     pcmd = parsers[PARSER_TITLE_CMD]

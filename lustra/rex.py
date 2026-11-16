@@ -115,6 +115,7 @@ re_ask_values = re.compile(r'[^, ]+')
 re_json_entry_value = re.compile(r'^([^: ,]+)[: ,](.+)$')
 
 re_api_key_user = re.compile(r'&api_key=\w+&user_id=\d+')
+re_api_credentials = re.compile(r'(?<=[?&])(api_key|login|user_id)=[^&\s"]+')
 
 re_meta_group = re.compile(r'^([^(]+)\(([^)]+)\).*?$')
 re_not_a_letter = re.compile(r'[^a-z]+')

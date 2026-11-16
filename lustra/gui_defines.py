@@ -57,7 +57,7 @@ OPTION_VALUES_IMAGES = ('Don\'t download', 'Prefer low res', 'Prefer high res')
 OPTION_VALUES_THREADING = ('1 Thread', '2 Threads', '3 Threads', '4 Threads', '5 Threads', '6 Threads', '7 Threads', '8 Threads')
 OPTION_VALUES_PARCHI = ('Don\'t download', 'Download everything')
 OPTION_VALUES_DOWNLOAD_ORDER = ('Default', 'Reverse')
-OPTION_VALUES_PROXYTYPE = ('http', 'socks5')
+OPTION_VALUES_PROXYTYPE = ('http', 'socks5', 'socks5h', 'https')
 OPTION_CMD_VIDEOS = ('-skip_vid', '-mp4', '-webm', '')
 OPTION_CMD_IMAGES = ('-skip_img', '-lowres', '')
 OPTION_CMD_HIDE_PERSONAL_INFO = ('', '-hide_personal_info')
@@ -92,6 +92,12 @@ OPTION_CMD_PATH_CMD = '-path'
 OPTION_CMD_PATH_SUB_VID = '-vidsub'
 OPTION_CMD_PATH_SUB_IMG = '-imgsub'
 OPTION_CMD_MODULE_CMD = '-module'
+OPTION_CMD_GENDER_CMD = '-gender'
+OPTION_CMD_GENDER_MODE_CMD = '-gender_mode'
+OPTION_CMD_GENDER_CONF_CMD = '-gender_conf'
+OPTION_CMD_GENDER_STRICT = ('', '-gender_strict')
+GENDER_MODES = ('tags', 'model')
+GENDER_CONFS = ('low', 'medium', 'high')
 # non-gui
 OPTION_CMD_GET_MAXID_CMD = '-get_maxid'
 # Sizes

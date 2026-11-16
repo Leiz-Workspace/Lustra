@@ -1,5 +1,6 @@
 # coding=UTF-8
 """
+Lustra extension 'paheal' (rp). Originally part of Ruxx core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -14,7 +15,7 @@ from typing import Never, final
 
 from bs4 import BeautifulSoup
 
-from .defines import (
+from lustra.defines import (
     FILE_NAME_FULL_MAX_LEN,
     FILE_NAME_PREFIX_RP,
     FMT_DATE,
@@ -26,11 +27,12 @@ from .defines import (
     Comment,
     DownloadModes,
     ItemInfo,
+    ModuleCaps,
 )
-from .download import Downloader
-from .logger import trace
-from .network import thread_exit
-from .rex import (
+from lustra.download import Downloader
+from lustra.logger import trace
+from lustra.network import thread_exit
+from lustra.rex import (
     re_favorited_by_tag,
     re_item_filename,
     re_item_info_part_xml,
@@ -70,6 +72,14 @@ class DownloaderRp(Downloader):
     """
     DownloaderRp
     """
+    CAPABILITIES = frozenset((ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS))
+
+    def _get_page_fetch_delay(self) -> float:
+        return 1.0
+
+    def _get_page_scan_threads_divisor(self) -> int:
+        return 4
+
     def __init__(self) -> None:
         super().__init__()
         self._base_cookies = {'ui-tnc-agreed': 'true', 'ui-image-zoom': 'both'}

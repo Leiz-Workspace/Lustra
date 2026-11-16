@@ -1,5 +1,6 @@
 # coding=UTF-8
 """
+Lustra extension 'e621' (en). Originally part of Ruxx core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -17,10 +18,7 @@ from typing import Final, Never, final
 
 from bs4 import BeautifulSoup
 
-from lustra.vcs.debug import __LUSTRA_DEBUG__
-from lustra.vcs.version import APP_VERSION
-
-from .defines import (
+from lustra.defines import (
     FILE_NAME_FULL_MAX_LEN,
     FILE_NAME_PREFIX_EN,
     FMT_DATE,
@@ -32,12 +30,13 @@ from .defines import (
     Comment,
     DownloadModes,
     ItemInfo,
+    ModuleCaps,
 )
-from .download import Downloader
-from .help import APP_ADDRESS
-from .logger import trace
-from .network import thread_exit
-from .rex import (
+from lustra.download import Downloader
+from lustra.help import APP_ADDRESS
+from lustra.logger import trace
+from lustra.network import thread_exit
+from lustra.rex import (
     re_favorited_by_tag,
     re_item_info_part_xml,
     re_orig_file_link,
@@ -45,7 +44,9 @@ from .rex import (
     re_tags_exclude_en,
     re_tags_to_process_en,
 )
-from .utils import format_score
+from lustra.utils import format_score
+from lustra.vcs.debug import __LUSTRA_DEBUG__
+from lustra.vcs.version import APP_VERSION
 
 __all__ = ('DownloaderEn',)
 
@@ -63,6 +64,24 @@ class DownloaderEn(Downloader):
     """
     DownloaderEn
     """
+    CAPABILITIES = frozenset((ModuleCaps.PARENT_CHILD, ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS, ModuleCaps.PREVIEW, ModuleCaps.GENDER_TAGS))
+
+    def _parses_raw_pages(self) -> bool:
+        return True
+
+    def _get_page_fetch_delay(self) -> float:
+        return 1.0
+
+    def _get_min_request_interval(self) -> float:
+        return 0.5  # api limit: 2 requests per second
+
+    def _solve_module_specific_conflicts(self) -> bool:
+        if self.dump_comments and self.maxthreads_items > 2 and not self.check_tags and not self.get_max_id:
+            trace('Warning (W1): EN module can\'t fetch comments faster than 2/sec due to API limitation. Forcing 2 download threads!')
+            self.maxthreads_items = 2
+            return True
+        return False
+
     def __init__(self) -> None:
         super().__init__()
         self._base_headers = {'User-Agent': f'Lustra/{APP_VERSION} (based on Ruxx <{APP_ADDRESS}>)'}
@@ -129,12 +148,10 @@ class DownloaderEn(Downloader):
                              str((next(filter(None, pfile['urls'])) or p['file']['url']) if 'urls' in pfile else None))
                 assert post_furl
             except (StopIteration, AssertionError):
+                # file is hidden by the website for this user (default blacklist): always skipped.
+                # Lustra never reconstructs hidden file urls (removed upstream debug branch that rebuilt cdn links from md5)
                 post_tags_list.append(TAG_BLACKLISTED_ALWAYS)
                 post_furl = f'{SITENAME}help/blacklist#default'
-                if __LUSTRA_DEBUG__:
-                    post_tags_list.remove(TAG_BLACKLISTED_ALWAYS)
-                    post_ext_orig = p['file']['ext']
-                    post_furl = f'{SITENAME.replace("//", "//static1.")}data/{post_md5[:2]}/{post_md5[2:4]}/{post_md5}.{post_ext_orig}'
             post_surl = str(p['sample']['url'] or post_furl)
             post_fheight = str(pfile['height'])
             post_fwidth = str(pfile['width'])

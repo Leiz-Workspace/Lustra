@@ -10,7 +10,8 @@ import pathlib
 import re
 from collections.abc import Iterable, Sequence
 
-from .defines import FILE_NAME_FULL_MAX_LEN, MODULE_CHOICES, ItemInfo
+from .defines import FILE_NAME_FULL_MAX_LEN, ItemInfo
+from .module import ProcModule
 from .tagger import append_filtered_tags, append_filtered_tags_by_type
 from .tags import TagTypes
 from .tagsdb import TagsDB, load_tag_aliases
@@ -78,7 +79,7 @@ def retag_files_tagtype(files: Sequence[pathlib.Path], infos: dict[str, ItemInfo
             if not fname_match:
                 continue
             module = name[:2]
-            if module not in MODULE_CHOICES:
+            if module not in ProcModule.known_names():
                 continue
             item_info = infos.get(name[3:] if name[0].isalpha() else name)
             tags_str = item_info.tags if item_info else ''

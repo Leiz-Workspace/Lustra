@@ -1,5 +1,6 @@
 # coding=UTF-8
 """
+Lustra extension 'rule34us' (rs). Originally part of Ruxx core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -10,10 +11,12 @@ import base64
 import re
 from multiprocessing.dummy import current_process
 from typing import Never, final
+from urllib import parse as url_parse
 
 from bs4 import BeautifulSoup
+from requests import exceptions
 
-from .defines import (
+from lustra.defines import (
     DATE_MIN_DEFAULT,
     FILE_NAME_FULL_MAX_LEN,
     FILE_NAME_PREFIX_RS,
@@ -25,11 +28,12 @@ from .defines import (
     Comment,
     DownloadModes,
     ItemInfo,
+    ModuleCaps,
 )
-from .download import Downloader
-from .logger import trace
-from .network import HTMLContent, thread_exit
-from .rex import (
+from lustra.download import Downloader
+from lustra.logger import trace
+from lustra.network import HTMLContent, thread_exit
+from lustra.rex import (
     re_comment_a_rs,
     re_comment_page_rs,
     re_post_dims_rs,
@@ -53,6 +57,8 @@ class DownloaderRs(Downloader):
     """
     DownloaderRs
     """
+    CAPABILITIES = frozenset((ModuleCaps.VIDEO_FORMAT_CHOICE, ModuleCaps.COMMENTS))
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -76,6 +82,17 @@ class DownloaderRs(Downloader):
 
     def _get_id_bounds(self) -> Never:
         raise NotImplementedError
+
+    def _fix_link_after_download_error(self, link: str, original_link: str, err: Exception) -> str:
+        is_404 = isinstance(err, exceptions.HTTPError) and err.response is not None and err.response.status_code == 404
+        is_conn = isinstance(err, exceptions.ConnectionError) and getattr(err, 'response', None) is None
+        if is_404 or is_conn:
+            hostname: str = url_parse.urlparse(link).hostname or 'unk'
+            if hostname.startswith('video') and '-cdn' in hostname:  # video-cdn1.rs
+                trace(f'Warning (W3): catched {"HTTPError 404" if is_404 else "ConnectionError"} (host: {hostname})! '
+                      f'Trying no-cdn source...', True)
+                return re.sub(r'-cdn\d', '', link)
+        return link
 
     def _get_sitename(self) -> str:
         return SITENAME

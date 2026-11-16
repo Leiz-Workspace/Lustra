@@ -192,6 +192,9 @@ STATUSBAR_INFO_MAP: dict[DownloaderStates, tuple[str, str | None, str | None, st
 CONNECT_TIMEOUT_BASE = 10
 CONNECT_RETRIES_BASE = 10
 CONNECT_RETRIES_CHUNK = 5
+CONNECT_RETRIES_PROXY_MULT = 3
+'''proxy / ssl errors do not consume normal retries but are capped at retries * this value'''
+RETRY_AFTER_MAX_SECONDS = 120
 
 THREADS_MAX_ITEMS = 8
 DOWNLOAD_CHUNK_SIZE = 2097152  # 2 Mb
@@ -204,6 +207,7 @@ SITENAME_B_RP = 'aHR0cHM6Ly9ydWxlMzQucGFoZWFsLm5ldC8='
 SITENAME_B_EN = 'aHR0cHM6Ly9lNjIxLm5ldC8='
 SITENAME_B_XB = 'aHR0cHM6Ly94Ym9vcnUuY29tLw=='
 SITENAME_B_BB = 'aHR0cHM6Ly9iYm9vcnUuY29tLw=='
+SITENAME_B_DB = 'aHR0cHM6Ly9kYW5ib29ydS5kb25tYWkudXMv'
 MESSAGE_EMPTY_SEARCH_RESULT_RX = 'Tm9ib2R5IGhlcmUgYnV0IHVzIGNoaWNrZW5zIQ=='
 MESSAGE_EMPTY_SEARCH_RESULT_RN = 'Tm8gaW1hZ2VzIHdlcmUgZm91bmQgdG8gbWF0Y2ggdGhlIHNlYXJjaCBjcml0ZXJpYQ=='
 SOURCE_DEFAULT = 'Unknown'
@@ -217,6 +221,7 @@ MODULE_ABBR_RP = 'rp'
 MODULE_ABBR_EN = 'en'
 MODULE_ABBR_XB = 'xb'
 MODULE_ABBR_BB = 'bb'
+MODULE_ABBR_DB = 'db'
 FILE_NAME_PREFIX_RX = f'{MODULE_ABBR_RX}_'
 FILE_NAME_PREFIX_RN = f'{MODULE_ABBR_RN}_'
 FILE_NAME_PREFIX_RS = f'{MODULE_ABBR_RS}_'
@@ -224,6 +229,7 @@ FILE_NAME_PREFIX_RP = f'{MODULE_ABBR_RP}_'
 FILE_NAME_PREFIX_EN = f'{MODULE_ABBR_EN}_'
 FILE_NAME_PREFIX_XB = f'{MODULE_ABBR_XB}_'
 FILE_NAME_PREFIX_BB = f'{MODULE_ABBR_BB}_'
+FILE_NAME_PREFIX_DB = f'{MODULE_ABBR_DB}_'
 TAGS_CONCAT_CHAR_RX = '+'
 TAGS_CONCAT_CHAR_RN = '+'
 TAGS_CONCAT_CHAR_RS = '+'
@@ -231,6 +237,7 @@ TAGS_CONCAT_CHAR_RP = ' '
 TAGS_CONCAT_CHAR_EN = '+'
 TAGS_CONCAT_CHAR_XB = '+'
 TAGS_CONCAT_CHAR_BB = '+'
+TAGS_CONCAT_CHAR_DB = '+'
 ID_VALUE_SEPARATOR_CHAR_RX = ':'
 ID_VALUE_SEPARATOR_CHAR_RN = '='
 ID_VALUE_SEPARATOR_CHAR_RS = ':'
@@ -238,7 +245,11 @@ ID_VALUE_SEPARATOR_CHAR_RP = '='
 ID_VALUE_SEPARATOR_CHAR_EN = ':'
 ID_VALUE_SEPARATOR_CHAR_XB = ':'
 ID_VALUE_SEPARATOR_CHAR_BB = ':'
-MODULE_CHOICES = (MODULE_ABBR_RX, MODULE_ABBR_RN, MODULE_ABBR_RS, MODULE_ABBR_RP, MODULE_ABBR_EN, MODULE_ABBR_XB, MODULE_ABBR_BB)
+ID_VALUE_SEPARATOR_CHAR_DB = ':'
+MODULE_CHOICES = (MODULE_ABBR_RX, MODULE_ABBR_RN, MODULE_ABBR_RS, MODULE_ABBR_RP, MODULE_ABBR_EN, MODULE_ABBR_XB, MODULE_ABBR_BB, MODULE_ABBR_DB)
+'''modules known to the core; extensions may register more (see ProcModule.known_names())'''
+MODULES_BUILTIN = (MODULE_ABBR_RX, MODULE_ABBR_DB)
+'''modules that are always available (default extensions)'''
 
 IDVAL_EQ_SEPARATORS: dict[str, str] = {
     MODULE_ABBR_RX: ID_VALUE_SEPARATOR_CHAR_RX,
@@ -248,6 +259,7 @@ IDVAL_EQ_SEPARATORS: dict[str, str] = {
     MODULE_ABBR_EN: ID_VALUE_SEPARATOR_CHAR_EN,
     MODULE_ABBR_XB: ID_VALUE_SEPARATOR_CHAR_XB,
     MODULE_ABBR_BB: ID_VALUE_SEPARATOR_CHAR_BB,
+    MODULE_ABBR_DB: ID_VALUE_SEPARATOR_CHAR_DB,
 }
 TAG_SEPARATORS: dict[str, str] = {
     MODULE_ABBR_RX: TAGS_CONCAT_CHAR_RX,
@@ -257,6 +269,7 @@ TAG_SEPARATORS: dict[str, str] = {
     MODULE_ABBR_EN: TAGS_CONCAT_CHAR_EN,
     MODULE_ABBR_XB: TAGS_CONCAT_CHAR_XB,
     MODULE_ABBR_BB: TAGS_CONCAT_CHAR_BB,
+    MODULE_ABBR_DB: TAGS_CONCAT_CHAR_DB,
 }
 
 DATE_MIN_DEFAULT = '01-01-1970'
@@ -270,6 +283,7 @@ ITEMS_PER_PAGE_RP = 100  # fixed 70 for html, up to 100 for api
 ITEMS_PER_PAGE_EN = 320  # up to 320 for both html and api
 ITEMS_PER_PAGE_XB = 1000  # fixed 42 for html, up to 1000 for dapi
 ITEMS_PER_PAGE_BB = 1000  # fixed 42 for html, up to 1000 for dapi
+ITEMS_PER_PAGE_DB = 200  # up to 200 for api
 TAG_AUTOCOMPLETE_LENGTH_MIN = 2
 TAG_AUTOCOMPLETE_NUMBER_MAX = 7
 TAG_LENGTH_MIN = 4
@@ -282,6 +296,7 @@ TAGS_STRING_LENGTH_MAX_RP = 300  # real value is unknown, has max tags limit
 TAGS_STRING_LENGTH_MAX_EN = 3300  # real value is unknown, has max tags limit
 TAGS_STRING_LENGTH_MAX_XB = 3300  # real value is unknown, assumed RX limits
 TAGS_STRING_LENGTH_MAX_BB = 3300  # real value is unknown, assumed RX limits
+TAGS_STRING_LENGTH_MAX_DB = 3300  # real value is unknown, has max tags limit (2 for anonymous users)
 
 ACTION_STORE_TRUE = 'store_true'
 ACTION_APPEND = 'append'
@@ -315,6 +330,20 @@ SUBFOLDER_NAME_LEN_MAX = 20
 
 class ThreadInterruptException(Exception):
     pass
+
+
+class ModuleCaps:
+    """Optional module capabilities, used to resolve argument conflicts without hardcoding module names"""
+    API_KEY = 'api_key'
+    API_KEY_REQUIRED = 'api_key_required'
+    VIDEO_FORMAT_CHOICE = 'video_format_choice'
+    PARENT_CHILD = 'parent_child'
+    SOURCES = 'sources'
+    DATE_FILTER = 'date_filter'
+    COMMENTS = 'comments'
+    PREVIEW = 'preview'
+    GENDER_TAGS = 'gender_tags'
+    '''module has a measured gender tag ruleset (lustra/gender_rules)'''
 
 
 class Mem:

@@ -1,0 +1,9 @@
+[Unit]
+Description=Lustra: update tag lists for autocompletion
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/Workspace/Lustra/tools/cron/lustra-update-tags.sh
+Nice=10
