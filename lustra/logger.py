@@ -12,7 +12,7 @@ from locale import getpreferredencoding
 from threading import Lock as ThreadLock
 
 from .defines import UTF8
-from .rex import re_api_key_user
+from .rex import re_api_credentials, re_api_key_user
 from .utils import find_first_not_of
 
 __all__ = ('Logger', 'trace')
@@ -72,7 +72,8 @@ class Logger:
 
 
 def trace(message: str, safe=False, timestamp=False) -> None:
-    Logger.log(re_api_key_user.sub('&api_key=<REDACTED>&user_id=<REDACTED>', message), safe, timestamp)
+    message = re_api_key_user.sub('&api_key=<REDACTED>&user_id=<REDACTED>', message)
+    Logger.log(re_api_credentials.sub(r'\1=<REDACTED>', message), safe, timestamp)
 
 #
 #

@@ -1,5 +1,6 @@
 # coding=UTF-8
 """
+Lustra extension 'xbooru' (xb). Originally part of Ruxx core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -10,37 +11,43 @@ import base64
 import re
 from typing import Never, final
 
-from .defines import (
-    FILE_NAME_PREFIX_BB,
-    ID_VALUE_SEPARATOR_CHAR_BB,
-    ITEMS_PER_PAGE_BB,
-    MODULE_ABBR_BB,
-    SITENAME_B_BB,
-    TAGS_CONCAT_CHAR_BB,
+from lustra.defines import (
+    FILE_NAME_PREFIX_XB,
+    ID_VALUE_SEPARATOR_CHAR_XB,
+    ITEMS_PER_PAGE_XB,
+    MODULE_ABBR_XB,
+    SITENAME_B_XB,
+    TAGS_CONCAT_CHAR_XB,
     Comment,
+    ModuleCaps,
 )
-from .download_gelbooru import DownloaderGelbooru
-from .logger import trace
-from .rex import (
-    re_post_page_bb,
-    re_tags_exclude_bb,
-    re_tags_to_process_bb,
+from lustra.download_gelbooru import DownloaderGelbooru
+from lustra.logger import trace
+from lustra.rex import (
+    re_post_page_xb,
+    re_tags_exclude_xb,
+    re_tags_to_process_xb,
 )
 
-__all__ = ('DownloaderBb',)
+__all__ = ('DownloaderXb',)
 
-SITENAME = base64.b64decode(SITENAME_B_BB).decode()
-ITEMS_PER_PAGE = ITEMS_PER_PAGE_BB
+SITENAME = base64.b64decode(SITENAME_B_XB).decode()
+ITEMS_PER_PAGE = ITEMS_PER_PAGE_XB
 ITEMS_PER_PAGE_F = 50
 ITEMS_PER_PAGE_P = 20000  # unknown, all posts are on a single page always
 MAX_SEARCH_DEPTH = 200000 + ITEMS_PER_PAGE - 1  # set by site devs
 
 
 @final
-class DownloaderBb(DownloaderGelbooru):
+class DownloaderXb(DownloaderGelbooru):
     """
-    DownloaderBb
+    DownloaderXb
     """
+    CAPABILITIES = frozenset((ModuleCaps.PARENT_CHILD, ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.PREVIEW))
+
+    def _get_page_fetch_delay(self) -> float:
+        return 1.0
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -51,16 +58,16 @@ class DownloaderBb(DownloaderGelbooru):
         raise NotImplementedError
 
     def _get_re_post_page(self) -> re.Pattern:
-        return re_post_page_bb
+        return re_post_page_xb
 
     def _get_sitename(self) -> str:
         return SITENAME
 
     def _get_module_abbr(self) -> str:
-        return MODULE_ABBR_BB
+        return MODULE_ABBR_XB
 
     def _get_module_abbr_p(self) -> str:
-        return FILE_NAME_PREFIX_BB
+        return FILE_NAME_PREFIX_XB
 
     def _get_items_per_page(self) -> int:
         return ITEMS_PER_PAGE_F if self.favorites_search_user else ITEMS_PER_PAGE_P if self.pool_search_str else ITEMS_PER_PAGE
@@ -69,16 +76,16 @@ class DownloaderBb(DownloaderGelbooru):
         return MAX_SEARCH_DEPTH
 
     def get_re_tags_to_process(self) -> re.Pattern:
-        return re_tags_to_process_bb
+        return re_tags_to_process_xb
 
     def get_re_tags_to_exclude(self) -> re.Pattern:
-        return re_tags_exclude_bb
+        return re_tags_exclude_xb
 
     def _get_tags_concat_char(self) -> str:
-        return TAGS_CONCAT_CHAR_BB
+        return TAGS_CONCAT_CHAR_XB
 
     def _get_idval_equal_seaparator(self) -> str:
-        return ID_VALUE_SEPARATOR_CHAR_BB
+        return ID_VALUE_SEPARATOR_CHAR_XB
 
     def _extract_comments(self, item_id: str) -> None:
         if raw_html := self.fetch_html(self._form_comments_search_address(item_id)):

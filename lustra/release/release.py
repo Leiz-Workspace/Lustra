@@ -103,6 +103,9 @@ def build_exe() -> None:
         '-i', f'./images/8_{RELEASE_ICON_SIZE:d}.ico',
         *(itertools.chain.from_iterable(zip(('--exclude-module',) * len(MODULES_EXCLUDED), MODULES_EXCLUDED, strict=True))),
         '--collect-datas=fake_useragent',
+        # builtin extensions: manifests are data, downloader modules are imported dynamically
+        '--add-data', f'{ROOT_DIR.joinpath("lustra/builtin_ext").as_posix()}:lustra/builtin_ext',
+        '--hidden-import', 'lustra.download_rx', '--hidden-import', 'lustra.download_db',
         '--version-file=version_info.txt',
     ))
 

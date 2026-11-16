@@ -11,6 +11,7 @@ from collections.abc import Iterable
 
 from .defines import (
     TAGS_STRING_LENGTH_MAX_BB,
+    TAGS_STRING_LENGTH_MAX_DB,
     TAGS_STRING_LENGTH_MAX_EN,
     TAGS_STRING_LENGTH_MAX_RN,
     TAGS_STRING_LENGTH_MAX_RP,
@@ -23,7 +24,7 @@ from .module import ProcModule
 from .network import thread_exit
 from .vcs import __LUSTRA_DEBUG__
 
-__all__ = ('extract_neg_and_groups', 'split_tags_into_tasks')
+__all__ = ('extract_neg_and_groups', 'register_module_limits', 'split_tags_into_tasks')
 
 MAX_STRING_LENGTHS = {
     ProcModule.RX: TAGS_STRING_LENGTH_MAX_RX,
@@ -33,6 +34,7 @@ MAX_STRING_LENGTHS = {
     ProcModule.EN: TAGS_STRING_LENGTH_MAX_EN,
     ProcModule.XB: TAGS_STRING_LENGTH_MAX_XB,
     ProcModule.BB: TAGS_STRING_LENGTH_MAX_BB,
+    ProcModule.DB: TAGS_STRING_LENGTH_MAX_DB,
 }
 MAX_NEGATIVE_TAGS = {
     ProcModule.RX: (0, False),
@@ -42,6 +44,7 @@ MAX_NEGATIVE_TAGS = {
     ProcModule.EN: (40, False),
     ProcModule.XB: (0, False),
     ProcModule.BB: (0, False),
+    ProcModule.DB: (2, False),
 }
 MAX_WILDCARDS = {
     ProcModule.RX: 0,
@@ -51,8 +54,66 @@ MAX_WILDCARDS = {
     ProcModule.EN: 1,
     ProcModule.XB: 0,
     ProcModule.BB: 0,
+    ProcModule.DB: 0,
+}
+FREE_META_PREFIXES: dict[int, tuple[str, ...]] = {
+    # metatags which do not count towards module's max tags limit (verified against live API)
+    ProcModule.DB: ('rating:', 'id:', 'date:', 'score:', 'status:', 'parent:'),
+}
+LOCAL_POSITIVE_OVERFLOW: dict[int, bool] = {
+    # extra positive tags (above max tags limit) are checked locally instead of failing the search
+    ProcModule.DB: True,
 }
 re_negative_and_group = re.compile(r'^-\(([^,]+(?:,[^,]+)+)\)$')
+re_plain_positive_tag = re.compile(r'^[^-(~*?:=<>][^(~*?:=<>]*$')
+
+
+def register_module_limits(proc_id: int, max_string_len: int, max_tags: int, max_tags_separate: bool, max_wildcards: int,
+                           free_meta_prefixes: Iterable[str] = (), local_positive_overflow=False) -> None:
+    """Registers tag limits of a module provided by an extension (modules known to the core keep their predefined limits)"""
+    if proc_id in MAX_STRING_LENGTHS:
+        return
+    MAX_STRING_LENGTHS[proc_id] = max_string_len
+    MAX_NEGATIVE_TAGS[proc_id] = (max_tags, max_tags_separate)
+    MAX_WILDCARDS[proc_id] = max_wildcards
+    if free_meta_prefixes:
+        FREE_META_PREFIXES[proc_id] = tuple(free_meta_prefixes)
+    if local_positive_overflow:
+        LOCAL_POSITIVE_OVERFLOW[proc_id] = True
+
+
+def _is_counted_tag(tag: str) -> bool:
+    free = FREE_META_PREFIXES.get(ProcModule.value(), ())
+    return not (free and tag.lstrip('-').startswith(free))
+
+
+def _count_tags(tags: Iterable[str]) -> int:
+    return sum(1 for t in tags if _is_counted_tag(t))
+
+
+def _pick_local_required_tags(tags_list: list[str], limit: int, required_out: list[str]) -> None:
+    """Keeps the rarest positive plain tags for server-side search, moves the rest to local 'required tags' filter"""
+    from .tagsdb import TagsDB  # local import: tagsdb is optional and heavy
+    positives = [t for t in tags_list if _is_counted_tag(t) and re_plain_positive_tag.fullmatch(t)]
+    # negative tags are not counted here: they will be moved into local negative group if there is no room left for them
+    others_count = sum(1 for t in tags_list if _is_counted_tag(t) and t not in positives and not t.startswith('-'))
+    keep_count = max(0, limit - others_count)
+    if keep_count == 0 or len(positives) <= keep_count:
+        return
+
+    def popularity(tag: str) -> int:
+        try:
+            info = TagsDB.get_tag_info(ProcModule.name(), tag) if not TagsDB.is_empty() else None
+        except Exception:
+            info = None
+        return info.posts_count if info else 0
+
+    by_rarity = sorted(positives, key=popularity)
+    for tag in by_rarity[keep_count:]:
+        tags_list.remove(tag)
+        required_out.append(tag)
+    trace(f'Info: {ProcModule.name().upper()} tag limit is {limit:d}, searching by \'{" ".join(by_rarity[:keep_count])}\', '
+          f'{len(required_out):d} tag(s) will be checked locally: \'{" ".join(required_out)}\'')
 
 
 def split_tags_into_tasks(tag_groups_arr: Iterable[str], cc: str, sc: str, split_always: bool) -> list[str]:
@@ -102,12 +163,14 @@ def split_tags_into_tasks(tag_groups_arr: Iterable[str], cc: str, sc: str, split
     return [cc.join(tag_groups_arr)]
 
 
-def extract_neg_and_groups(tags_str: str, split_always: bool) -> tuple[list[str], list[list[re.Pattern[str]]]]:
+def extract_neg_and_groups(tags_str: str, split_always: bool,
+                           required_out: list[str] | None = None) -> tuple[list[str], list[list[re.Pattern[str]]]]:
     """
     Separates tags string into fully formed tags and negative tag patterns\n
     Ex. 'a b (+c+~+d+) -(ff,gg)' => (['a', 'b' , '(+c+~+d+)'], [[re.compile(r'^ff$'), re.compile(r'^gg$')]])\n
     :param tags_str: provided string of tags separated by space
     :param split_always: unconditionally separate all 'or' groups
+    :param required_out: if provided, receives positive tags that exceed module's tags limit and must be checked locally
     :return: 1) list of fully-formed tags without negative groups, 2) list of zero or more tag pattern lists
     """
     def form_plist(neg_tags_group: str) -> list[re.Pattern] | None:
@@ -136,13 +199,21 @@ def extract_neg_and_groups(tags_str: str, split_always: bool) -> tuple[list[str]
     max_tags_all, max_is_separate = MAX_NEGATIVE_TAGS[ProcModule.value()]
     max_wtags_all = MAX_WILDCARDS[ProcModule.value()]
     max_string_len = MAX_STRING_LENGTHS[ProcModule.value()]
-    neg_tags_list_all = list(filter(lambda x: x.startswith('-'), tags_list))
+    neg_tags_list_all = list(filter(lambda x: x.startswith('-') and _is_counted_tag(x), tags_list))
     w_tags_list_all = list(filter(lambda x: '*' in x, tags_list))
-    max_ntags = max(0, max_tags_all - (0 if max_is_separate else (len(tags_list) - len(neg_tags_list_all))) if max_tags_all else 10**9)
+    max_ntags = max(0, max_tags_all - (0 if max_is_separate else (_count_tags(tags_list) - _count_tags(neg_tags_list_all))),
+                    ) if max_tags_all else 10**9
     max_wtags = max_wtags_all or 10**9
 
     def tags_fixed() -> None:
         return total_len <= max_string_len and len(neg_tags_list_all) <= max_ntags and len(w_tags_list_all) <= max_wtags
+
+    if required_out is not None and max_tags_all and LOCAL_POSITIVE_OVERFLOW.get(ProcModule.value(), False):
+        # positive tags first: negative tags are cheaper to filter locally but only if there is room for at least one of them
+        _pick_local_required_tags(tags_list, max_tags_all, required_out)
+        for rtag in required_out:
+            total_len -= len(rtag) + 1
+        max_ntags = max(0, max_tags_all - (_count_tags(tags_list) - _count_tags(neg_tags_list_all)))
 
     neg_tags_list: list[str] = []
     if not tags_fixed():
@@ -172,7 +243,7 @@ def extract_neg_and_groups(tags_str: str, split_always: bool) -> tuple[list[str]
         plist = form_plist(extracted_neg_group_str)
         assert plist is not None
         parsed.append(plist)
-    if 0 < max_tags_all < len(tags_list) - (len(neg_tags_list_all) if max_is_separate else 0):
+    if 0 < max_tags_all < _count_tags(tags_list) - (len(neg_tags_list_all) if max_is_separate else 0):
         thread_exit(f'Fatal: max tags exceeded for {ProcModule.name().upper()} '
                     f'({len(tags_list):d} > {max_tags_all:d}), final tags: \'{" ".join(tags_list)}\'')
 

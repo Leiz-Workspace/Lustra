@@ -9,9 +9,10 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 import datetime
 import json
 import pathlib
+import re
 from abc import ABC, abstractmethod
-from argparse import ArgumentError
-from ipaddress import IPv4Address
+from argparse import ArgumentError, ArgumentTypeError
+from ipaddress import ip_address
 
 from .defines import API_KEY_LEN_RX, DMODE_CHOICES, FMT_DATE, THREADS_MAX_ITEMS
 from .gui_defines import (
@@ -62,6 +63,10 @@ __all__ = (
 )
 
 
+re_login_name = re.compile(r'^[\w.\-]{1,64}$')
+re_hostname = re.compile(r'^(?=.{1,253}$)(?:[a-z\d](?:[a-z\d\-]{0,61}[a-z\d])?\.)*[a-z\d](?:[a-z\d\-]{0,61}[a-z\d])?$', re.IGNORECASE)
+
+
 def valid_proxy_type(ptype: str) -> str:
     try:
         assert ptype in OPTION_VALUES_PROXYTYPE
@@ -71,6 +76,8 @@ def valid_proxy_type(ptype: str) -> str:
 
 
 def valid_proxy(prox: str, with_type=True) -> str:
+    """Accepts 'type://[user:pass@]host:port' where host is IPv4, [IPv6] or a hostname.
+    socks5h:// resolves hostnames on the proxy side (useful when local DNS is filtered)"""
     if len(prox) == 0:
         return prox
     try:
@@ -81,9 +88,23 @@ def valid_proxy(prox: str, with_type=True) -> str:
         else:
             url = url_parse.urlparse(prox)
         _ = valid_proxy_type(url.scheme)
-        _ = IPv4Address(url.hostname)
-        assert 20 < url.port < 65535
+        host = url.hostname or ''
+        try:
+            _ = ip_address(host)
+        except ValueError:
+            assert re_hostname.fullmatch(host)
+        assert 0 < url.port < 65536
         return prox
+    except Exception:
+        raise ArgumentTypeError('invalid proxy (expected type://[user:pass@]host:port)')
+
+
+def valid_gender_list(val: str) -> list[str]:
+    try:
+        from .gender import GENDER_LABELS
+        labels = [v.strip().lower() for v in val.split(',') if v.strip()]
+        assert labels and all(lb in GENDER_LABELS for lb in labels)
+        return list(dict.fromkeys(labels))
     except Exception:
         raise ArgumentError
 
@@ -100,7 +121,7 @@ def valid_json(json_str: str) -> dict[str, str]:
     try:
         return json.loads(json_str.strip('\'"').replace('\\', ''))
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid JSON object')
 
 
 def valid_kwarg(kwarg: str) -> tuple[str, str]:
@@ -108,7 +129,7 @@ def valid_kwarg(kwarg: str) -> tuple[str, str]:
         k, v = tuple(kwarg.split('=', 1))
         return k, v
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid name=value pair')
 
 
 def valid_positive_int(val: str, *, lb=0, ub=4294967295) -> int:
@@ -161,20 +182,22 @@ def valid_window_position(val: str, tk: 'Tk') -> str:
 def valid_api_key_key(key: str) -> str:
     try:
         if key:
-            assert len(key) == API_KEY_LEN_RX
-            assert key.isalnum()
+            # RX keys are 128 alnum chars, other modules (ex. danbooru) use shorter keys
+            assert 16 <= len(key) <= max(API_KEY_LEN_RX, 256)
+            assert key.replace('_', '').replace('-', '').isalnum()
         return key
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid API key')
 
 
 def valid_api_key_userid(user_id: str) -> str:
     try:
         if user_id:
-            assert user_id.isnumeric()
+            # numeric user id (RX) or login name (danbooru)
+            assert user_id.isnumeric() or re_login_name.fullmatch(user_id)
         return user_id
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid API user id / login')
 
 
 def valid_api_key(val: str) -> str:
@@ -184,7 +207,7 @@ def valid_api_key(val: str) -> str:
         _ = valid_api_key_userid(user_id)
         return f'{key},{user_id}'
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid API key (expected KEY,USER_ID or API_KEY,LOGIN)')
 
 
 class Validator(ABC):

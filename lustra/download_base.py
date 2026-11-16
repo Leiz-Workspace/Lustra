@@ -24,13 +24,19 @@ from .defines import (
     DownloaderStates,
     DownloadModes,
     ItemInfo,
+    ModuleCaps,
     ModuleConfigType,
     PageCheck,
 )
+from .gender import GenderConf, GenderResult, decide, infer_from_tags, rules_for_module
 from .logger import trace
-from .module import ProcModule
-from .network import ThreadedHtmlWorker, thread_exit
+from .network import PART_SUFFIX, ThreadedHtmlWorker, thread_exit
+from .safety import blocked_tag
 from .utils import as_date
+
+re_preview_url_attr = re.compile(r'\bpreview_url="([^"]+)"')
+re_sample_url_attr = re.compile(r'\bsample_url="([^"]+)"')
+re_img_src = re.compile(r'<img[^>]+?src="([^"]+)"')
 
 ST1 = TypeVar('ST1')
 ST2 = TypeVar('ST2')
@@ -38,6 +44,9 @@ ST2 = TypeVar('ST2')
 
 class DownloaderBase(ThreadedHtmlWorker):
     """DownloaderBase !Abstract!"""
+    CAPABILITIES: frozenset[str] = frozenset((ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS))
+    '''optional features supported by module, see ModuleCaps'''
+
     @abstractmethod
     def __init__(self) -> None:
         super().__init__()
@@ -96,6 +105,17 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.item_info_dict_per_task: dict[str, ItemInfo] = {}
         self.item_info_dict_all: dict[str, ItemInfo] = {}
         self.neg_and_groups: list[list[re.Pattern[str]]] = []
+        self.required_tags: list[str] = []
+        # content filter (character gender, tier 0 = tags). Enabling it also enables the safety blacklist
+        self.gender_select: frozenset[str] = frozenset()
+        self.gender_mode: str = 'tags'
+        self.gender_min_conf: GenderConf = GenderConf.MEDIUM
+        self.gender_strict: bool = False
+        self.gender_results: dict[str, GenderResult] = {}
+        self.gender_stats: dict[str, int] = {}
+        self.gender_filtered_count: int = 0
+        self.safety_blocked_count: int = 0
+        '''positive tags which could not be sent to website (tags limit) and are checked locally'''
         self.known_parents: set[str] = set()
         self.filtered_out_ids_cache: set[str] = set()
         self.default_sort: bool = True
@@ -206,6 +226,36 @@ class DownloaderBase(ThreadedHtmlWorker):
     def _execute_module_filters(self, parents: MutableSet[str]) -> None:
         pass
 
+    def extract_preview_url(self, h: str) -> str:
+        """Public, needed by desktop preview: thumbnail url of a raw item string (empty if unknown)"""
+        for rex in (re_preview_url_attr, re_sample_url_attr, re_img_src):
+            if m := rex.search(h):
+                url = m.group(1)
+                return f'{self._get_sitename().rstrip("/")}{url}' if url.startswith('/') and not url.startswith('//') else url
+        return ''
+
+    def _has_capability(self, cap: str) -> bool:
+        return cap in self.CAPABILITIES
+
+    def _parses_raw_pages(self) -> bool:
+        """True if module parses raw page bytes (json api) instead of BeautifulSoup html"""
+        return False
+
+    def _supports_native_date_filter(self) -> bool:
+        """True if module converts date limits into search query itself (no page bisection by date required)"""
+        return False
+
+    def _get_page_fetch_delay(self) -> float:
+        """Per-thread delay after fetching a search page (seconds)"""
+        return 0.0
+
+    def _get_page_scan_threads_divisor(self) -> int:
+        return 2
+
+    def _solve_module_specific_conflicts(self) -> bool:
+        """Module hook for argument conflicts not covered by capabilities, returns True if something was changed"""
+        return False
+
     def _is_custom_sort_tag(self, tag_str: str) -> bool:
         return tag_str.startswith('sort:') and tag_str not in ('sort:id', 'sort:id:desc')
 
@@ -233,7 +283,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         return func(arg1 if pred else arg2)
 
     def _extract_favorite_user(self, fav_user_tags: list[re.Match | None]) -> None:
-        self.favorites_search_user = str(fav_user_tags[-1].group(1)) if fav_user_tags else 0
+        self.favorites_search_user = str(fav_user_tags[-1].group(1)) if fav_user_tags else ''
 
     def _clean_favorite_user(self) -> None:
         self.favorites_search_user = ''
@@ -310,7 +360,7 @@ class DownloaderBase(ThreadedHtmlWorker):
                 if raw_html_page is None:
                     thread_exit(f'ERROR: ProcPage: unable to retreive html for page {pnum + 1:d}!', -14)
 
-                items_raw = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, ProcModule.is_en())
+                items_raw = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, self._parses_raw_pages())
                 if len(items_raw) == 0:
                     thread_exit(f'ERROR: ProcPage: cannot find picture or video on page {pnum + 1:d}', -15)
 
@@ -418,7 +468,7 @@ class DownloaderBase(ThreadedHtmlWorker):
                 if raw_html_page is None:
                     thread_exit(f'ERROR: ProcPage: unable to retreive html for page {pnum + 1:d}!', -16)
 
-                items_raw = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, ProcModule.is_en())
+                items_raw = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, self._parses_raw_pages())
                 if len(items_raw) == 0:
                     reason = str((raw_html_page.html.find('response') or {}).get('reason', 'Unknown reason'))
                     thread_exit(f'ERROR: ProcPage: cannot find picture or video on page {pnum + 1:d}! Reason: \'{reason}\'', -17)
@@ -672,32 +722,32 @@ class DownloaderBase(ThreadedHtmlWorker):
     def _filter_existing_items(self) -> None:
         trace('Filtering out existing items...')
 
-        if not self.dest_base_s.is_dir():
-            return
+        folders = [self.dest_base_s] + [self.dest_base_s / sub for sub in dict.fromkeys((self.subfolder_img, self.subfolder_vid)) if sub]
+        abbrp = self._get_module_abbr_p()
+        re_owned_file = re.compile(fr'^(?:{re.escape(abbrp)})?(\d+)[._]')
+        existing_ids: set[str] = set()
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            with os.scandir(folder.as_posix()) as listing:
+                for f in listing:
+                    # incomplete (.part) and empty files are not 'existing': they will be downloaded again
+                    if f.name.endswith(PART_SUFFIX) or not f.is_file() or f.stat().st_size == 0:
+                        continue
+                    if m := re_owned_file.match(f.name):
+                        existing_ids.add(m.group(1))
 
-        with os.scandir(self.dest_base_s.as_posix()) as listing:
-            curdirfiles = [f.name for f in listing if f.is_file()]
-
-        if len(curdirfiles) == 0:
+        if not existing_ids:
             return
 
         total_count_temp = self.total_count
-
-        def file_matches(filename: str, iid: str) -> bool:
-            return filename.startswith((f'{iid}.', f'{iid}_', f'{abbrp}{iid}.', f'{abbrp}{iid}_'))
-
-        abbrp = self._get_module_abbr_p()
         idx: int
         for idx in reversed(range(len(self.items_raw_per_task))):
             self.catch_cancel_or_ctrl_c()
             h = self._local_addr_from_string(str(self.items_raw_per_task[idx]))
-            item_id = self._extract_id(h)
-            for f_idx in reversed(range(len(curdirfiles))):
-                if file_matches(curdirfiles[f_idx], item_id):
-                    del curdirfiles[f_idx]
-                    del self.items_raw_per_task[idx]
-                    self.total_count -= 1
-                    break
+            if self._extract_id(h) in existing_ids:
+                del self.items_raw_per_task[idx]
+                self.total_count -= 1
 
         if total_count_temp != self.total_count:
             trace(f'Filtered out {total_count_temp - self.total_count:d} / {total_count_temp:d} items!')
@@ -750,6 +800,94 @@ class DownloaderBase(ThreadedHtmlWorker):
         if removed_count > 0:
             trace('\n'.join(removed_messages))
             trace(f'Filtered out {removed_count:d} / {total_count_old:d} items!')
+
+    def _filter_items_missing_required_tags(self, parents: MutableSet[str]) -> None:
+        trace('Filtering out items missing required tags...')
+
+        if len(self.required_tags) == 0:
+            return
+
+        abbrp = self._get_module_abbr_p()
+        required = {t.lower() for t in self.required_tags}
+        total_count_old = len(self.items_raw_per_task)
+        removed_count = 0
+        idx: int
+        for idx in reversed(range(total_count_old)):
+            self.catch_cancel_or_ctrl_c()
+            h = self._local_addr_from_string(str(self.items_raw_per_task[idx]))
+            item_id = self._extract_id(h)
+            idstring = f'{(abbrp if self.add_filename_prefix else "")}{item_id}'
+            item_info = self.item_info_dict_per_task.get(idstring)
+            if item_info is None:
+                continue
+            if not required.issubset(set(item_info.tags.lower().split(' '))):
+                if item_id in parents:
+                    parents.remove(item_id)
+                del self.item_info_dict_per_task[idstring]
+                del self.items_raw_per_task[idx]
+                self.filtered_out_ids_cache.add(idstring)
+                removed_count += 1
+
+        if removed_count > 0:
+            trace(f'Filtered out {removed_count:d} / {total_count_old:d} items missing required tags!')
+
+    def _task_item_tags(self, idx: int) -> tuple[str, str, list[str], ItemInfo | None]:
+        h = self._local_addr_from_string(str(self.items_raw_per_task[idx]))
+        item_id = self._extract_id(h)
+        idstring = f'{(self._get_module_abbr_p() if self.add_filename_prefix else "")}{item_id}'
+        info = self.item_info_dict_per_task.get(idstring)
+        return item_id, idstring, (info.tags.split(' ') if info and info.tags else []), info
+
+    def _drop_task_item(self, idx: int, item_id: str, idstring: str, info: ItemInfo | None, parents: MutableSet[str]) -> None:
+        parents.discard(item_id)
+        if info is not None and info.parent_id:
+            parents.discard(info.parent_id)
+        self.item_info_dict_per_task.pop(idstring, None)
+        del self.items_raw_per_task[idx]
+        self.filtered_out_ids_cache.add(idstring)
+
+    def _filter_items_safety(self, parents: MutableSet[str]) -> None:
+        """Hard blacklist (lustra/safety.py). Active whenever the content filter is enabled, for every task incl. parent tasks"""
+        if not self.gender_select:
+            return
+        trace('Filtering out items using safety blacklist...')
+        total = len(self.items_raw_per_task)
+        removed = 0
+        idx: int
+        for idx in reversed(range(total)):
+            self.catch_cancel_or_ctrl_c()
+            item_id, idstring, tags, info = self._task_item_tags(idx)
+            if blocked_tag(tags):
+                self._drop_task_item(idx, item_id, idstring, info, parents)
+                removed += 1
+        if removed > 0:
+            self.safety_blocked_count += removed
+            trace(f'Blocked {removed:d} / {total:d} items (safety blacklist, active while content filter is enabled)')
+
+    def _filter_items_by_gender(self, parents: MutableSet[str]) -> None:
+        """Tier 0 gender filter: labels inferred from post tags (lustra/gender.py)"""
+        if not self.gender_select:
+            return
+        trace('Filtering items by character gender...')
+        rules = rules_for_module(self._get_module_abbr())
+        total = len(self.items_raw_per_task)
+        removed: dict[str, int] = {}
+        idx: int
+        for idx in reversed(range(total)):
+            self.catch_cancel_or_ctrl_c()
+            item_id, idstring, tags, info = self._task_item_tags(idx)
+            res = infer_from_tags(tags, rules)
+            keep, eff = decide(res, self.gender_select, self.gender_min_conf, self.gender_strict)
+            self.gender_results[idstring] = res
+            self.gender_stats[str(eff)] = self.gender_stats.get(str(eff), 0) + 1
+            if not keep:
+                self._drop_task_item(idx, item_id, idstring, info, parents)
+                removed[str(eff)] = removed.get(str(eff), 0) + 1
+        if removed:
+            count = sum(removed.values())
+            self.gender_filtered_count += count
+            details = ', '.join(f'{k}: {v:d}' for k, v in sorted(removed.items()))
+            trace(f'Filtered out {count:d} / {total:d} items by gender ({details})')
 
     def _filter_items_by_module_filters(self, parents: MutableSet[str]) -> None:
         trace('Filtering out items using module filters...')

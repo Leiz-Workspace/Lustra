@@ -12,8 +12,7 @@ import itertools
 import math
 import sys
 import traceback
-from collections.abc import Iterable, MutableSequence
-from tkinter import messagebox
+from collections.abc import Callable, Iterable, MutableSequence
 from typing import Literal, Protocol, TypeVar
 
 from yarl import URL
@@ -84,7 +83,14 @@ def as_date(date_s: str) -> datetime.date:
     return datetime.datetime.strptime(date_s, FMT_DATE).date()
 
 
+CONFIRM_HANDLER: Callable[[str, str], bool] | None = None
+'''override for non-tkinter frontends (ex. Lustra desktop sidecar), None means tkinter message box'''
+
+
 def confirm_yes_no(title: str, msg: str) -> bool:
+    if CONFIRM_HANDLER is not None:
+        return CONFIRM_HANDLER(title, msg)
+    from tkinter import messagebox  # lazy: core must work without tkinter
     return messagebox.askyesno(title, msg)
 
 

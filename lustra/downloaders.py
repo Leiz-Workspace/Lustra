@@ -1,38 +1,31 @@
 # coding=UTF-8
 """
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
+Lustra: downloader classes are registered by extensions (see extensions.py), builtin ones are 'rx' and 'db'
 """
 #########################################
 #
-# Downloader subclasses should be imported only to here
-# From this module only import to top level (tests.py, gui.py, lustra_cmd.py, lustra_gui.py)
+# From this module only import to top level (tests.py, gui.py, lustra_cmd.py, lustra_gui.py, server.py)
 #
 
 from .download import Downloader
-from .download_bb import DownloaderBb
-from .download_en import DownloaderEn
-from .download_rn import DownloaderRn
-from .download_rp import DownloaderRp
-from .download_rs import DownloaderRs
-from .download_rx import DownloaderRx
-from .download_xb import DownloaderXb
 from .module import ProcModule
 
-__all__ = ('get_new_downloader',)
+__all__ = ('DOWNLOADERS_BY_PROC_MODULE', 'get_new_downloader')
 
 
-DOWNLOADERS_BY_PROC_MODULE = {
-    ProcModule.RX: DownloaderRx,
-    ProcModule.RN: DownloaderRn,
-    ProcModule.RS: DownloaderRs,
-    ProcModule.RP: DownloaderRp,
-    ProcModule.EN: DownloaderEn,
-    ProcModule.XB: DownloaderXb,
-    ProcModule.BB: DownloaderBb,
-}
+DOWNLOADERS_BY_PROC_MODULE: dict[int, type[Downloader]] = {}
+'''filled by Extensions._register()'''
 
 
 def _make_downloader(proc_module: int) -> Downloader:
+    from .extensions import Extensions
+    if proc_module not in DOWNLOADERS_BY_PROC_MODULE:
+        # legacy behavior: cli / tk gui / tests can use any locally available extension
+        Extensions.ensure_loaded(include_catalog=True)
+    if proc_module not in DOWNLOADERS_BY_PROC_MODULE:
+        name = ProcModule.PROC_MODULES_NAMES_BY_ID.get(proc_module, str(proc_module))
+        raise KeyError(f'Module \'{name}\' is not installed. Install its extension first')
     ProcModule.set(proc_module)
     return DOWNLOADERS_BY_PROC_MODULE[proc_module]()
 

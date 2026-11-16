@@ -33,6 +33,11 @@ HELP_ARG_PREFER_WEBM = 'Prefer webm over mp4 when possible'
 HELP_ARG_PREFER_MP4 = 'Prefer mp4 over webm when possible'
 HELP_ARG_PREFER_LOWRES = 'Prefer low resolution images over the originals'
 HELP_ARG_PRESERVE_DATE = 'Preserve original modification date for saved files'
+HELP_ARG_GENDER = ('Keep only posts with these character gender labels (comma separated): '
+                   'only_female,only_male,both,none,unknown. Labels come from post tags. Enables safety blacklist')
+HELP_ARG_GENDER_MODE = 'Gender labeling mode: \'tags\' (default) or \'model\' (not available yet)'
+HELP_ARG_GENDER_CONF = 'Minimal label confidence, lower confidence labels count as \'unknown\'. Default is \'medium\''
+HELP_ARG_GENDER_STRICT = 'Posts with futanari, trap or ambiguous characters never count as only_female / only_male'
 HELP_ARG_MINDATE = 'Skip everything posted before this date, default is \'01-01-1970\''
 HELP_ARG_MAXDATE = 'Skip everything posted after this date, default is \'<today>\''
 HELP_ARG_THREADS = 'Maximum simultaneous downloads (affects pages scan too), default is \'1\''
@@ -99,6 +104,13 @@ HELP_TAGS_MSG_EN = (
 )
 HELP_TAGS_MSG_XB = HELP_TAGS_MSG_RX
 HELP_TAGS_MSG_BB = HELP_TAGS_MSG_RX
+HELP_TAGS_MSG_DB = (
+    'Danbooru: anonymous users can search at most 2 tags at once (negative tags and order: count too).\n'
+    'Free metatags (do not count): rating:, id:, date:, score:, status:, parent:.\n'
+    'Extra positive tags are checked locally (rarest tags are sent to the website), extra -tags become a local negative group.\n'
+    'Meta syntax: id:>X, id:X..Y, score:>=X, date:2024-01-01..2024-02-01, rating:g,s, order:score.\n'
+    'Ruxx syntax for OR groups (a~b) and negative groups -(a,b) is supported as usual.'
+)
 ABOUT_MSG = (f'{APP_NAME} version {APP_VERSION} ({APP_REV_DATE}) {APP_BUILD_TYPE_STR}\n'
              f'\N{copyright sign} {APP_YEARS} {APP_AUTHOR}\n<{APP_ADDRESS}>')
 # end help messages

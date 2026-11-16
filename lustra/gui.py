@@ -177,6 +177,7 @@ ICON_TYPE_PER_PROC_MODULE = {
     ProcModule.EN: Icons.EN,
     ProcModule.XB: Icons.XB,
     ProcModule.BB: Icons.BB,
+    ProcModule.DB: Icons.EN,  # legacy GUI has no dedicated icon for danbooru
 }
 
 # loaded
@@ -1253,6 +1254,8 @@ def _dwnm() -> Downloader:
 def run_lustra_gui() -> None:
     Logger.init(False)
     ensure_compatibility()
+    from .extensions import Extensions
+    Extensions.ensure_loaded(include_catalog=True)  # legacy gui lists every locally available module
     if CAN_MANIPULATE_CONSOLE:
         Logger.pending_strings.append('[Launcher] Hiding own console...')
         ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)

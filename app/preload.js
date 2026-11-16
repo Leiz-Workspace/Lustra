@@ -1,0 +1,58 @@
+// Lustra desktop: preload bridge (contextIsolation). The renderer never sees API keys or spawns processes itself.
+'use strict';
+
+const { contextBridge, ipcRenderer } = require('electron');
+
+const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
+
+contextBridge.exposeInMainWorld('lustra', {
+  rpc: (method, params) => invoke('rpc', method, params || {}),
+  tags: {
+    update: (module) => invoke('tags:update', module),
+  },
+  search: {
+    count: (query) => invoke('search:count', query),
+    preview: (query, page) => invoke('search:preview', query, page),
+  },
+  settings: {
+    get: () => invoke('settings:get'),
+    set: (patch) => invoke('settings:set', patch),
+  },
+  secrets: {
+    set: (module, value) => invoke('secrets:set', module, value),
+  },
+  jobs: {
+    start: (query) => invoke('jobs:start', query),
+    cancel: (id) => invoke('jobs:cancel', id),
+    list: () => invoke('jobs:list'),
+    clear: () => invoke('jobs:clear'),
+  },
+  dialogs: {
+    folder: (current) => invoke('dialog:folder', current),
+    image: () => invoke('dialog:image'),
+    zip: () => invoke('dialog:zip'),
+  },
+  ext: {
+    installZip: (file, sha256) => invoke('ext:installZip', file, sha256),
+    installCatalog: (id) => invoke('ext:installCatalog', id),
+    installRemote: (item) => invoke('ext:installRemote', item),
+  },
+  appearance: {
+    setBackgroundImage: (file) => invoke('appearance:setBackgroundImage', file),
+  },
+  app: {
+    info: () => invoke('app:info'),
+    relaunch: () => invoke('app:relaunch'),
+    installLauncher: () => invoke('launcher:install'),
+    openPath: (p) => invoke('shell:open', p),
+    openExternal: (url) => invoke('shell:external', url),
+  },
+  thumbUrl: (url, referer) => `lustra-thumb://t/?u=${encodeURIComponent(url)}&r=${encodeURIComponent(referer || '')}`,
+  on: (channel, cb) => {
+    const allowed = ['log', 'sidecar:status', 'sidecar:notify', 'jobs:update', 'jobs:log', 'appearance:changed'];
+    if (!allowed.includes(channel)) throw new Error(`channel not allowed: ${channel}`);
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on(channel, handler);
+    return () => ipcRenderer.removeListener(channel, handler);
+  },
+});
