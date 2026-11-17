@@ -149,13 +149,21 @@ The exact test list CI runs, the Electron self-test (`LUSTRA_SELFTEST_DIR`) and 
 
 | Branch | Purpose | Automation |
 |---|---|---|
-| `develop` | Integration | Tests (Linux, Windows, macOS; Python 3.11–3.15); pull requests also build and self-test the Linux app |
-| `staging` | Pre-release; promoted from `develop` | Builds every platform, the model server bundles and the Docker image, and publishes the pre-release `v<version>-rc.<run>` with `SHA256SUMS.txt` and `build-info.json` |
-| `production` (default) | Production; promoted from `staging` | Publishes `v<version>` as the latest release from the newest release candidate whose `build-info.json` matches the commit's tree (checksums verified, nothing rebuilt), and tags the image `<version>` and `latest`; builds again only when no candidate matches |
+| `develop` | Integration; open pull requests against `develop` | Tests (Linux, Windows, macOS; Python 3.11–3.15); pull requests also build and self-test the Linux app |
+| `staging` | Pre-release; promoted from `develop` by pull request | Builds every platform, the model server bundles and the Docker image, and publishes the pre-release `v<version>-rc.<run>` with `SHA256SUMS.txt` and `build-info.json` |
+| `production` (default) | Production; promoted from `staging` by pull request | Publishes `v<version>` as the latest release from the newest release candidate whose `build-info.json` matches the commit's tree (checksums verified, nothing rebuilt), and tags the image `<version>` and `latest`; builds again only when no candidate matches |
+
+Pull requests into `develop`, `staging` and `production` can merge only when CI passes: a repository ruleset requires
+the checks `Tests passed` and `Package (linux)`. Open the promotion pull requests from temporary branches
+(`release/promote-staging`, `release/promote-production`), never from `develop` or `staging` themselves.
+
+The organization's self-hosted Forgejo mirrors this repository. For every release tag it builds the Linux x64 files
+again (`.deb`, `.AppImage`, standalone model server) and the model server image, and publishes them to its own
+registries with a minisign signature on the checksum file and a cosign signature on the image.
 
 Bump `version` in `app/package.json` and `pyproject.toml` (the workflow checks they agree) before promoting to
 `staging`: a released version cannot get a new candidate. Once a version is released, a push that changes only
-`docs/`, `.github/`, `.claude/`, `lustra/tests/`, `.gitignore` or top-level `.md` files publishes nothing, so documentation can be
+`docs/`, `.github/`, `.forgejo/`, `.claude/`, `lustra/tests/`, `.gitignore` or top-level `.md` files publishes nothing, so documentation can be
 promoted without a new version. Release notes come from `docs/releases/v<version>.md`.
 
 ## License

@@ -16,21 +16,13 @@ on:
       - 'pyproject.toml'
       - 'requirements.txt'
       - '!lustra/vcs/version.py'
+  # every pull request, docs-only ones included: 'Tests passed' is a required check of the branch ruleset, and a
+  # workflow skipped by a path filter would leave it pending forever
   pull_request:
     types:
       - opened
       - reopened
       - synchronize
-    paths:
-      - .github/workflows/**
-      - 'lustra/**'
-      - 'extensions/**'
-      - 'tools/**'
-      - 'app/icon-utils.js'
-      - 'app/test/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '!lustra/vcs/version.py'
 
 permissions:
   contents: read
@@ -70,3 +62,17 @@ jobs:
           python -m unittest lustra/tests/tests.py
           python -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify lustra.tests.test_catalog_trust lustra.tests.test_aigen_eval lustra.tests.test_gender_eval
           node app/test/icon-utils.test.js
+
+  # the one check the ruleset of develop, staging and production requires: every job of the matrix passed
+  passed:
+    name: Tests passed
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every test job passed
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "$RESULT" != success ]; then echo "::error::test jobs: $RESULT"; exit 1; fi
+          echo "test jobs: $RESULT"

@@ -244,7 +244,7 @@ LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests
   2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
   3. Model server chạy độc lập (tuỳ chọn, phát hành riêng với app): `python tools/build_model_server.py`, xem mục 3c.
 - **Release** (`.github/workflows/release.yml`, cùng cách làm với Mirrix). Tên file: `<app>-<os>-<arch>_v<version>.<ext>`.
-  - Push lên `staging`: build mọi nền tảng rồi đăng pre-release `v<version>-rc.<lượt chạy>`. Push lên `production`: đăng release `v<version>` (latest) bằng chính các file của bản rc mới nhất có `build-info.json` khớp cây commit (kiểm lại `SHA256SUMS.txt`, không build lại); không có bản rc khớp thì build lại tất cả. Pull request và chạy tay: chỉ build và tự kiểm Linux x64, không đăng gì. Push chỉ đổi `docs/`, `.github/`, `.claude/`, `lustra/tests/`, `.gitignore`, `*.md` ở gốc sau khi `v<version>` đã ra thì không đăng gì.
+  - Push lên `staging`: build mọi nền tảng rồi đăng pre-release `v<version>-rc.<lượt chạy>`. Push lên `production`: đăng release `v<version>` (latest) bằng chính các file của bản rc mới nhất có `build-info.json` khớp cây commit (kiểm lại `SHA256SUMS.txt`, không build lại); không có bản rc khớp thì build lại tất cả. Pull request và chạy tay: chỉ build và tự kiểm Linux x64, không đăng gì. Push chỉ đổi `docs/`, `.github/`, `.forgejo/`, `.claude/`, `lustra/tests/`, `.gitignore`, `*.md` ở gốc sau khi `v<version>` đã ra thì không đăng gì.
   - App: Linux x64 / arm64 (`lustra-linux-x86_64_v….AppImage`, `lustra-linux-amd64_v….deb`), Windows x64 / arm64 (`lustra-setup-<arch>_v….exe`), macOS arm64 / Intel (`lustra-mac-<arch>_v….dmg`, `.zip`, chưa ký). Lõi Python là bản PyInstaller nên mỗi kiến trúc build trên máy của nó (`ubuntu-24.04-arm`, `windows-11-arm`, `macos-15-intel`), không build chéo. Bản Linux: chuẩn hoá quyền file (umask 0022) và kiểm quyền từng mục trong `.deb`.
   - Mỗi bản app được tự kiểm bằng self-test của app (`LUSTRA_SELFTEST_QUICK=1`, kết quả đọc bằng `tools/check_selftest.py`): bắt buộc đạt trên mọi nền tảng (Linux chạy dưới xvfb; giới hạn 10 phút bằng Python vì macOS không có lệnh `timeout`).
   - Model server chạy độc lập: Linux x64 / arm64, Windows x64, macOS arm64 (CPU), Windows x64 DirectML. Image Docker CPU (amd64 + arm64) lên `ghcr.io/<owner>/lustra-model-server:<version>-rc.<n>`; release đổi tag bản rc thành `<version>` và `latest`. Image GPU không được đăng (thư viện NVIDIA có điều khoản riêng): người dùng tự build.
@@ -255,5 +255,21 @@ LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests
   - Self-test chạy được trên file đã đóng gói với cùng các biến `LUSTRA_SELFTEST_*`; thêm `LUSTRA_SELFTEST_QUICK=1` để bỏ các bước cần mạng. `LUSTRA_SELFTEST_ICONS=1` kiểm việc đồng bộ launcher khi đổi icon; nó **ghi vào `~/.local/share/applications`**, nên chỉ chạy kèm `HOME=<thư mục tạm>`.
   - CI: job `desktop` trong `.github/workflows/build.yml`.
 
-## 6. Nhánh git
-`production` (nhánh mặc định, phát hành) ← `staging` (kiểm thử) ← `develop` (phát triển). Làm tính năng trên `develop`, merge lên `staging` để kiểm thử, rồi lên `production` để phát hành. Khi đẩy lên GitHub, đặt default branch = `production`.
+## 6. Nhánh git, pull request và Forgejo
+`production` (nhánh mặc định, phát hành) ← `staging` (bản rc) ← `develop` (tích hợp), cùng quy trình với các repo khác của `Leiz-Workspace` (hướng dẫn của nền tảng phân phối, repo `self-software-distribution-platform`, `docs/GUIDE.md`).
+
+- **Mọi thay đổi đi qua pull request.** Thay đổi vào `develop`: nhánh riêng → PR vào `develop`. Đưa lên `staging` / `production`: đẩy đầu nhánh nguồn sang nhánh tạm rồi mở PR, merge bằng merge commit; không dùng chính `develop` hay `staging` làm nhánh nguồn của PR.
+  ```bash
+  git push origin origin/develop:refs/heads/release/promote-staging
+  ```
+  ```bash
+  gh pr create --head release/promote-staging --base staging --title "Promote develop to staging: <nội dung>" --body "<thay đổi và kết quả CI>"
+  ```
+  ```bash
+  gh pr merge <số PR> --merge --delete-branch
+  ```
+  Lặp lại với `release/promote-production` → `production`. Chủ repo quyết định merge vào `production`.
+- **Ruleset "develop, staging, production: CI must pass"** trên GitHub: chỉ cập nhật ba nhánh qua PR, PR chỉ merge được khi check `Tests passed` (job gộp kết quả của `.github/workflows/run-tests.yml`) và `Package (linux)` (build và self-test bản Linux của `release.yml`) đạt; không xoá, không force-push. Workflow Tests chạy cho mọi PR, kể cả PR chỉ đổi tài liệu, để check bắt buộc luôn có kết quả.
+- **Merge PR có file trong `.github/workflows/`:** GitHub không cho token OAuth thiếu quyền `workflow` merge những PR đó qua API; merge trong trang PR, hoặc thêm quyền: `gh auth refresh -h github.com -s workflow`.
+- **Runner:** CI của Lustra chạy trên runner của GitHub (miễn phí cho repo công khai). Runner tự host `aevra-home` của tổ chức không được dùng cho repo công khai: PR từ fork sẽ chạy được code tuỳ ý trên Home Server.
+- **Forgejo (Home Server):** webhook của GitHub đồng bộ mirror `mirror/Lustra` sau mỗi push. `.forgejo/workflows/ci.yml` chạy lint và test (Python 3.11, Debian) với mỗi push lên ba nhánh; `.forgejo/workflows/forgejo-release.yml` chạy với mỗi tag `v*` mà release trên GitHub tạo ra: build lại bản Linux x64 (`.deb`, `.AppImage`, model server chạy độc lập), self-test, ký `SHA256SUMS-linux` bằng minisign, đăng package generic `lustra/<version>` và kho Debian (`stable`, component `main` cho bản chính thức, `rc` cho bản rc), tạo Release trên Forgejo; image model server lên registry của Forgejo, quét Trivy, ký cosign kèm SBOM. Windows, macOS và Linux arm64 chỉ có trên GitHub. Repo công khai này không ghi tên miền hay tài khoản nội bộ của Forgejo; chúng nằm trong tài liệu của nền tảng.
