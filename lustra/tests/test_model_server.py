@@ -304,7 +304,8 @@ class HardwareTests(TestCase):
             self.assertEqual([('amd', 8192, 7168, False), ('intel', None, None, True)],
                              [(g['vendor'], g['vramMiB'], g['vramFreeMiB'], g['shared']) for g in gpus])
             self.assertEqual('AMD GPU 0x744c', gpus[0]['name'])
-            self.assertEqual(3, len(drm_gpus(d, skip=())))  # no nvidia-smi: the NVIDIA card is listed (VRAM unknown)
+            every = drm_gpus(d, skip=())  # no nvidia-smi: the NVIDIA card is listed, VRAM unknown
+            self.assertEqual(('NVIDIA GPU 0x2705', None, False), (every[2]['name'], every[2]['vramMiB'], every[2]['shared']))
         self.assertEqual([], drm_gpus('/nonexistent/drm'))
 
     def test_check(self) -> None:
@@ -329,6 +330,13 @@ class HardwareTests(TestCase):
         self.assertEqual('NVIDIA GeForce RTX 4070 Ti SUPER', hardware_check(_hw([APU, RTX], CPU_ONLY))['gpu']['name'])
         self.assertEqual('cuda', hardware_check(_hw([RTX], CUDA))['runtime'])
         self.assertIn('CPU only', describe_hardware(_hw([RTX], CPU_ONLY)))
+        unread = {'vendor': 'nvidia', 'name': 'NVIDIA GPU 0x2689', 'vramMiB': None, 'vramFreeMiB': None, 'shared': False}
+        igpu = {'vendor': 'intel', 'name': 'Intel GPU 0xa780', 'vramMiB': None, 'vramFreeMiB': None, 'shared': True}
+        line = describe_hardware(_hw([unread, igpu, APU], CPU_ONLY))  # a CPU container on an NVIDIA machine
+        self.assertIn('NVIDIA GPU 0x2689 VRAM unknown (no nvidia-smi)', line)
+        self.assertIn('Intel GPU 0xa780 shared memory', line)
+        self.assertIn('AMD GPU 0x164e 496/512 MiB VRAM free', line)
+        self.assertEqual('no_gpu', hardware_check(_hw([unread], CPU_ONLY))['code'])
         self.assertIn('with cuda', describe_hardware(_hw([RTX], CUDA)))
 
 
