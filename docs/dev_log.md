@@ -589,13 +589,14 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Tài liệu của Ruxx không bị bỏ:** phần cú pháp tag chuyển nguyên văn sang `docs/tag-syntax.md`; phần giao diện Tk, dùng từ dòng lệnh, build exe sang `docs/legacy-gui.md`. Đã kiểm hai điều README nói: `python -m lustra -module db -path … -- scenery sky -rating:e` được phân tích đúng (tag loại trừ sau `--`), và chạy không tham số thì mở giao diện Tk (`lustra_main`).
 - **Mục lục `docs/README.md`** chia lại theo sản phẩm / vận hành và phát hành / plan và báo cáo, thêm tài liệu mới.
 - **Image trên ghcr:** sau khi chủ repo báo đã đổi package sang công khai, kiểm từ máy không đăng nhập: registry vẫn từ chối cấp token kéo image (`authentication required`), trang package trả 404 và trang package của repo ghi 0 package công khai. Image chưa kéo được công khai lúc ghi mục này; `docs/operations.md` ghi cách đổi và cách kiểm.
+- **Image công khai (kiểm lại sau khi chủ repo đổi lần nữa):** từ máy đã `docker logout ghcr.io`, registry cấp token kéo ẩn danh; `docker pull ghcr.io/leiz-workspace/lustra-model-server:2.0.1` và `:latest` tải về cùng digest `sha256:99b00e3c…` (1,05 GB), manifest có `linux/amd64` và `linux/arm64`. Chạy image vừa kéo (token, model gắn chỉ đọc): server lên, ffmpeg 7.1.5 cho `/v1/frames`, icon app → `only_female` (1,3 s gồm nạp model), clip `testsrc` 8 khung → `unknown`, thiếu token bị từ chối.
+- **Chỗ hiển thị nhỏ còn lại:** image CPU chạy không có `--gpus` thì trong container không có `nvidia-smi`; card NVIDIA chỉ thấy qua sysfs, không có VRAM, và dòng `hardware:` của log ghi "shared memory". Kết luận `no_gpu` vẫn đúng; sửa câu chữ cần một bản mới.
 
 ### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ad)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
-- Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker; README mới (7ad).
+- Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
 - Cần người:
-  - chuyển package `lustra-model-server` trên ghcr sang công khai (lúc 7ad vẫn riêng tư), rồi kiểm bằng `docker pull` khi chưa đăng nhập;
   - gán tập vàng của model giới tính (≥ 3.000 post, hai người, κ ≥ 0,8; lệnh ở [operations.md](operations.md) mục 3g), rồi đo precision tầng 0 / tầng 1 (AC-G07, AC-G09, AC-G10) và đánh giá 300 clip (AC-G17);
   - tạo khoá ký catalog thật (`tools/sign_catalog.py genkey`, giữ khoá bí mật ngoài repo), đưa khoá công khai vào `lustra/safety_data/catalog_keys.json` và ký catalog từ xa: tới lúc đó mọi catalog từ xa bị từ chối;
   - chạy eval trình tạo với Claude thật (tốn phí, ~7 USD cho bộ 9 site theo ước tính; mục 3f);
@@ -604,4 +605,4 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - thử trên máy Windows / macOS thật: app (CI đã self-test cả 6 nền tảng), model server chạy độc lập (CPU, DirectML), script chạy nền;
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
-  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn).
+  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn); dòng `hardware:` gọi card NVIDIA không đọc được VRAM là "shared memory" (nên ghi "không rõ VRAM").
