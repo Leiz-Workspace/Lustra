@@ -8,7 +8,8 @@ build.extraResources) and app/main.js runs it instead of python when the app is 
 usage: python tools/build_core.py [--tags aliases|none|all|rx,db,...] [--out DIR] [--no-smoke]
 The running interpreter needs the runtime requirements and PyInstaller:
   python -m pip install -r requirements.txt 'pyinstaller>=6.21'
-Bundled data: builtin extension manifests, gender rules, the local extension catalog (extensions/), tag aliases and optionally
+Bundled data: builtin extension manifests, gender rules, the domain denylist and trusted catalog keys (lustra/safety_data), the
+local extension catalog (extensions/), tag aliases and optionally
 tag lists (2tags/, large: ~124 MB for all modules; the app can download fresh lists into its data dir instead).
 """
 #########################################
@@ -37,6 +38,8 @@ ALIASES_FILE = 'all_tag_aliases.json'
 EXCLUDED_MODULES = (
     'tkinter', '_tkinter', 'tkinterdnd2', 'lxml', 'PyInstaller', 'pip', 'setuptools', 'ruff', 'pydoc', 'lib2to3',
     'lustra.tests', 'lustra.release',
+    # developer tool (python -m lustra.aigen.eval), not a command of the app core
+    'lustra.aigen.eval',
     # gender image model: runs in the model server (lustra/model_server.py), the app core only calls its API. gender_model.py
     # imports these lazily for its in-process backend; without the exclusion a build environment that has them adds ~110 MB
     'numpy', 'onnxruntime', 'PIL', 'lustra.model_server',
@@ -88,6 +91,8 @@ def _stage_data(stage: pathlib.Path, tags: str) -> list[tuple[pathlib.Path, str]
     data = [
         (ROOT / 'lustra' / 'builtin_ext', 'lustra/builtin_ext'),
         (ROOT / 'lustra' / 'gender_rules', 'lustra/gender_rules'),
+        # domain denylist and trusted catalog keys: read at run time, a missing file refuses (fail closed)
+        (ROOT / 'lustra' / 'safety_data', 'lustra/safety_data'),
     ]
     # lustra.aigen reads real sources as references for the model (lustra/aigen/tools.py: REF_FILES)
     sys.path.insert(0, str(ROOT))
@@ -152,6 +157,20 @@ def _smoke_test(exe: pathlib.Path) -> None:
         if '"R10"' not in r.stdout:
             raise SystemExit(f'smoke test failed: aigen exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
         print('smoke test: aigen ok')
+        # domain denylist bundled (lustra/safety_data): a denied site is refused before any request
+        r = subprocess.run((str(exe), 'aigen'), input='{"cmd":"start","url":"https://www.youtube.com/","mode":"template"}\n', env=env,
+                           capture_output=True, text=True, encoding='utf-8', timeout=120)
+        if '"R7"' not in r.stdout:
+            raise SystemExit(f'smoke test failed: denylist exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
+        r = subprocess.run((str(exe), 'server'), env=env, capture_output=True, text=True, encoding='utf-8', timeout=120,
+                           input='{"jsonrpc":"2.0","id":1,"method":"ext.remoteCatalog","params":{"url":"http://127.0.0.1:9/index.json"}}\n'
+                                 '{"jsonrpc":"2.0","method":"app.shutdown"}\n')
+        if 'only https' not in r.stdout:
+            raise SystemExit(f'smoke test failed: ext.remoteCatalog\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
+        keys = next(exe.parent.rglob('catalog_keys.json'), None)
+        if keys is None or not next(exe.parent.rglob('denied_domains.txt'), None):
+            raise SystemExit('smoke test failed: lustra/safety_data is not bundled')
+        print('smoke test: denylist and catalog keys ok')
 
 
 def build(out_dir: pathlib.Path, tags: str, smoke: bool) -> pathlib.Path:

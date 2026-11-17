@@ -828,7 +828,10 @@ class Generator {
     if (rep.status !== 'ready' || !rep.draftDir) throw new Error('chỉ cài được bản nháp đã chạy thử đạt (hoặc xuất zip rồi tự cài)');
     const check = await runExtgen(['check', rep.draftDir]);
     if (check.code !== 0) {
-      const failed = (check.data.checks || []).filter((c) => !c.ok && c.severity === 'error').map((c) => c.id);
+      const failedChecks = (check.data.checks || []).filter((c) => !c.ok && c.severity === 'error');
+      const denied = failedChecks.find((c) => String(c.id).startsWith('domain:')); // domain denylist: its own clear message
+      if (denied) throw new Error(String(denied.detail || 'site nằm trong danh sách chặn của Lustra'));
+      const failed = failedChecks.map((c) => c.id);
       throw new Error(`bản nháp không còn qua kiểm tra: ${failed.join(', ') || check.data.error || 'lỗi'}`);
     }
     const zip = path.join(genSessionDir(session), `${rep.extId}.zip`);
@@ -1640,14 +1643,24 @@ function registerIpc() {
     if (!RE_EXT_ID.test(String(id || ''))) throw new Error('invalid extension id');
     return sidecar.call('ext.install', { id });
   });
+  // remote catalog: only the id comes from the renderer. The entry (archive url, sha256) is taken from the catalog the core
+  // verified (Ed25519 signature, lustra/trust.py); the install verifies it again and pins the sha256 the user confirmed
   handle('ext:installRemote', async (_e, item) => {
-    const url = String(item?.url || '');
-    const sha256 = String(item?.sha256 || '');
-    if (!/^https:\/\//i.test(url) || !RE_SHA256.test(sha256)) throw new Error('remote extensions need an https url and a sha256');
-    const ok = await confirmMain(`Cài extension "${String(item?.name || item?.id || '?').slice(0, 80)}"?`,
-      `Extension là code Python sẽ chạy trên máy bạn với quyền của bạn.\nNguồn: ${url}\nChỉ cài từ nguồn bạn tin cậy.`);
+    const id = String(item?.id || '');
+    if (!RE_EXT_ID.test(id)) throw new Error('invalid extension id');
+    const catalogUrl = String(settings.advanced.catalogUrl || '');
+    if (!/^https:\/\//i.test(catalogUrl)) throw new Error('catalog url must start with https://');
+    const entries = await sidecar.call('ext.remoteCatalog', { url: catalogUrl });
+    const entry = (Array.isArray(entries) ? entries : []).find((x) => isPlainObject(x) && x.id === id);
+    if (!entry || !RE_SHA256.test(String(entry.sha256 || ''))) throw new Error(`extension "${id}" không có trong catalog`);
+    if (entry.denied) throw new Error(String(entry.denied.message || 'site nằm trong danh sách chặn của Lustra'));
+    const trust = entry.signed ? `Catalog có chữ ký hợp lệ (khoá ${String(entry.keyId || '?').slice(0, 16)}).`
+      : 'CẢNH BÁO: catalog CHƯA KÝ, chỉ được nhận vì đang bật LUSTRA_CATALOG_ALLOW_UNSIGNED (chế độ nhà phát triển).';
+    const ok = await confirmMain(`Cài extension "${String(entry.name || id).slice(0, 80)}"?`,
+      `Extension là code Python sẽ chạy trên máy bạn với quyền của bạn.\nNguồn: ${String(entry.url || '').slice(0, 300)}\n`
+      + `sha256: ${entry.sha256}\n${trust}\nChỉ cài từ nguồn bạn tin cậy.`);
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { url, sha256 });
+    return sidecar.call('ext.install', { catalogUrl, remoteId: id, sha256: entry.sha256 });
   });
   handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
   handle('search:count', async (_e, q) => sidecar.call('search.count', {
@@ -2315,6 +2328,22 @@ async function selfTestGenerator(js) {
     out.badSession = await js('window.lustra.gen.get("../../etc").then(() => "READ", (e) => e.message)');
     await js('window.lustra.gen.clearKey()');
     out.aiWithoutKey = await js(`window.lustra.gen.start({ url: 'https://example.com/', mode: 'ai' }).then(() => 'STARTED', (e) => e.message)`);
+    // domain denylist (lustra/safety_data/denied_domains.txt): refused before any request, with the Vietnamese reason
+    out.denied = await js(`(async () => {
+      const done = new Promise((resolve) => { const off = window.lustra.on('gen:event', (ev) => { if (ev.type === 'done') { off(); resolve(ev); } }); });
+      await window.lustra.gen.start({ url: 'https://www.youtube.com/watch?v=1', mode: 'template', media: ['video'] });
+      const ev = await Promise.race([done, new Promise((r) => setTimeout(() => r({ status: 'timeout' }), 60000))]);
+      return { status: ev.status, ruleIds: ev.ruleIds, session: ev.session, summary: String(ev.summary || '').slice(0, 300) };
+    })()`);
+    await waitIdle();
+    // signed remote catalog: the archive url / sha256 never come from the renderer (main reads the verified catalog)
+    const realCatalogUrl = settings.advanced.catalogUrl;
+    settings.advanced.catalogUrl = '';
+    out.remoteBadId = await js(`window.lustra.ext.installRemote({ id: '../x' }).then(() => 'INSTALLED', (e) => e.message)`);
+    out.remoteNoCatalog = await js(`window.lustra.ext.installRemote({ id: 'demo', url: 'https://evil.example/x.zip', sha256: '${'0'.repeat(64)}' })
+      .then(() => 'INSTALLED', (e) => e.message)`);
+    settings.advanced.catalogUrl = realCatalogUrl;
+    out.remoteOk = /invalid extension id/.test(out.remoteBadId) && /catalog url must start with https/.test(out.remoteNoCatalog);
     if (!bundledCore()) {
       // a ready draft of the offline fake site of lustra/tests/test_extgen.py, then the confirmed install path of main
       const py = 'import pathlib, sys\nfrom lustra.tests.test_extgen import SITE, GenRequest, GenSession, fake_fetcher\n'
@@ -2341,9 +2370,12 @@ async function selfTestGenerator(js) {
     }
     generator.confirm = async () => true;
     await js(`window.lustra.gen.remove(${JSON.stringify(refusedSession)})`);
+    if (out.denied.session) await js(`window.lustra.gen.remove(${JSON.stringify(out.denied.session)})`);
     out.ok = out.keyNotPlain && out.rendererHasNoKey && out.keyStored && out.refused.status === 'refused'
       && (out.refused.ruleIds || []).includes('R10') && out.listed && /chỉ cài được/.test(out.installNotReady)
       && /invalid draft session/.test(out.badSession) && /Chưa có khoá/.test(out.aiWithoutKey)
+      && out.denied.status === 'refused' && (out.denied.ruleIds || []).includes('R7') && /danh sách chặn/.test(out.denied.summary)
+      && out.remoteOk
       && (bundledCore() ? true : out.readyDraft === 'ready' && /cancelled$/.test(out.installDeclined) && out.notInstalledYet
         && out.installed === 'fakebooru' && out.asked === 2 && out.inList && out.removed === true && out.removedGone);
   } catch (err) {

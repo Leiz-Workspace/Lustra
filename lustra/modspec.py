@@ -25,6 +25,7 @@ re_ext_id = re.compile(r'^[a-z][a-z\d_-]{1,31}$', re.ASCII)
 re_abbr = re.compile(r'^[a-z][a-z\d]{1,3}$', re.ASCII)
 re_version = re.compile(r'^\d+\.\d+\.\d+(?:[-+][\w.]+)?$', re.ASCII)
 re_entry = re.compile(r'^(?:[\w.]+|[\w-]+\.py):[A-Za-z_]\w*$', re.ASCII)
+re_min_sdk = re.compile(r'^\d{1,3}\.\d{1,3}(?:\.\d{1,3})?$', re.ASCII)
 
 
 class ManifestError(ValueError):
@@ -100,6 +101,8 @@ class ExtensionManifest:
     '''optional gender ruleset file inside the extension folder (lustra/gender_rules/*.json format)'''
     safetyTags: list[str] = field(default_factory=list)
     '''optional extra tags for the safety blacklist (can only add)'''
+    minSdkVersion: str = ''
+    '''lowest lustra.sdk version ('MAJOR.MINOR') the extension needs; checked when it is installed and loaded'''
     # runtime (not part of the file)
     generator: dict = field(default_factory=dict)
     '''origin of a generated extension, from the '$generator' key (lustra.extgen / lustra.aigen): shown as a badge (rule R13)'''
@@ -126,7 +129,8 @@ class ExtensionManifest:
 
     @staticmethod
     def _check_types(raw: dict) -> None:
-        for k in ('id', 'name', 'abbr', 'version', 'entry', 'kind', 'site', 'tagList', 'description', 'homepage', 'sha256', 'genderRules'):
+        for k in ('id', 'name', 'abbr', 'version', 'entry', 'kind', 'site', 'tagList', 'description', 'homepage', 'sha256', 'genderRules',
+                  'minSdkVersion'):
             if k in raw and not isinstance(raw[k], str):
                 raise ManifestError(f'\'{k}\' must be a string')
         if 'apiVersion' in raw and (not isinstance(raw['apiVersion'], int) or isinstance(raw['apiVersion'], bool)):
@@ -175,6 +179,8 @@ class ExtensionManifest:
             raise ManifestError(f'unsupported kind \'{self.kind}\'')
         if bad := [m for m in self.media if m not in KNOWN_MEDIA]:
             raise ManifestError(f'unknown media type(s): {", ".join(bad)}')
+        if self.minSdkVersion and not re_min_sdk.fullmatch(self.minSdkVersion):
+            raise ManifestError(f'invalid minSdkVersion \'{self.minSdkVersion}\' (expected \'MAJOR.MINOR\', ex. \'1.0\')')
 
     @property
     def is_file_entry(self) -> bool:

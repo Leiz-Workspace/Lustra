@@ -105,7 +105,11 @@ def build_exe() -> None:
         # builtin extensions: manifests are data, downloader modules are imported dynamically
         '--add-data', f'{ROOT_DIR.joinpath("lustra/builtin_ext").as_posix()}:lustra/builtin_ext',
         '--add-data', f'{ROOT_DIR.joinpath("lustra/gender_rules").as_posix()}:lustra/gender_rules',
+        # domain denylist + trusted catalog keys (read at run time: a missing file refuses non builtin extensions)
+        '--add-data', f'{ROOT_DIR.joinpath("lustra/safety_data").as_posix()}:lustra/safety_data',
         '--hidden-import', 'lustra.download_rx', '--hidden-import', 'lustra.download_db',
+        # the stable API extensions import (lustra/sdk.py): no core module imports it
+        '--hidden-import', 'lustra.sdk',
         '--version-file=version_info.txt',
     ))
 

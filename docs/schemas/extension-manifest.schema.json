@@ -64,6 +64,11 @@
       "pattern": "^(?:[\\w.]+|[\\w-]+\\.py):[A-Za-z_]\\w*$",
       "description": "'downloader.py:ClassName' (file inside the extension folder) or 'lustra.module:ClassName' (builtin only). Class must subclass lustra.download.Downloader"
     },
+    "minSdkVersion": {
+      "type": "string",
+      "pattern": "^\\d{1,3}\\.\\d{1,3}(?:\\.\\d{1,3})?$",
+      "description": "lowest lustra.sdk version ('MAJOR.MINOR') the downloader needs: same MAJOR as the running Lustra and a MINOR not newer, otherwise the extension is refused at install and at load with a clear message"
+    },
     "tagList": {
       "type": "string",
       "description": "tag list file name used for autocompletion"

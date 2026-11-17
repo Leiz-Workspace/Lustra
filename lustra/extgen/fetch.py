@@ -24,6 +24,7 @@ from urllib import robotparser
 
 import requests
 
+from lustra.denylist import ascii_host, denied, denied_message
 from lustra.network import LUSTRA_USER_AGENT, is_cloudflare_challenge, parse_retry_after
 
 __all__ = ('FetchPolicyError', 'FetchResult', 'SafeFetcher', 'host_of', 'normalize_site')
@@ -32,6 +33,8 @@ ROBOTS_AGENT = 'Lustra'
 USER_AGENT = f'{LUSTRA_USER_AGENT} (extension generator)'
 MAX_REDIRECTS = 3
 TIMEOUT = (10, 30)
+re_unsafe_url_char = re.compile(r'[\\\x00-\x20\x7f]')
+'''backslash, whitespace, control characters: parsers disagree on where the host ends (urllib vs urllib3), never sent'''
 re_secret_param = re.compile(r'([?&](?:api_key|login|user_id|password|pass_hash|token|key|access_token)=)[^&#]*', re.IGNORECASE)
 
 
@@ -76,18 +79,36 @@ def strip_html(text: str) -> str:
     return re.sub(r'\n\s*\n+', '\n', text)
 
 
+def check_denied(host_or_url: str) -> None:
+    """Raises FetchPolicyError (rule R6 / R7 / R8 of the entry) if the host is on Lustra's domain denylist"""
+    if d := denied(host_or_url):
+        raise FetchPolicyError(d.rule, denied_message(d))
+
+
 def normalize_site(url: str) -> str:
-    """'example.com/posts?x' -> 'https://example.com/' (the site root the extension is made for)"""
+    """'example.com/posts?x' -> 'https://example.com/' (the site root the extension is made for). Internationalized names
+    become their ascii (punycode) form; hosts on the domain denylist are refused"""
     u = url.strip()
     if '://' not in u:
         u = f'https://{u}'
+    authority = re.split(r'[/?#]', u.split('://', 1)[1], maxsplit=1)[0]  # the path is dropped: only the host part matters
+    if re_unsafe_url_char.search(authority):
+        raise FetchPolicyError('R10', f'not a site address: {url!r}')
     p = url_parse.urlparse(u)
-    if p.scheme != 'https':
-        raise FetchPolicyError('R10', f'only https sites are supported: {url}')
     if not p.hostname:
         raise FetchPolicyError('R10', f'not a site address: {url}')
-    port = f':{p.port}' if p.port and p.port != 443 else ''
-    return f'https://{p.hostname.lower()}{port}/'
+    check_denied(p.hostname)  # first: the clearest reason for a denied site, whatever else is wrong with the address
+    if p.scheme != 'https':
+        raise FetchPolicyError('R10', f'only https sites are supported: {url}')
+    if p.username or p.password:
+        raise FetchPolicyError('R1', 'credentials in urls are not allowed')
+    try:
+        host = ascii_host(p.hostname)
+        port = f':{p.port}' if p.port and p.port != 443 else ''
+    except ValueError as err:
+        raise FetchPolicyError('R10', f'not a site address: {url} ({err})')
+    check_denied(host)
+    return f'https://{f"[{host}]" if ":" in host else host}{port}/'
 
 
 def _is_public(addr: str) -> bool:
@@ -134,10 +155,13 @@ class SafeFetcher:
         return any(host == h or host.endswith(f'.{h}') for h in self.allowed_hosts)
 
     def _check_address(self, url: str) -> None:
+        if re_unsafe_url_char.search(url):
+            raise FetchPolicyError('R10', f'url with a backslash, a space or a control character: {redact_url(url)!r}')
         p = url_parse.urlparse(url)
         if p.scheme != 'https' and not (self.allow_local and p.scheme == 'http'):
             raise FetchPolicyError('R10', f'only https is allowed: {redact_url(url)}')
         host = (p.hostname or '').lower()
+        check_denied(host)  # before anything else, also for redirects and robots.txt (never contacted)
         if not host or not self.host_allowed(host):
             raise FetchPolicyError('R10', f'host is not allowed for this site: {host or url}')
         if p.username or p.password:
