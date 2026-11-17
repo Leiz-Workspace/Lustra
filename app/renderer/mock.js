@@ -120,6 +120,57 @@
     return parts[gi].slice(1, -1).split('~').map((alt) => [...parts.slice(0, gi), alt, ...parts.slice(gi + 1)].join(' '));
   };
   const jobs = new Map();
+  // download jobs: a fake progress run; a multi-site group starts its next site when the previous one ended (like main)
+  const runJob = (job, onEnd) => {
+    job.status = 'running';
+    job.startedAt = Date.now();
+    job.progress = { stateName: 'SEARCHING' };
+    emit('jobs:update', { ...job });
+    let n = 0;
+    const t = setInterval(() => {
+      if (job.status !== 'running') { clearInterval(t); onEnd?.(); return; }
+      n += 4;
+      const known = job.group?.index ? Math.min(30, n) : 0; // later sites skip files an earlier site already brought (md5)
+      job.progress = n < 12 ? { stateName: 'SCANNING_PAGES1', total: 96 } : { stateName: 'DOWNLOADING', totalAll: 96, processed: Math.min(96, n), success: Math.min(96, n) - known, known, bytes: n * 1.7e6 };
+      if (n >= 96) { job.status = 'done'; job.progress.stateName = 'DONE'; clearInterval(t); emit('jobs:update', { ...job }); onEnd?.(); return; }
+      emit('jobs:update', { ...job });
+    }, 300);
+  };
+  const newJob = (q, extra = {}) => {
+    const id = `job-${Date.now()}-${jobs.size}`;
+    const job = { id, module: q.module, tags: q.tags, label: q.label || '', dest: q.path, status: 'queued', createdAt: Date.now(), startedAt: 0, progress: {}, logTail: ['mock job started'], group: null, ...extra };
+    jobs.set(id, job);
+    return job;
+  };
+  const startNextInGroup = (gid) => {
+    const next = [...jobs.values()].filter((j) => j.group?.id === gid && j.status === 'queued').sort((a, b) => a.group.index - b.group.index)[0];
+    if (next) runJob(next, () => startNextInGroup(gid));
+  };
+  // library import job: scan, then metadata requests; window.__mockImportNames = false: nothing unknown / missing
+  const runImport = (job, opts) => {
+    job.status = 'running';
+    job.startedAt = Date.now();
+    const names = window.__mockImportNames !== false;
+    const unknownNames = names ? ['IMG_0001.jpg: not recognized', 'wallpaper.png: not recognized', '12345.jpg: no module prefix in the name (id 12345): choose the module of such names'] : [];
+    const notFoundItems = names ? ['sub/db_4410.jpg (db id 4410)', 'rx_99.png (rx id 99)'] : [];
+    let n = 0;
+    const t = setInterval(() => {
+      if (job.status !== 'running') { clearInterval(t); return; }
+      n += 10;
+      const base = { scanned: Math.min(130, n * 2), known: 12, unknown: unknownNames.length, module: n < 80 ? 'db' : 'rx', dryRun: opts.dryRun };
+      if (n < 60 || opts.dryRun) job.progress = { ...base, stateName: 'IMPORT_SCAN', totalAll: 0 };
+      else job.progress = { ...base, stateName: 'IMPORT_FETCH', totalAll: 115, processed: Math.min(115, n - 60), success: Math.max(0, Math.min(115, n - 60) - notFoundItems.length), notFound: n - 60 >= 115 ? notFoundItems.length : 0, failed: 0, requests: Math.ceil((n - 60) / 10) };
+      if ((opts.dryRun && n >= 60) || n - 60 >= 115) {
+        job.status = 'done';
+        job.exitCode = 0;
+        job.progress = { ...job.progress, stateName: 'DONE', scanned: 130, totalAll: 115, unknownNames, notFoundItems, failedItems: [], mismatchItems: [],
+          modules: { db: { files: 80 }, rx: { files: 35 } }, ok: true, exitCode: 0 };
+        clearInterval(t);
+      }
+      emit('jobs:update', { ...job });
+    }, 250);
+  };
+  const clean = { running: false, stop: false };
   window.lustra = {
     __mock: true,
     sidecarStatus: async () => ({ ok: true, info: { version: '2.0 r1 (mock)' } }),
@@ -266,20 +317,35 @@
         if (!q.allowDuplicate && [...jobs.values()].some((j) => j.status === 'running' && j.module === q.module && j.tags === q.tags)) {
           throw new Error('DUPLICATE: một job giống hệt đang chạy');
         }
-        const id = `job-${Date.now()}-${jobs.size}`;
-        const job = { id, module: q.module, tags: q.tags, label: q.label || '', dest: q.path, status: 'running', createdAt: Date.now(), startedAt: Date.now(), progress: { stateName: 'SEARCHING' }, logTail: ['mock job started'] };
-        jobs.set(id, job);
-        let n = 0;
-        const t = setInterval(() => {
-          n += 4;
-          job.progress = n < 12 ? { stateName: 'SCANNING_PAGES1', total: 96 } : { stateName: 'DOWNLOADING', totalAll: 96, processed: Math.min(96, n), success: Math.min(96, n), bytes: n * 1.7e6 };
-          if (n >= 96) { job.status = 'done'; job.progress.stateName = 'DONE'; clearInterval(t); }
-          emit('jobs:update', { ...job });
-        }, 300);
+        const job = newJob(q);
+        runJob(job);
         return { ...job };
       },
-      cancel: async (id) => { const j = jobs.get(id); if (j) { j.status = 'cancelled'; emit('jobs:update', { ...j }); } return true; },
-      rerun: async (id) => { const j = jobs.get(id); if (!j) throw new Error('job không còn'); return window.lustra.jobs.start({ module: j.module, tags: j.tags, path: j.dest }); },
+      startMulti: async (q, modules) => {
+        const list = [...new Set([q.module, ...(modules || [])])];
+        if (list.length < 2 || list.length > 8) throw new Error('cần 2–8 module khác nhau');
+        const group = { id: `group-${Date.now()}`, size: list.length, modules: list };
+        const made = list.map((module, index) => newJob({ ...q, module }, { group: { ...group, index } }));
+        made.forEach((j) => emit('jobs:update', { ...j }));
+        runJob(made[0], () => startNextInGroup(group.id));
+        return made.map((j) => ({ ...j }));
+      },
+      cancel: async (id) => {
+        const j = jobs.get(id);
+        if (j) {
+          const wasQueued = j.status === 'queued';
+          j.status = 'cancelled';
+          emit('jobs:update', { ...j });
+          if (wasQueued && j.group) setTimeout(() => { if (![...jobs.values()].some((x) => x.group?.id === j.group.id && x.status === 'running')) startNextInGroup(j.group.id); }, 0);
+        }
+        return true;
+      },
+      rerun: async (id) => {
+        const j = jobs.get(id);
+        if (!j) throw new Error('job không còn');
+        if (j.kind === 'import') return window.lustra.index.importLibrary({ folder: j.dest, module: j.module === '*' ? '' : j.module });
+        return window.lustra.jobs.start({ module: j.module, tags: j.tags, path: j.dest });
+      },
       list: async () => [...jobs.values()],
       clear: async () => { for (const [k, j] of jobs) if (j.status !== 'running') jobs.delete(k); return [...jobs.values()]; },
     },
@@ -326,6 +392,37 @@
     },
     library: {
       open: async () => '', reveal: async () => true,
+    },
+    index: {
+      // clean: main confirms natively (here: window.confirm), then index.cleanProgress / index.cleanDone notifications
+      clean: async (opts) => {
+        if (clean.running) throw new Error('index clean is already running');
+        const dryRun = opts?.dryRun === true;
+        if (!dryRun && !window.confirm('(mock) Dọn index các lần tải? Chỉ xoá dòng trong index, không xoá file.')) throw new Error('cancelled');
+        Object.assign(clean, { running: true, stop: false });
+        const job = `index-clean-${Date.now()}`;
+        const total = 1834;
+        let checked = 0;
+        const t = setInterval(() => {
+          checked = Math.min(total, checked + 500);
+          const missing = Math.round(checked * 0.02);
+          const r = { job, total, checked, missing, missingDirs: Math.min(9, missing), removed: dryRun ? 0 : Math.max(0, missing - Math.min(9, missing)), dryRun, missingFolders: false, cancelled: clean.stop, folders: ['/media/user/Ổ ngoài/Lustra'] };
+          if (checked < total && !clean.stop) { emit('sidecar:notify', { method: 'index.cleanProgress', params: r }); return; }
+          clearInterval(t);
+          clean.running = false;
+          emit('sidecar:notify', { method: 'index.cleanDone', params: { ...r, ok: true, message: '' } });
+        }, 400);
+        return { job, dryRun, missingFolders: false };
+      },
+      cleanCancel: async () => { clean.stop = true; return { cancelled: clean.running }; },
+      pickImportFolder: async () => '/home/user/Pictures/booru',
+      importLibrary: async (opts) => {
+        if (opts.folder !== '/home/user/Pictures/booru') throw new Error('choose the folder with the folder dialog first');
+        const job = newJob({ module: opts.module || '*', tags: opts.folder, path: opts.folder },
+          { kind: 'import', label: opts.dryRun ? 'Kiểm tra thư mục (không gửi request)' : 'Nhập thư viện vào index' });
+        runImport(job, opts);
+        return { ...job };
+      },
     },
     gen: {
       status: async () => ({ running: gen.running, session: gen.session, events: gen.events.slice(-300), key: aiStatus(), models: ['claude-opus-5-5', 'claude-sonnet-5-5'], defaults: { ...settings.ai } }),
