@@ -20,6 +20,7 @@ MAX_SOURCE_BYTES = 200 * 1024
 MIN_INTERVAL_FLOOR = 0.5  # seconds between api requests of a non builtin extension (R4)
 
 ALLOWED_LUSTRA = {
+    'lustra.sdk',  # the stable API for extensions (lustra/sdk.py): what generated code uses
     'lustra.defines', 'lustra.download', 'lustra.download_base', 'lustra.download_gelbooru', 'lustra.download_db', 'lustra.download_json',
     'lustra.logger', 'lustra.rex', 'lustra.utils', 'lustra.tags', 'lustra.vcs', 'lustra.vcs.version', 'lustra.vcs.debug',
 }

@@ -26,6 +26,7 @@ import threading
 import time
 import zipfile
 
+from lustra.denylist import denied_in_extension, denied_message
 from lustra.modspec import ExtensionManifest
 
 from .fetch import FetchPolicyError, SafeFetcher, host_of, redact_url
@@ -187,6 +188,8 @@ def _summary(checks: list[dict]) -> dict:
 
 def _manifest_checks(draft: pathlib.Path) -> tuple[list[dict], ExtensionManifest | None]:
     checks: list[dict] = []
+    if d := denied_in_extension(draft):  # rules R6 / R7 / R8: never generated, never installed
+        checks.append({'id': f'domain:{d.rule}', 'ok': False, 'severity': 'error', 'detail': denied_message(d)})
     try:
         m = ExtensionManifest.load(draft / 'manifest.json', 'user')
         checks.append({'id': 'manifest', 'ok': True, 'severity': 'error', 'detail': f'{m.id} ({m.abbr}) {m.version}'})

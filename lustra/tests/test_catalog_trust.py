@@ -1,0 +1,342 @@
+# coding=UTF-8
+"""
+Lustra: tests of the signed remote extension catalog (lustra/ed25519.py, lustra/trust.py, lustra/extensions.py,
+tools/sign_catalog.py), offline. Development key pairs are generated in temporary folders for these tests only.
+Run: python -m unittest lustra.tests.test_catalog_trust
+"""
+#########################################
+#
+#
+
+import base64
+import contextlib
+import datetime
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import TestCase, mock
+
+from lustra.logger import Logger
+
+Logger.init(True, True)
+
+from lustra import ed25519, trust  # noqa: E402
+from lustra.extensions import ExtensionError, Extensions  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# RFC 8032 section 7.1: (secret key, public key, message, signature)
+RFC8032 = [
+    ('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60',
+     'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a', '',
+     'e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b'),
+    ('4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb',
+     '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c', '72',
+     '92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00'),
+    ('c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7',
+     'fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025', 'af82',
+     '6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a'),
+    ('833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42',
+     'ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf', hashlib.sha512(b'abc').hexdigest(),
+     'dc2a4459e7369633a52b1bf277839a00201009a3efbf3ecb69bea2186c26b58909351fc9ac90b3ecfdfbc7c66431e0303dca179c138ac17ad9bef1177331a704'),
+]
+SEED = bytes(range(32))  # development key of these tests only
+OTHER_SEED = bytes(range(1, 33))
+CATALOG_URL = 'https://catalog.example/lustra/index.json'
+
+
+def _key(seed: bytes) -> trust.TrustedKey:
+    pub = ed25519.public_key(seed)
+    return trust.TrustedKey(trust.key_id(pub), pub)
+
+
+def _sig(index: bytes, seed: bytes = SEED) -> bytes:
+    return json.dumps(trust.make_signature(index, seed)).encode()
+
+
+def _load_tool():
+    spec = importlib.util.spec_from_file_location('sign_catalog_tool', ROOT / 'tools' / 'sign_catalog.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class Ed25519Tests(TestCase):
+    def test_rfc8032_vectors(self) -> None:
+        for sk, pk, msg, sig in RFC8032:
+            sk, pk, msg, sig = (bytes.fromhex(x) for x in (sk, pk, msg, sig))
+            with self.subTest(pk=pk.hex()[:8]):
+                self.assertEqual(pk, ed25519.public_key(sk))
+                self.assertEqual(sig, ed25519.sign(sk, msg))
+                self.assertTrue(ed25519.verify(pk, msg, sig))
+                self.assertFalse(ed25519.verify(pk, msg + b'\0', sig))
+                bad = bytearray(sig)
+                bad[5] ^= 1
+                self.assertFalse(ed25519.verify(pk, msg, bytes(bad)))
+
+    def test_malformed_inputs(self) -> None:
+        _sk, pk, msg, sig = (bytes.fromhex(x) for x in RFC8032[1])
+        s = int.from_bytes(sig[32:], 'little')
+        malleable = sig[:32] + int.to_bytes(s + ed25519._Q, 32, 'little')  # S + L: same point equation, must be refused
+        self.assertFalse(ed25519.verify(pk, msg, malleable))
+        self.assertFalse(ed25519.verify(pk[:31], msg, sig))
+        self.assertFalse(ed25519.verify(pk, msg, sig[:63]))
+        self.assertFalse(ed25519.verify(b'\xff' * 32, msg, sig))  # not a curve point
+        self.assertFalse(ed25519.verify('not bytes', msg, sig))  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            ed25519.public_key(b'short')
+
+
+class CatalogTrustTests(TestCase):
+    index = json.dumps({'extensions': [{'id': 'demo', 'url': 'https://x.example/demo.zip', 'sha256': 'ab' * 32}]}).encode()
+
+    def test_signed_catalog(self) -> None:
+        res = trust.verify_catalog(self.index, _sig(self.index), keys=[_key(SEED)])
+        self.assertEqual((True, _key(SEED).key_id), (res.signed, res.key_id))
+
+    def test_refusals(self) -> None:
+        keys = [_key(SEED)]
+        tampered = self.index.replace(b'demo.zip', b'evil.zip')
+        cases = {
+            'tampered index': (tampered, _sig(self.index), keys, 'không hợp lệ'),
+            'other key': (self.index, _sig(self.index, OTHER_SEED), keys, 'không tin cậy'),
+            'unsigned': (self.index, None, keys, 'chưa được ký'),
+            'placeholder keys': (self.index, _sig(self.index), [], 'khoá giữ chỗ'),
+            'bad format': (self.index, b'{"format": "x"}', keys, 'định dạng'),
+            'not json': (self.index, b'\x00garbage', keys, 'định dạng'),
+            'short signature': (self.index, json.dumps({**json.loads(_sig(self.index)), 'signature': 'AAAA'}).encode(), keys, 'Chữ ký'),
+        }
+        # same key id but the signature of another message (no signing context): a raw Ed25519 signature of the bytes is not accepted
+        raw = base64.b64encode(ed25519.sign(SEED, self.index)).decode()
+        cases['no context'] = (self.index, json.dumps({**json.loads(_sig(self.index)), 'signature': raw}).encode(), keys, 'không hợp lệ')
+        for name, (index, sig, k, words) in cases.items():
+            with self.subTest(name), self.assertRaises(trust.CatalogTrustError) as ctx:
+                trust.verify_catalog(index, sig, keys=k)
+            self.assertIn(words, str(ctx.exception))
+
+    def test_expiry(self) -> None:
+        now = datetime.datetime(2026, 11, 17, tzinfo=datetime.UTC)
+        for expires, ok in (('2026-12-01T00:00:00Z', True), ('2026-11-01', False), ('soon', False)):
+            index = json.dumps({'expires': expires, 'extensions': []}).encode()
+            with self.subTest(expires=expires):
+                if ok:
+                    self.assertEqual(expires, trust.verify_catalog(index, _sig(index), keys=[_key(SEED)], now=now).expires)
+                else:
+                    with self.assertRaises(trust.CatalogTrustError):
+                        trust.verify_catalog(index, _sig(index), keys=[_key(SEED)], now=now)
+
+    def test_developer_overrides(self) -> None:
+        with mock.patch.dict(os.environ, {trust.ENV_ALLOW_UNSIGNED: '1'}):
+            self.assertFalse(trust.verify_catalog(self.index, None, keys=[]).signed)
+            with self.assertRaises(trust.CatalogTrustError):  # a signature that does not verify is never accepted
+                trust.verify_catalog(self.index.replace(b'demo', b'evil'), _sig(self.index), keys=[_key(SEED)])
+        with mock.patch.dict(os.environ, {trust.ENV_ALLOW_UNSIGNED: 'yes'}), self.assertRaises(trust.CatalogTrustError):
+            trust.verify_catalog(self.index, None, keys=[])  # only the exact value '1'
+        with tempfile.TemporaryDirectory() as tmp:
+            keys_file = pathlib.Path(tmp) / 'dev-keys.json'
+            pub = ed25519.public_key(SEED)
+            keys_file.write_text(json.dumps({'keys': [{'keyId': trust.key_id(pub), 'publicKey': base64.b64encode(pub).decode()}]}))
+            with mock.patch.dict(os.environ, {trust.ENV_KEYS_FILE: str(keys_file)}):
+                self.assertTrue(trust.verify_catalog(self.index, _sig(self.index)).signed)
+            keys_file.write_text(json.dumps({'keys': [{'keyId': '0000000000000000', 'publicKey': base64.b64encode(pub).decode()}]}))
+            with mock.patch.dict(os.environ, {trust.ENV_KEYS_FILE: str(keys_file)}), self.assertRaises(trust.CatalogTrustError):
+                trust.trusted_keys()
+
+    def test_shipped_keys_and_sig_url(self) -> None:
+        self.assertIsInstance(trust.load_keys(trust.KEYS_FILE), list)  # the placeholder file is valid (maybe empty)
+        self.assertEqual('https://h.example/c/index.json.sig?v=2', trust.sig_url('https://h.example/c/index.json?v=2#x'))
+
+
+class RemoteCatalogTests(TestCase):
+    """fetch_remote_catalog / install_from_remote_catalog with a fake https transport"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.patches = [mock.patch.object(Extensions, 'user_dir', return_value=self.root / 'user'),
+                        mock.patch.object(Extensions, 'catalog_dir', return_value=self.root / 'catalog'),
+                        mock.patch.object(trust, 'trusted_keys', return_value=[_key(SEED)])]
+        for p in self.patches:
+            p.start()
+        self.served: dict[str, bytes | None] = {}
+        self.requested: list[str] = []
+
+    def tearDown(self) -> None:
+        for p in self.patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def _get(self, url, limit, timeout, missing_ok=False):
+        self.requested.append(url)
+        if url not in self.served:
+            if missing_ok:
+                return None
+            raise ExtensionError(f'404 {url}')
+        return self.served[url]
+
+    def _publish(self, entries: list[dict], seed: bytes | None = SEED, tamper: bool = False) -> None:
+        index = json.dumps({'extensions': entries}).encode()
+        self.served[CATALOG_URL] = index + (b' ' if tamper else b'')  # one byte added after signing: tampered
+        if seed is not None:
+            self.served[trust.sig_url(CATALOG_URL)] = _sig(index, seed)
+
+    def _archive(self, ext_id: str = 'remotedemo', abbr: str = 'zr1') -> tuple[str, str]:
+        from lustra.extgen.sandbox import pack
+        from lustra.extgen.scaffold import create_draft, survey
+        from lustra.tests.test_extgen import SITE, fake_fetcher
+        draft = create_draft(self.root / 'drafts', survey(SITE, fake_fetcher()), ext_id=ext_id, abbr=abbr, engine='gelbooru_dapi')
+        z = pack(draft, self.root / f'{ext_id}.zip')
+        url = f'https://files.example/{ext_id}.zip'
+        self.served[url] = pathlib.Path(z['path']).read_bytes()
+        return url, z['sha256']
+
+    def test_entries_are_verified_and_flagged(self) -> None:
+        self._publish([{'id': 'good', 'url': 'https://f.example/g.zip', 'sha256': 'a' * 64, 'site': 'https://booru.example/'},
+                       {'id': 'yt', 'url': 'https://f.example/y.zip', 'sha256': 'b' * 64, 'site': 'https://www.youtube.com/'},
+                       {'id': 'plain-http', 'url': 'http://f.example/p.zip', 'sha256': 'c' * 64},
+                       {'id': 'BAD ID', 'url': 'https://f.example/b.zip', 'sha256': 'd' * 64}])
+        with mock.patch.object(Extensions, '_https_get', side_effect=self._get):
+            items = Extensions.fetch_remote_catalog(CATALOG_URL)
+        self.assertEqual(['good', 'yt'], [i['id'] for i in items])
+        self.assertTrue(all(i['signed'] and i['keyId'] == _key(SEED).key_id for i in items))
+        self.assertNotIn('denied', items[0])
+        self.assertEqual('R7', items[1]['denied']['rule'])
+        self.assertIn(trust.sig_url(CATALOG_URL), self.requested)
+
+    def test_untrusted_catalogs_are_refused(self) -> None:
+        for name, kw in (('unsigned', {'seed': None}), ('other key', {'seed': OTHER_SEED}), ('tampered', {'tamper': True})):
+            self.served.clear()
+            self._publish([{'id': 'good', 'url': 'https://f.example/g.zip', 'sha256': 'a' * 64}], **kw)
+            with self.subTest(name), mock.patch.object(Extensions, '_https_get', side_effect=self._get), \
+                    self.assertRaises(ExtensionError) as ctx:
+                Extensions.fetch_remote_catalog(CATALOG_URL)
+            self.assertRegex(str(ctx.exception), 'chưa được ký|không tin cậy|không hợp lệ')
+
+    def test_install_from_the_signed_catalog(self) -> None:
+        url, sha = self._archive()
+        self._publish([{'id': 'remotedemo', 'name': 'Remote demo', 'url': url, 'sha256': sha, 'site': 'https://fakebooru.test/'}])
+        with mock.patch.object(Extensions, '_https_get', side_effect=self._get):
+            with self.assertRaises(ExtensionError) as ctx:  # the catalog changed since the user confirmed another sha256
+                Extensions.install_from_remote_catalog(CATALOG_URL, 'remotedemo', 'f' * 64)
+            self.assertIn('Catalog đã thay đổi', str(ctx.exception))
+            self.assertNotIn(url, self.requested)
+            try:
+                m = Extensions.install_from_remote_catalog(CATALOG_URL, 'remotedemo', sha)
+                self.assertEqual('remotedemo', m.id)
+                self.assertTrue((self.root / 'user' / 'remotedemo' / 'manifest.json').is_file())
+            finally:
+                Extensions.uninstall('remotedemo')
+
+    def test_install_refusals(self) -> None:
+        url, sha = self._archive('remotedemo2', 'zr2')
+        entries = [{'id': 'announced', 'url': url, 'sha256': sha},  # the archive holds another extension id
+                   {'id': 'ytdemo', 'url': url, 'sha256': sha, 'site': 'https://youtu.be/'}]
+        self._publish(entries)
+        with mock.patch.object(Extensions, '_https_get', side_effect=self._get):
+            with self.assertRaises(ExtensionError) as ctx:
+                Extensions.install_from_remote_catalog(CATALOG_URL, 'announced')
+            self.assertIn('not \'announced\'', str(ctx.exception))
+            self.requested.clear()
+            with self.assertRaises(ExtensionError) as ctx:
+                Extensions.install_from_remote_catalog(CATALOG_URL, 'ytdemo')
+            self.assertIn('danh sách chặn', str(ctx.exception))
+            self.assertNotIn(url, self.requested)  # a denied entry is never downloaded
+            with self.assertRaises(ExtensionError):
+                Extensions.install_from_remote_catalog(CATALOG_URL, 'missing')
+            self.served[CATALOG_URL] += b' '  # tampered after signing: refused before any archive download
+            self.requested.clear()
+            with self.assertRaises(ExtensionError):
+                Extensions.install_from_remote_catalog(CATALOG_URL, 'announced')
+            self.assertNotIn(url, self.requested)
+        self.assertFalse((self.root / 'user' / 'remotedemo2').exists())
+
+    def test_sidecar_install_method(self) -> None:
+        from lustra import server
+        url, sha = self._archive('remotedemo3', 'zr3')
+        self._publish([{'id': 'remotedemo3', 'url': url, 'sha256': sha}])
+        with mock.patch.object(Extensions, '_https_get', side_effect=self._get):
+            try:
+                res = server.m_ext_install({'remoteId': 'remotedemo3', 'catalogUrl': CATALOG_URL, 'sha256': sha})
+                self.assertEqual('remotedemo3', res['id'])
+            finally:
+                Extensions.uninstall('remotedemo3')
+
+
+class SignToolTests(TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.tool = _load_tool()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.tool.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_genkey_sign_verify(self) -> None:
+        key = self.root / 'signing-key.pem'
+        code, out, _ = self._run('genkey', '--out', str(key))
+        self.assertEqual(0, code)
+        entry = json.loads(out)['entry']
+        if os.name == 'posix':
+            self.assertEqual(0o600, key.stat().st_mode & 0o777)
+        self.assertEqual(2, self._run('genkey', '--out', str(key))[0])  # never overwritten
+        self.assertEqual(entry, json.loads(self._run('pubkey', '--key', str(key))[1]))
+        index = self.root / 'index.json'
+        index.write_text(json.dumps({'extensions': [{'id': 'demo', 'url': 'https://x.example/d.zip', 'sha256': 'ab' * 32}]}))
+        code, out, _ = self._run('sign', str(index), '--key', str(key), '--expires-days', '30')
+        self.assertEqual(0, code)
+        self.assertEqual(entry['keyId'], json.loads(out)['keyId'])
+        self.assertTrue(json.loads(index.read_text())['expires'].endswith('Z'))
+        self.assertEqual(0, self._run('verify', str(index), '--pubkey', entry['publicKey'])[0])
+        self.assertEqual(1, self._run('verify', str(index))[0])  # not one of the shipped keys
+        pub = base64.b64decode(entry['publicKey'])
+        res = trust.verify_catalog(index.read_bytes(), (self.root / 'index.json.sig').read_bytes(),
+                                   keys=[trust.TrustedKey(entry['keyId'], pub)])
+        self.assertTrue(res.signed)
+        index.write_text(index.read_text().replace('d.zip', 'e.zip'))
+        self.assertEqual(1, self._run('verify', str(index), '--pubkey', entry['publicKey'])[0])
+        index.write_text(json.dumps({'extensions': [{'id': 'demo', 'url': 'http://x.example/d.zip'}]}))
+        self.assertEqual(2, self._run('sign', str(index), '--key', str(key))[0])  # entries the app would skip
+
+    def test_pem_format(self) -> None:
+        pem = self.tool.pem_encode(SEED)
+        self.assertEqual(SEED, self.tool.pem_decode(pem))
+        with self.assertRaises(self.tool.ToolError):
+            self.tool.pem_decode(pem.replace('PRIVATE KEY', 'PUBLIC KEY'))
+
+    @unittest.skipUnless(shutil.which('openssl'), 'openssl is not installed')
+    def test_openssl_interop(self) -> None:
+        key = self.root / 'ossl.pem'
+        if subprocess.run(['openssl', 'genpkey', '-algorithm', 'ed25519', '-out', str(key)], capture_output=True).returncode:
+            self.skipTest('this openssl has no Ed25519')
+        seed = self.tool.read_key(key)
+        pub_der = subprocess.run(['openssl', 'pkey', '-in', str(key), '-pubout', '-outform', 'DER'], capture_output=True, check=True).stdout
+        self.assertEqual(pub_der[-32:], ed25519.public_key(seed))
+        msg = self.root / 'msg.bin'
+        msg.write_bytes(trust.signed_message(b'{"extensions": []}\n'))
+        sig = self.root / 'sig.bin'
+        sig.write_bytes(ed25519.sign(seed, msg.read_bytes()))
+        r = subprocess.run(['openssl', 'pkeyutl', '-verify', '-inkey', str(key), '-rawin', '-in', str(msg), '-sigfile', str(sig)],
+                           capture_output=True, text=True)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+
+
+if __name__ == '__main__':
+    sys.exit(unittest.main())
+
+#
+#
+#########################################
