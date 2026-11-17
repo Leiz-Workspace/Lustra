@@ -597,7 +597,27 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Sửa:** chỉ GPU `shared` (Intel, Apple) mới là bộ nhớ chung; card khác không đọc được VRAM ghi "VRAM unknown (no nvidia-smi)" với NVIDIA, "VRAM unknown" với hãng khác; app ghi "không đọc được VRAM: server không có nvidia-smi". Tên hãng theo `VENDOR_NAMES` (NVIDIA, AMD, Intel). `hardware_check` không đổi (`no_gpu`). Test: tên card NVIDIA từ sysfs, dòng log với card NVIDIA không đọc được VRAM, GPU Intel dùng chung, APU AMD.
 - **Phát hành:** version 2.0.2 (`app/package.json`, lock file, `pyproject.toml`; lõi `2.0 r2`), ghi chú `docs/releases/v2.0.2.md`; `develop` → `staging` (rc) → `production`.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ae)
+### 7af. CI trên Forgejo của tổ chức, luồng pull request, bỏ tên dự án gốc khỏi repo và lịch sử commit — 2026-11-17
+- **Forgejo:**
+  - `.forgejo/workflows/ci.yml`: ruff và test offline trên Python 3.11; danh sách module lấy từ `run-tests.yml` nên hai nơi không lệch nhau.
+  - `forgejo-release.yml` (tag `v*`): AppImage và `.deb` Linux x64, model server CPU, `SHA256SUMS-linux` ký minisign, package generic và Debian, image model server quét Trivy và ký cosign.
+  - Workflow của GitHub (`.github/`) không chạy trên Forgejo.
+  - Repo chưa được đưa vào platform: chưa có mirror, khoá ký và tag thử.
+- **Luồng pull request:** mọi thay đổi vào `develop`, `staging`, `production` đi qua PR (#1–#3). `run-tests.yml` chạy với mọi PR và có job gộp "Tests passed" làm check bắt buộc cho ruleset sau này. Repo công khai chỉ dùng runner GitHub-hosted.
+- **Bỏ tên dự án gốc khỏi file:**
+  - Repo ghi "bản gốc" hoặc "original work of trickerer01"; `LICENSE` giữ dòng bản quyền MIT của tác giả gốc.
+  - `.claude/` chỉ nằm trên máy dev (`/.claude/` trong `.gitignore`).
+  - Test giới hạn tốc độ bớt nhạy với độ trễ của runner.
+- **Viết lại lịch sử commit (theo yêu cầu chủ repo):**
+  - Message của 4 commit có tên dự án gốc được viết lại bằng `git filter-branch --msg-filter`.
+  - Cây file, tác giả và ngày của cả 58 commit giữ nguyên (đã kiểm từng cặp cũ / mới, cả commit cha); mọi hash commit đổi.
+  - Đã force-push `develop`, `staging`, `production` và 4 tag release. Lượt Release do lần push này kích hoạt nhận ra không có file phát hành nào đổi nên không đăng gì.
+  - `build-info.json` của 4 release giờ ghi commit mới. File phát hành không đổi vì `SHA256SUMS.txt` không gồm `build-info.json`.
+  - `target_commitish` của release đặt theo nhánh, vì GitHub không nhận SHA cho release đã có.
+  - Trang của PR đã merge (#1–#3) vẫn trỏ tới commit cũ (GitHub không cho sửa), và 3 commit gộp tạo trên GitHub mất chữ ký "Verified".
+  - Bản sao lưu trước khi viết lại là một git bundle trong `~/Workspace/_backup/`. Clone cũ cần `git fetch` rồi `git reset --hard origin/<nhánh>`.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7af)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
@@ -610,4 +630,5 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - thử trên máy Windows / macOS thật: app (CI đã self-test cả 6 nền tảng), model server chạy độc lập (CPU, DirectML), script chạy nền;
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
-  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn).
+  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
+  - đưa repo vào Forgejo của tổ chức (mirror, khoá ký minisign / cosign, tag thử); ruleset cho `develop`, `staging`, `production`: bắt buộc PR, check "Tests passed", không xoá nhánh, không force-push (7af).
