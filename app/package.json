@@ -1,17 +1,75 @@
 {
   "name": "lustra-desktop",
   "productName": "Lustra",
+  "desktopName": "lustra.desktop",
   "version": "2.0.1",
   "description": "Lustra desktop UI (Electron) for the Lustra booru downloader core",
+  "author": "Lustra contributors",
   "main": "main.js",
   "private": true,
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "start:debug": "electron . --enable-logging --lustra-devtools",
-    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js"
+    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js",
+    "check:core": "node -e \"if (!require('fs').existsSync('build/core/lustra-core')) { console.error('frozen core missing: run python tools/build_core.py in the repo root first'); process.exit(1); }\"",
+    "dist": "npm run check:core && electron-builder --publish never",
+    "dist:dir": "npm run check:core && electron-builder --dir --publish never"
+  },
+  "build": {
+    "appId": "app.lustra.desktop",
+    "productName": "Lustra",
+    "copyright": "MIT License, Lustra contributors (derived from Ruxx by trickerer01)",
+    "artifactName": "Lustra-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "icon-utils.js",
+      "package.json",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build/core/lustra-core",
+        "to": "core",
+        "filter": ["**/*"]
+      }
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "afterPack": "build/after-pack.js",
+    "linux": {
+      "target": ["AppImage"],
+      "executableName": "lustra",
+      "syncDesktopName": true,
+      "icon": "assets/icons/full-mask-orange.png",
+      "category": "Network",
+      "synopsis": "Booru downloader",
+      "description": "Booru downloader",
+      "executableArgs": []
+    },
+    "win": {
+      "target": ["nsis", "zip"],
+      "icon": "assets/icons/full-mask-orange.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.utilities",
+      "icon": "assets/icons/full-mask-orange.png"
+    }
   },
   "devDependencies": {
-    "electron": "45.2.1"
+    "electron": "45.2.1",
+    "electron-builder": "26.18.0"
   }
 }

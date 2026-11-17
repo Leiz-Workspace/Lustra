@@ -47,6 +47,7 @@
             <input id="tag-text" type="text" autocomplete="off" spellcheck="false" placeholder="Nhập tag… (Tab/Enter để thêm, gõ - để loại trừ)">
             <div class="ac" id="ac" hidden></div>
           </div>
+          <button class="btn icon-btn" id="btn-history" title="Lịch sử và truy vấn đã lưu"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></button>
           <button class="btn icon-btn" id="btn-az" title="Chọn tag theo A–Z">A–Z</button>
           <button class="btn" id="btn-count" title="Đếm số kết quả">Đếm</button>
           <button class="btn outline" id="btn-preview" title="Xem trước kết quả">Preview</button>
@@ -63,7 +64,19 @@
           <button class="btn sm ghost" data-act="clear">Bỏ chọn</button>
         </div>
 
-        <div class="query-line" id="query-line"><code id="query-text"></code><span id="query-status"></span></div>
+        <div class="query-line" id="query-line"><code id="query-text"></code><span id="query-status"></span>
+          <span class="query-tools">
+            <button class="btn sm ghost" id="btn-files" title="Tìm theo tên file, đường dẫn hoặc link post (có thể dán hoặc kéo-thả file vào ô tìm kiếm)">Theo tên file</button>
+            <button class="btn sm ghost" id="btn-save-query" title="Lưu truy vấn hiện tại">☆ Lưu truy vấn</button>
+            <button class="btn sm ghost" id="btn-related" title="Tag hay đi kèm trong trang kết quả đầu" hidden>Tag liên quan</button>
+          </span></div>
+
+        <div class="related glass" id="related" hidden>
+          <div class="related-head"><b>Tag liên quan</b><span class="muted" id="related-info"></span>
+            <span class="row"><label class="check" title="highres, absurdres, commentary…"><input type="checkbox" id="related-meta"> Tag metadata</label>
+              <button class="btn sm ghost" id="related-refresh">Làm mới</button><button class="btn sm ghost" id="related-close" title="Đóng">✕</button></span></div>
+          <div class="related-list" id="related-list"></div>
+        </div>
 
         <details class="filters glass" id="filters" open>
           <summary>Bộ lọc & tuỳ chọn tải</summary>
@@ -103,6 +116,8 @@
         <div class="results glass" id="results">
           <div class="results-bar">
             <div id="results-info" class="muted">Nhập tag rồi bấm <b>Preview</b> để xem trước, hoặc <b>Tải xuống</b> để tải tất cả.</div>
+            <label class="check pv-size" title="Số post mỗi trang preview (tối đa theo website)">Mỗi trang
+              <select id="pv-size"><option value="50">50</option><option value="100">100</option><option value="200" selected>200</option><option value="max">Tối đa</option></select></label>
             <div class="results-tools" id="results-tools" hidden>
               <label class="check"><input type="checkbox" id="show-excluded"> Hiện post bị lọc</label>
               <button class="btn sm ghost" id="sel-all">Chọn hết</button>
@@ -119,6 +134,14 @@
         <aside class="drawer glass" id="az-drawer" hidden>
           <div class="drawer-head"><b>Chọn tag A–Z</b><button class="btn sm ghost" id="az-close">✕</button></div>
           <div class="az-host" id="az-drawer-host"></div>
+        </aside>
+
+        <aside class="drawer glass" id="hist-drawer" hidden>
+          <div class="drawer-head">
+            <div class="seg" id="hist-tabs"><button data-tab="history" class="on">Gần đây</button><button data-tab="saved">Đã lưu</button></div>
+            <button class="btn sm ghost" id="hist-close">✕</button></div>
+          <div class="hist-tools"><button class="btn sm" id="hist-save">☆ Lưu truy vấn hiện tại…</button><button class="btn sm ghost danger" id="hist-clear">Xoá lịch sử</button></div>
+          <div class="hist-list" id="hist-list"></div>
         </aside>
       </section>
 
@@ -205,6 +228,9 @@
             <h3>API key theo module</h3>
             <p class="muted" id="keys-note"></p>
             <div id="api-keys"></div>
+            <h3>Giới hạn tag của tài khoản</h3>
+            <p class="muted">Số tag tối đa mỗi lần tìm mà tài khoản của bạn được phép (0 = mặc định của module). Danbooru: 2 (thường), 6 (Gold), 12 (Platinum).</p>
+            <div id="tag-limits"></div>
           </div>
 
           <div class="glass panel">
@@ -230,7 +256,7 @@
   <div id="toasts"></div>
   <div class="modal" id="modal" hidden><div class="modal-card glass" id="modal-card"></div></div>
 
-  <script src="mock.js"></script>
+  <!-- mock.js (browser-only stand-in for the preload bridge) is loaded by app.js only when window.lustra is missing -->
   <script src="app.js"></script>
 </body>
 </html>

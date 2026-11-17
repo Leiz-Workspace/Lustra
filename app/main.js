@@ -18,11 +18,19 @@ const { pathToFileURL } = require('node:url');
 const netlib = require('node:net');
 const dnsp = require('node:dns').promises;
 
+// Linux: Electron derives the window WM_CLASS (X11) and app_id (Wayland) from the desktop name ('lustra.desktop' -> 'lustra'),
+// so launchers must use StartupWMClass=lustra (lowercase) for docks to group the window with its launcher
+const DESKTOP_ID = 'lustra';
+const { pngsToIco } = require('./icon-utils');
+
 app.setName('Lustra');
 if (process.env.LUSTRA_USER_DATA) app.setPath('userData', path.resolve(process.env.LUSTRA_USER_DATA));
-if (process.platform === 'linux' && typeof app.setDesktopName === 'function') app.setDesktopName('lustra.desktop');
+if (process.platform === 'linux' && typeof app.setDesktopName === 'function') app.setDesktopName(`${DESKTOP_ID}.desktop`);
+// <input type=date> follows the Chromium UI language: Vietnamese shows dd/mm/yyyy like the rest of the UI (before 'ready')
+app.commandLine.appendSwitch('lang', 'vi');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
+const CORE_NAME = process.platform === 'win32' ? 'lustra-core.exe' : 'lustra-core';
 const ICON_DIR = path.join(__dirname, 'assets', 'icons');
 const ICONS = [
   { id: 'full-mask-orange', name: 'Full mask · Orange' },
@@ -35,15 +43,27 @@ const THUMB_CACHE_MAX = 512 * 1024 * 1024;
 const THUMB_SIZE_MAX = 25 * 1024 * 1024;
 const THUMB_TIMEOUT_MS = 20000;
 const PROGRESS_PREFIX = '@@LUSTRA_PROGRESS ';
+const SETTINGS_VERSION = 3;
+const RE_ABBR = /^[a-z0-9]{2,4}$/; // module abbreviation (extension manifest 'abbr')
+const HISTORY_MAX = 50;
+const SAVED_MAX = 200;
+const QUERY_TAGS_MAX = 2000;
+const SAVED_NAME_MAX = 80;
+const QUIT_GRACE_MS = 5000; // quitting with running jobs: time given to 'cancel' before the processes are killed
 
 const DEFAULT_SETTINGS = {
-  version: 3,
+  version: SETTINGS_VERSION,
   appearance: {
     theme: 'ember',
     icon: 'full-mask-orange',
     background: { mode: 'icon', image: '', blur: 4, opacity: 0.9, dim: 0.18 },
   },
-  search: { module: 'rx', autocomplete: true, previewOnSearch: true, safePreview: false },
+  search: {
+    module: 'rx', autocomplete: true, previewOnSearch: true, safePreview: false,
+    tagLimits: {}, // abbr -> max tags per search of the user's account (0 / missing = module default)
+    history: [], // [{module, tags, at}] newest first
+    saved: [], // [{name, module, tags, at}]
+  },
   download: {
     path: path.join(os.homedir(), 'Downloads', 'Lustra'), threads: 4, images: true, videos: true, videoFormat: '',
     gender: { select: [], conf: 'medium', strict: false },
@@ -77,10 +97,18 @@ function deepMerge(base, patch) {
 function writeJsonAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+    try { fs.fsyncSync(fd); } catch { /* not supported on this filesystem */ } // a crash must not leave a truncated settings file
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
   try { fs.chmodSync(file, 0o600); } catch { /* not supported on this filesystem */ }
 }
+
+const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 
 // ---------- security helpers ----------
 
@@ -91,13 +119,13 @@ const approvedPaths = new Set(); // files picked by the user through native dial
 function redact(text) {
   return String(text)
     .replace(/([?&](?:api_key|login|user_id)=)[^&\s"]+/g, '$1<REDACTED>')
-    .replace(/(-api_key|-cookies|-headers|-proxy)(\s+|=)(\S+)/g, '$1$2<REDACTED>');
+    .replace(/(-api_key|-cookies?|-headers?|-proxy)(\s+|=)(\S+)/g, '$1$2<REDACTED>');
 }
 
-async function confirmMain(message, detail) {
-  const r = await dialog.showMessageBox(mainWindow, {
-    type: 'warning', buttons: ['Huỷ', 'Đồng ý'], defaultId: 0, cancelId: 0, noLink: true, message, detail,
-  });
+async function confirmMain(message, detail, buttons = ['Huỷ', 'Đồng ý']) {
+  const opts = { type: 'warning', buttons, defaultId: 0, cancelId: 0, noLink: true, message, detail };
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const r = await (parent ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts));
   return r.response === 1;
 }
 
@@ -121,28 +149,212 @@ async function assertPublicHost(urlString) {
   if (!addrs.length || addrs.some((a) => isPrivateAddress(a.address))) throw new Error('blocked host');
 }
 
-function loadSettings() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
-    secrets = raw.secrets || {};
-    delete raw.secrets;
-    settings = deepMerge(DEFAULT_SETTINGS, raw);
-  } catch {
-    settings = structuredClone(DEFAULT_SETTINGS);
+// ---------- settings ----------
+
+const startupNotices = []; // problems found before the window existed: shown once the renderer has loaded
+let settingsWriteBlocked = false; // a corrupt settings file that could not be backed up is never overwritten
+let settingsLoadInfo = {}; // reported by the self-test
+
+function sanitizeSecrets(obj) {
+  const out = {};
+  if (!isPlainObject(obj)) return out;
+  for (const [k, v] of Object.entries(obj)) {
+    if (!RE_ABBR.test(k) || !isPlainObject(v)) continue;
+    if (typeof v.enc === 'string' && v.enc) out[k] = { enc: v.enc };
+    else if (typeof v.plain === 'string' && v.plain) out[k] = { plain: v.plain };
   }
+  return out;
+}
+
+function matchingBrace(text, start) {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === '\\') i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+function recoverSecrets(text) {
+  // corrupt settings file: the top-level "secrets" block is written last. Parse it as a whole, else entry by entry (truncated file)
+  const starts = [...text.matchAll(/"secrets"\s*:\s*\{/g)];
+  if (!starts.length) return {};
+  const m = starts[starts.length - 1];
+  const start = m.index + m[0].length - 1;
+  const end = matchingBrace(text, start);
+  if (end > 0) {
+    try { return sanitizeSecrets(JSON.parse(text.slice(start, end + 1))); } catch { /* entry by entry */ }
+  }
+  const out = {};
+  const re = /"([a-z0-9]{2,4})"\s*:\s*\{\s*"(enc|plain)"\s*:\s*("(?:[^"\\\n]|\\.)*")\s*\}/g;
+  for (const e of text.slice(start).matchAll(re)) {
+    try { out[e[1]] = { [e[2]]: JSON.parse(e[3]) }; } catch { /* broken entry */ }
+  }
+  return sanitizeSecrets(out);
+}
+
+function backupCorruptSettings() {
+  const file = settingsFile();
+  const backup = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  try {
+    fs.copyFileSync(file, backup);
+  } catch {
+    try { fs.renameSync(file, backup); } catch { return ''; } // unreadable file: move it aside instead
+  }
+  try { fs.chmodSync(backup, 0o600); } catch { /* not supported on this filesystem */ }
+  return backup;
+}
+
+function readSettingsFile() {
+  // -> { raw } for a valid file, {} when there is none, { error, recovered } when it is corrupt or unreadable
+  let text;
+  try {
+    text = fs.readFileSync(settingsFile(), 'utf8');
+  } catch (err) {
+    return err.code === 'ENOENT' ? {} : { error: err, recovered: {} };
+  }
+  try {
+    const raw = JSON.parse(text);
+    if (!isPlainObject(raw)) throw new Error('not a JSON object');
+    return { raw };
+  } catch (err) {
+    return { error: err, recovered: recoverSecrets(text) };
+  }
+}
+
+function sanitizeQueryList(list, max, named) {
+  // search history (named = false: deduplicated by module + tags, newest first) and saved queries (named = true)
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const e of list) {
+    if (out.length >= max) break;
+    if (!isPlainObject(e) || typeof e.module !== 'string' || !RE_ABBR.test(e.module) || typeof e.tags !== 'string') continue;
+    if (!e.tags.trim() || e.tags.length > QUERY_TAGS_MAX || !Number.isFinite(e.at) || e.at < 0) continue;
+    const item = { module: e.module, tags: e.tags, at: Math.floor(e.at) };
+    if (named) {
+      if (typeof e.name !== 'string') continue;
+      out.push({ name: e.name.slice(0, SAVED_NAME_MAX), ...item });
+    } else {
+      const key = `${e.module}\n${e.tags}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function sanitizeTagLimits(obj) {
+  if (!isPlainObject(obj)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const n = typeof v === 'string' && v.trim() ? Number(v) : v;
+    if (RE_ABBR.test(k) && Number.isInteger(n) && n >= 0 && n <= 1000) out[k] = n;
+  }
+  return out;
+}
+
+// RFC 9110 token; a leading '-' would look like a CLI option
+const RE_HTTP_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z][!#$%&'*+.^_`|~0-9A-Za-z-]*$/;
+
+function normalizeHttpMap(map, kind, strict) {
+  // headers / cookies {name: value}. strict (settings:set): an invalid entry is an error shown to the user, otherwise dropped
+  if (map === null || map === undefined) return {};
+  if (!isPlainObject(map)) {
+    if (strict) throw new Error(`${kind}: phải là JSON object`);
+    return {};
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(map)) {
+    const name = String(k).trim();
+    const value = typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean') ? String(v) : null;
+    let problem = '';
+    if (!RE_HTTP_NAME.test(name)) problem = 'tên không hợp lệ';
+    else if (value === null) problem = 'giá trị phải là chuỗi';
+    else if (/[\r\n\0]/.test(value)) problem = 'giá trị không được chứa ký tự xuống dòng';
+    else if (kind === 'Cookie' && value.includes(';')) problem = 'giá trị không được chứa dấu ;';
+    if (problem) {
+      if (strict) throw new Error(`${kind} "${name.slice(0, 40)}": ${problem}`);
+      continue;
+    }
+    out[name] = value;
+  }
+  return out;
+}
+
+function sanitizeSettings() {
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) if (isPlainObject(v) && !isPlainObject(settings[k])) settings[k] = structuredClone(v);
+  if (!isPlainObject(settings.appearance.background)) settings.appearance.background = structuredClone(DEFAULT_SETTINGS.appearance.background);
   if (!THEMES.includes(settings.appearance.theme)) settings.appearance.theme = 'ember';
+  if (!ICONS.some((i) => i.id === settings.appearance.icon)) settings.appearance.icon = ICONS[0].id;
+  const s = settings.search;
+  s.history = sanitizeQueryList(s.history, HISTORY_MAX, false) || [];
+  s.saved = sanitizeQueryList(s.saved, SAVED_MAX, true) || [];
+  s.tagLimits = sanitizeTagLimits(s.tagLimits) || {};
+  settings.connection.headers = normalizeHttpMap(settings.connection.headers, 'Header', false);
+  settings.connection.cookies = normalizeHttpMap(settings.connection.cookies, 'Cookie', false);
+}
+
+function migrateSettings(from) {
   // v1/v2 -> v3: earlier default backgrounds were too blurred, the icon outline must stay visible
   const bg = settings.appearance.background;
   const oldDefaults = [[48, 0.32, 0.55], [14, 0.9, 0.18]];
-  if ((settings.version || 1) < 3 && oldDefaults.some(([b, o, d]) => bg.blur === b && bg.opacity === o && bg.dim === d)) {
+  if (from < 3 && oldDefaults.some(([b, o, d]) => bg.blur === b && bg.opacity === o && bg.dim === d)) {
     Object.assign(bg, { blur: 4, opacity: 0.9, dim: 0.18 });
   }
-  settings.version = 3;
-  if (!ICONS.some((i) => i.id === settings.appearance.icon)) settings.appearance.icon = ICONS[0].id;
+  settings.version = SETTINGS_VERSION;
+}
+
+function loadSettings() {
+  const { raw, error, recovered } = readSettingsFile();
+  // the file version, not the merged default: a v1 file has no "version" key (Ruxx-era code read 3 from the defaults)
+  const fileVersion = raw ? (Number.isInteger(raw.version) && raw.version > 0 ? raw.version : 1) : SETTINGS_VERSION;
+  secrets = raw ? sanitizeSecrets(raw.secrets) : (recovered || {});
+  if (raw) delete raw.secrets;
+  settings = deepMerge(DEFAULT_SETTINGS, raw || {});
+  sanitizeSettings();
+  migrateSettings(fileVersion);
+  settingsLoadInfo = { fileVersion: raw ? fileVersion : null, corrupt: Boolean(error), migrated: Boolean(raw && fileVersion < SETTINGS_VERSION) };
+  if (error) {
+    // a corrupt file must not cost the user their API keys: keep a copy, salvage the secrets block, tell the user
+    const backup = backupCorruptSettings();
+    const names = Object.keys(secrets);
+    const text = `File cài đặt bị hỏng (${String(error.message || error).slice(0, 200)}). `
+      + (backup ? `Đã lưu bản sao: ${backup}. ` : 'Không sao lưu được file nên app sẽ không ghi đè lên nó. ')
+      + 'Cài đặt được đặt lại mặc định; '
+      + (names.length ? `đã khôi phục API key: ${names.join(', ')}.` : 'không khôi phục được API key nào.');
+    startupNotices.push({ level: 'warn', title: 'File cài đặt bị hỏng', text });
+    Object.assign(settingsLoadInfo, { backup, recovered: names });
+    console.warn(`settings: ${text}`);
+    if (!backup) settingsWriteBlocked = true;
+    else saveSettings();
+  } else if (raw && fileVersion < SETTINGS_VERSION) {
+    saveSettings();
+    startupNotices.push({ level: 'info', text: `settings: đã chuyển từ phiên bản ${fileVersion} lên ${SETTINGS_VERSION}` });
+  }
 }
 
 function saveSettings() {
+  if (settingsWriteBlocked) return;
   writeJsonAtomic(settingsFile(), { ...settings, secrets });
+}
+
+function flushStartupNotices() {
+  for (const n of startupNotices.splice(0)) {
+    send('log', { source: 'settings', text: n.text });
+    if (n.level !== 'warn') continue;
+    send('sidecar:notify', { method: 'app.notice', params: { level: n.level, title: n.title, message: n.text } });
+    if (!process.env.LUSTRA_SELFTEST_DIR && mainWindow && !mainWindow.isDestroyed()) {
+      dialog.showMessageBox(mainWindow, { type: 'warning', message: n.title, detail: n.text, buttons: ['OK'], noLink: true }).catch(() => {});
+    }
+  }
 }
 
 function send(channel, payload) {
@@ -163,16 +375,43 @@ function resolvePython() {
   return process.platform === 'win32' ? 'python' : 'python3';
 }
 
-function pythonEnv(extra = {}) {
+function bundledCore() {
+  // frozen core (PyInstaller one-dir, see tools/build_core.py): resources/core in the packaged app, LUSTRA_CORE to test one in development
+  if (process.env.LUSTRA_CORE) return path.resolve(process.env.LUSTRA_CORE);
+  if (!app.isPackaged) return '';
+  const core = path.join(process.resourcesPath, 'core', CORE_NAME);
+  return fs.existsSync(core) ? core : '';
+}
+
+function coreCommand(kind, args = []) {
+  // kind: 'server' (JSON-RPC sidecar) | 'cli' (download job). Packaged app: the bundled core (the Python path setting is
+  // only a fallback when it is missing: the app's sources are not on disk); development: python -m lustra[.server]
+  const core = bundledCore();
+  if (core) return { cmd: core, args: [kind, ...args], cwd: userData(), frozen: true };
+  return { cmd: resolvePython(), args: ['-m', kind === 'server' ? 'lustra.server' : 'lustra', ...args], cwd: REPO_ROOT, frozen: false };
+}
+
+function pythonEnv(extra = {}, frozen = false) {
   const sep = process.platform === 'win32' ? ';' : ':';
-  return {
+  const env = {
     ...process.env,
     PYTHONUNBUFFERED: '1',
     PYTHONIOENCODING: 'utf-8',
     LUSTRA_DATA_DIR: userData(),
+    LUSTRA_CATALOG_AUTOLOAD: '0', // only builtin and installed extensions: catalog ones must be installed first
     PYTHONPATH: [REPO_ROOT, process.env.PYTHONPATH].filter(Boolean).join(sep),
     ...extra,
   };
+  if (frozen) delete env.PYTHONPATH; // the frozen core carries its own modules
+  return env;
+}
+
+function spawnCore(kind, args, extraEnv = {}) {
+  fs.mkdirSync(userData(), { recursive: true });
+  const c = coreCommand(kind, args);
+  const proc = spawn(c.cmd, c.args, { cwd: c.cwd, env: pythonEnv(extraEnv, c.frozen), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  proc.coreCmd = c.cmd;
+  return proc;
 }
 
 // ---------- secrets (API keys) ----------
@@ -187,13 +426,21 @@ async function initEncryption() {
 }
 
 async function setSecret(module, value) {
-  if (!value) { delete secrets[module]; saveSettings(); return; }
+  // an empty value never deletes a key (an untouched empty field saved by the UI): clearSecret does that
+  if (!RE_ABBR.test(String(module)) || !value) return;
   if (encryptionAvailable) secrets[module] = { enc: (await safeStorage.encryptStringAsync(value)).toString('base64') };
   else secrets[module] = { plain: value }; // no OS keyring available: stored as plain text (reported to UI)
   saveSettings();
 }
 
+function clearSecret(module) {
+  if (!RE_ABBR.test(String(module)) || !Object.hasOwn(secrets, module)) return;
+  delete secrets[module];
+  saveSettings();
+}
+
 async function getSecret(module) {
+  if (!Object.hasOwn(secrets, module)) return '';
   const s = secrets[module];
   if (!s) return '';
   if (!s.enc) return s.plain || '';
@@ -220,27 +467,47 @@ class Sidecar {
   }
 
   start() {
-    const py = resolvePython();
+    const py = coreCommand('server').cmd;
+    this.info = null;
+    this.status = { ok: false, error: 'starting' };
     this.ready = new Promise((resolve, reject) => {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    this.proc = spawn(py, ['-m', 'lustra.server'], { cwd: REPO_ROOT, env: pythonEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
-    this.proc.on('error', (err) => {
-      send('sidecar:status', { ok: false, error: `Không chạy được Python (${py}): ${err.message}` });
+    this.ready.catch(() => {}); // callers get the rejection through call(); avoid unhandled rejection warnings
+    let proc;
+    try {
+      proc = spawnCore('server', []);
+    } catch (err) {
+      this._setStatus({ ok: false, error: `Không chạy được Python (${py}): ${err.message}` });
       this._rejectReady(err);
-    });
-    readline.createInterface({ input: this.proc.stdout }).on('line', (line) => this._onLine(line));
-    readline.createInterface({ input: this.proc.stderr }).on('line', (line) => send('log', { source: 'sidecar', text: redact(line) }));
-    this.proc.on('exit', (code) => {
-      for (const { reject, timer } of this.pending.values()) { clearTimeout(timer); reject(new Error('sidecar exited')); }
+      return;
+    }
+    this.proc = proc;
+    proc.stdin.on('error', () => {}); // EPIPE after the process died must not crash the main process
+    let ended = false;
+    const onEnd = (reason) => {
+      if (ended) return; // 'error' and 'exit' can both fire
+      ended = true;
+      if (this.proc === proc) this.proc = null;
+      for (const { reject, timer } of this.pending.values()) { clearTimeout(timer); reject(new Error(`sidecar: ${reason}`)); }
       this.pending.clear();
-      send('sidecar:status', { ok: false, error: `sidecar exited (${code})` });
+      this._rejectReady(new Error(`sidecar: ${reason}`)); // no-op when already ready
+      this._setStatus({ ok: false, error: reason });
       if (!this.stopping && this.restarts < 5) {
         this.restarts += 1;
         setTimeout(() => this.start(), 1000 * this.restarts);
       }
-    });
+    };
+    proc.on('error', (err) => onEnd(`Không chạy được Python (${py}): ${err.message}`));
+    readline.createInterface({ input: proc.stdout }).on('line', (line) => this._onLine(line));
+    readline.createInterface({ input: proc.stderr }).on('line', (line) => send('log', { source: 'sidecar', text: redact(line) }));
+    proc.on('exit', (code, signal) => onEnd(`sidecar exited (${code ?? signal})`));
+  }
+
+  _setStatus(st) {
+    this.status = st;
+    send('sidecar:status', st);
   }
 
   _onLine(line) {
@@ -261,23 +528,31 @@ class Sidecar {
     if (msg.method === 'ready') {
       this.info = msg.params;
       this.restarts = 0;
-      send('sidecar:status', { ok: true, info: msg.params });
+      this._setStatus({ ok: true, info: msg.params });
       this._resolveReady(msg.params);
     } else if (msg.method === 'log') {
       send('log', { source: msg.params.scope || 'core', text: msg.params.text });
     } else if (msg.method) {
+      if (msg.method === 'tags.updateDone') onTagsUpdateDone(msg.params || {});
       send('sidecar:notify', { method: msg.method, params: msg.params });
     }
   }
 
   async call(method, params = {}, timeoutMs = 120000) {
-    await this.ready;
+    const deadline = Date.now() + timeoutMs;
+    // the timeout also covers waiting for the sidecar to start (Ruxx-era code could wait forever)
+    let waitTimer;
+    await Promise.race([
+      this.ready,
+      new Promise((_, reject) => { waitTimer = setTimeout(() => reject(new Error(`timeout: ${method} (sidecar not ready)`)), timeoutMs); }),
+    ]).finally(() => clearTimeout(waitTimer));
+    if (!this.proc) throw new Error('sidecar is not running');
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`timeout: ${method}`));
-      }, timeoutMs);
+      }, Math.max(1000, deadline - Date.now()));
       this.pending.set(id, { resolve, reject, timer });
       this.proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
     });
@@ -308,8 +583,11 @@ async function connectionArgs(module) {
   if (c.proxyNoDownload) a.push('-proxynodown');
   if (c.timeout > 0) a.push('-timeout', String(c.timeout));
   if (c.retries > 0) a.push('-retries', String(c.retries));
-  if (c.headers && Object.keys(c.headers).length) a.push('-headers', JSON.stringify(c.headers));
-  if (c.cookies && Object.keys(c.cookies).length) a.push('-cookies', JSON.stringify(c.cookies));
+  // one '-header name=value' per entry, not '-headers <json>': the core's JSON option strips every backslash (values with
+  // '"' or '\' broke); name=value is split at the first '=' and token names never contain one
+  for (const [opt, kind, map] of [['-header', 'Header', c.headers], ['-cookie', 'Cookie', c.cookies]]) {
+    for (const [name, value] of Object.entries(normalizeHttpMap(map, kind, false))) a.push(opt, `${name}=${value}`);
+  }
   const key = await getSecret(module);
   if (key) a.push('-api_key', key);
   if (settings.advanced.verbose) a.push('-verbose');
@@ -333,14 +611,34 @@ function searchArgs(q) {
   return a;
 }
 
+function tagLimitArgs(module) {
+  // account tag limit (danbooru: 2 free, 6 Gold, 12 Platinum); 0 / missing = module default
+  const n = settings.search.tagLimits?.[module];
+  return Number.isInteger(n) && n > 0 ? ['-tags_limit', String(n)] : [];
+}
+
+function asQuery(q) {
+  if (!isPlainObject(q) || typeof q.module !== 'string' || !RE_ABBR.test(q.module)) throw new Error('invalid query');
+  return q;
+}
+
 function sanitizeFolderName(s) {
   return String(s).replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60) || 'query';
 }
 
+function resolveUserPath(p) {
+  // '~/x' and relative paths are resolved against the home folder (lustra.server resolve_user_path does the same)
+  const s = String(p || '').trim();
+  if (s === '~') return os.homedir();
+  if (s.startsWith('~/') || s.startsWith('~\\')) return path.join(os.homedir(), s.slice(2));
+  return path.isAbsolute(s) ? path.normalize(s) : path.join(os.homedir(), s);
+}
+
 function downloadArgs(q) {
   const d = { ...settings.download, ...(q.options || {}) };
-  let dest = q.path || d.path;
-  if (d.subfolderPerQuery && !q.path) dest = path.join(dest, `${q.module}_${sanitizeFolderName(q.tags)}`);
+  let dest = resolveUserPath(q.path || d.path);
+  // the renderer always sends the path field: Ruxx-era '!q.path' made this option a no-op
+  if (d.subfolderPerQuery) dest = path.join(dest, `${q.module}_${sanitizeFolderName(q.tags)}`);
   const a = ['-path', dest];
   if (!d.images) a.push('-skip_img');
   if (!d.videos) a.push('-skip_vid');
@@ -372,7 +670,7 @@ class Jobs {
   }
 
   public(job) {
-    const { proc, logTail, args, secretArgs, ...rest } = job;
+    const { proc, logTail, args, secretArgs, testCommand, ...rest } = job;
     return { ...rest, logTail: logTail.slice(-40) };
   }
 
@@ -381,17 +679,24 @@ class Jobs {
   }
 
   async start(q) {
+    if (this.closing) throw new Error('app is closing');
     if (!q || !q.module || !String(q.tags || '').trim()) throw new Error('module and tags are required');
+    asQuery(q);
     const id = `job-${Date.now()}-${++this.seq}`;
     const { args, dest } = downloadArgs(q);
     const job = {
       id, module: q.module, tags: String(q.tags).trim(), dest, status: 'queued', progress: {}, createdAt: Date.now(),
       startedAt: 0, endedAt: 0, exitCode: null, logTail: [], label: q.label || '',
       secretArgs: await connectionArgs(q.module),
-      args: ['-module', q.module, ...searchArgs(q), ...genderArgs(q.gender), ...args,
+      // '--': tags like '-webm' or '-v' are never parsed as options
+      args: ['-module', q.module, ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender), ...args, '--',
         ...String(q.tags).trim().split(/\s+/)],
     };
-    this.jobs.set(id, job);
+    return this._add(job);
+  }
+
+  _add(job) {
+    this.jobs.set(job.id, job);
     this.emit(job);
     this.pump();
     return this.public(job);
@@ -401,7 +706,12 @@ class Jobs {
     return [...this.jobs.values()].filter((j) => j.status === 'running').length;
   }
 
+  active() {
+    return [...this.jobs.values()].filter((j) => ['queued', 'running', 'cancelling'].includes(j.status));
+  }
+
   pump() {
+    if (this.closing) return;
     const max = Math.max(1, settings.download.maxConcurrentJobs || 1);
     for (const job of this.jobs.values()) {
       if (this.running() >= max) break;
@@ -409,14 +719,32 @@ class Jobs {
     }
   }
 
+  _fail(job, error) {
+    job.status = 'failed';
+    job.error = error;
+    job.endedAt = Date.now();
+    delete job.proc;
+    this.emit(job);
+  }
+
   _spawn(job) {
-    fs.mkdirSync(job.dest, { recursive: true });
     job.status = 'running';
     job.startedAt = Date.now();
-    const proc = spawn(resolvePython(), ['-m', 'lustra', ...job.args], {
-      cwd: REPO_ROOT, env: pythonEnv({ LUSTRA_IPC: '1', LUSTRA_SECRET_ARGS: JSON.stringify(job.secretArgs || []) }), stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    let proc;
+    try {
+      fs.mkdirSync(job.dest, { recursive: true });
+      const env = { LUSTRA_IPC: '1', LUSTRA_SECRET_ARGS: JSON.stringify(job.secretArgs || []) };
+      if (job.testCommand) { // self-test only: a stand-in process (never set from the renderer)
+        proc = spawn(job.testCommand.cmd, job.testCommand.args, { env: { ...process.env, ...job.testCommand.env }, stdio: ['pipe', 'pipe', 'pipe'] });
+      } else proc = spawnCore('cli', job.args, env);
+    } catch (err) {
+      // a failed job must not block the queue (Ruxx-era code threw here and the queue stalled forever)
+      this._fail(job, err.message);
+      setImmediate(() => this.pump());
+      return;
+    }
     job.proc = proc;
+    proc.stdin.on('error', () => {});
     const onLine = (line) => {
       if (line.startsWith(PROGRESS_PREFIX)) {
         try { job.progress = { ...job.progress, ...JSON.parse(line.slice(PROGRESS_PREFIX.length)) }; } catch { /* ignore */ }
@@ -430,16 +758,26 @@ class Jobs {
     };
     readline.createInterface({ input: proc.stdout }).on('line', onLine);
     readline.createInterface({ input: proc.stderr }).on('line', onLine);
-    proc.on('error', (err) => onLine(`ERROR: ${err.message}`));
-    proc.on('exit', (code) => {
+    let finished = false;
+    const finish = (code, spawnError) => {
+      if (finished) return; // 'error' and 'close' can both fire
+      finished = true;
       job.exitCode = code;
       job.endedAt = Date.now();
-      if (job.status === 'cancelling') job.status = 'cancelled';
-      else job.status = code === 0 && !(job.progress.failed > 0 && !job.progress.success) ? 'done' : 'failed';
+      // exit codes of lustra_cmd.run_cmd: 0 ok, 3 some items failed, 130 cancelled, other = error (2 = invalid arguments)
+      if (job.status === 'cancelling' || code === 130 || job.progress.cancelled) job.status = 'cancelled';
+      else if (!spawnError && (code === 0 || code === 3)) job.status = 'done';
+      else {
+        job.status = 'failed';
+        job.error = spawnError || job.progress.error || (job.progress.cfChallenge ? 'cloudflare challenge' : `exit code ${code}`);
+      }
       delete job.proc;
       this.emit(job);
       this.pump();
-    });
+    };
+    proc.on('error', (err) => { onLine(`ERROR: ${err.message}`); finish(null, err.message); });
+    // 'close' (not 'exit'): stdout is fully read, the final DONE line is already parsed
+    proc.on('close', (code, signal) => finish(code ?? (signal ? 130 : null)));
     this.emit(job);
   }
 
@@ -471,9 +809,51 @@ class Jobs {
     return [...this.jobs.values()].map((j) => this.public(j));
   }
 
-  killAll() {
-    for (const j of this.jobs.values()) if (j.proc) { try { j.proc.stdin.write('cancel\n'); } catch { /* ignore */ } }
+  async shutdown(graceMs = QUIT_GRACE_MS) {
+    // quit / relaunch confirmed: queued jobs are dropped, running ones get 'cancel' (the core stops cleanly), processes
+    // still alive after the grace period are killed (SIGTERM, then SIGKILL)
+    this.closing = true;
+    for (const j of this.jobs.values()) {
+      if (j.status !== 'queued') continue;
+      j.status = 'cancelled';
+      j.endedAt = Date.now();
+      this.emit(j);
+    }
+    const live = [...this.jobs.values()].filter((j) => j.proc && isAlive(j.proc));
+    for (const j of live) {
+      if (j.status === 'running') { j.status = 'cancelling'; this.emit(j); }
+      try { j.proc.stdin.write('cancel\n'); } catch { /* ignore */ }
+    }
+    const procs = live.map((j) => j.proc);
+    await Promise.all(procs.map((p) => waitExit(p, graceMs)));
+    const stubborn = procs.filter(isAlive);
+    for (const p of stubborn) { try { p.kill(); } catch { /* ignore */ } }
+    await Promise.all(stubborn.map((p) => waitExit(p, 2000)));
+    for (const p of stubborn.filter(isAlive)) { try { p.kill('SIGKILL'); } catch { /* ignore */ } }
+    return { stopped: procs.length, killed: stubborn.length };
   }
+
+  killAll() {
+    // last resort at exit: shutdown() normally ran already
+    for (const j of this.jobs.values()) {
+      if (!j.proc || !isAlive(j.proc)) continue;
+      try { j.proc.stdin.write('cancel\n'); } catch { /* ignore */ }
+      try { j.proc.kill(); } catch { /* ignore */ }
+    }
+  }
+}
+
+function isAlive(p) {
+  return p.exitCode === null && p.signalCode === null;
+}
+
+function waitExit(p, ms) {
+  if (!isAlive(p)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => { p.off('exit', onExit); resolve(false); }, ms);
+    p.once('exit', onExit);
+  });
 }
 
 const jobs = new Jobs();
@@ -591,9 +971,18 @@ function appearanceState() {
     icons: ICONS.map((i) => ({ ...i, url: pathToFileURL(iconPath(i.id)).href })),
     themes: THEMES,
     // window icon changes live on Windows/X11/macOS; Wayland compositors read the icon from the .desktop entry only
-    liveTaskbarIcon: !(process.platform === 'linux' && (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland')),
+    liveTaskbarIcon: !isWaylandLinux(),
+    platform: process.platform,
   };
 }
+
+// ---------- app icon outside the window (dock, launcher, shortcuts) ----------
+// The window / taskbar icon changes live on Windows and X11, the macOS dock icon can be set while running. Elsewhere the icon is
+// read from files: the Linux launcher (Wayland docks use nothing else) and the shortcuts made by the Windows installer. They are
+// rewritten when the icon changes. The icon of the app file itself (AppImage, .exe, .app bundle) is fixed at build time.
+const LAUNCHER_MARKER = 'X-Lustra-Launcher=true';
+const ICON_FILE_PREFIX = 'lustra-icon-';
+const isWaylandLinux = () => process.platform === 'linux' && !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland');
 
 function applyWindowIcon() {
   const img = nativeImage.createFromPath(iconPath(settings.appearance.icon));
@@ -602,26 +991,139 @@ function applyWindowIcon() {
   else mainWindow?.setIcon(img);
 }
 
+const outsideIconDir = () => path.join(userData(), 'icons');
+
 function desktopEntryPath() {
-  return path.join(os.homedir(), '.local', 'share', 'applications', 'lustra.desktop');
+  return path.join(os.homedir(), '.local', 'share', 'applications', `${DESKTOP_ID}.desktop`);
+}
+
+function launcherEntry(iconFile) {
+  // AppImage: process.execPath points into the temporary mount, $APPIMAGE is the file the user runs
+  const quote = (s) => `"${String(s).replace(/(["`$\\])/g, '\\$1')}"`;
+  const exec = process.env.APPIMAGE ? quote(process.env.APPIMAGE)
+    : app.isPackaged ? quote(process.execPath) : `${quote(process.execPath)} ${quote(__dirname)}`;
+  return [
+    '[Desktop Entry]', 'Type=Application', 'Name=Lustra', 'Comment=Booru downloader', `Exec=${exec} %U`,
+    `Icon=${iconFile}`, 'Terminal=false', 'Categories=Network;Graphics;', `StartupWMClass=${DESKTOP_ID}`, LAUNCHER_MARKER, '',
+  ].join('\n');
+}
+
+const launcherIconFile = () => path.join(outsideIconDir(), `${ICON_FILE_PREFIX}${settings.appearance.icon}.png`);
+
+async function writeLauncher() {
+  const iconFile = launcherIconFile();
+  await fsp.mkdir(outsideIconDir(), { recursive: true });
+  // a new file name per icon: desktop shells cache icons by path, an overwritten file is often not picked up
+  await fsp.copyFile(iconPath(settings.appearance.icon), iconFile);
+  const file = desktopEntryPath();
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  await fsp.writeFile(tmp, launcherEntry(iconFile));
+  await fsp.rename(tmp, file); // the shell watches this folder: it only ever sees a complete file
+  for (const f of await fsp.readdir(outsideIconDir()).catch(() => [])) {
+    const old = path.join(outsideIconDir(), f);
+    if (old !== iconFile && f.endsWith('.png') && (f.startsWith(ICON_FILE_PREFIX) || f === 'lustra.png')) await fsp.unlink(old).catch(() => {});
+  }
+  return file;
 }
 
 async function installLauncher() {
   if (process.platform !== 'linux') return { ok: false, message: 'Chỉ cần trên Linux' };
-  const iconDest = path.join(userData(), 'icons', 'lustra.png');
-  await fsp.mkdir(path.dirname(iconDest), { recursive: true });
-  await fsp.copyFile(iconPath(settings.appearance.icon), iconDest);
-  const exec = app.isPackaged ? `"${process.execPath}"` : `"${process.execPath}" "${__dirname}"`;
-  const entry = [
-    '[Desktop Entry]', 'Type=Application', 'Name=Lustra', 'Comment=Booru downloader', `Exec=${exec} %U`,
-    `Icon=${iconDest}`, 'Terminal=false', 'Categories=Network;Graphics;', 'StartupWMClass=Lustra', '',
-  ].join('\n');
-  await fsp.mkdir(path.dirname(desktopEntryPath()), { recursive: true });
-  await fsp.writeFile(desktopEntryPath(), entry);
-  return { ok: true, path: desktopEntryPath() };
+  return { ok: true, path: await writeLauncher(), restartForDock: isWaylandLinux() };
+}
+
+async function launcherState() {
+  // 'missing' | 'ours' | 'foreign': a launcher written by something else (ex. AppImage integration tools) is never touched
+  let text;
+  try { text = await fsp.readFile(desktopEntryPath(), 'utf8'); } catch { return 'missing'; }
+  const ours = text.includes(LAUNCHER_MARKER) || (/^Name=Lustra$/m.test(text) && /^Comment=Booru downloader$/m.test(text));
+  return ours ? 'ours' : 'foreign';
+}
+
+async function syncLauncher() {
+  // -> 'unsupported' | 'missing' | 'foreign' | 'unchanged' | 'updated'
+  if (process.platform !== 'linux') return 'unsupported';
+  const state = await launcherState();
+  if (state !== 'ours') return state;
+  const current = await fsp.readFile(desktopEntryPath(), 'utf8').catch(() => '');
+  if (current === launcherEntry(launcherIconFile()) && fs.existsSync(launcherIconFile())) return 'unchanged';
+  await writeLauncher();
+  return 'updated';
+}
+
+async function writeIco(iconId) {
+  const img = nativeImage.createFromPath(iconPath(iconId));
+  if (img.isEmpty()) throw new Error(`icon ${iconId} not found`);
+  const pngs = [256, 48, 32, 16].map((size) => ({ size, data: img.resize({ width: size, height: size, quality: 'best' }).toPNG() }));
+  const file = path.join(outsideIconDir(), `${ICON_FILE_PREFIX}${iconId}.ico`);
+  await fsp.mkdir(outsideIconDir(), { recursive: true });
+  await fsp.writeFile(file, pngsToIco(pngs));
+  return file;
+}
+
+async function listShortcuts(root, depth = 1) {
+  const out = [];
+  for (const d of await fsp.readdir(root, { withFileTypes: true }).catch(() => [])) {
+    const full = path.join(root, d.name);
+    if (d.isFile() && d.name.toLowerCase().endsWith('.lnk')) out.push(full);
+    else if (d.isDirectory() && depth > 0) out.push(...await listShortcuts(full, depth - 1));
+  }
+  return out;
+}
+
+async function syncWindowsShortcuts({ startup = false } = {}) {
+  // shortcuts of the installer (Start menu, desktop, pinned taskbar) pointing at this exe get the selected icon
+  if (process.platform !== 'win32' || !app.isPackaged) return 0;
+  const appData = app.getPath('appData');
+  const roots = [path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'), app.getPath('desktop'),
+    path.join(appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar')];
+  const exe = path.resolve(process.execPath).toLowerCase();
+  const ours = [];
+  for (const root of roots) {
+    for (const lnk of await listShortcuts(root)) {
+      try {
+        const d = shell.readShortcutLink(lnk);
+        if (path.resolve(d.target || '').toLowerCase() === exe) ours.push([lnk, d]);
+      } catch { /* not a readable shortcut */ }
+    }
+  }
+  // at startup with the default icon and untouched shortcuts there is nothing to do (the exe icon is the default one)
+  if (startup && settings.appearance.icon === DEFAULT_SETTINGS.appearance.icon && ours.every(([, d]) => !d.icon)) return 0;
+  if (!ours.length) return 0;
+  const ico = await writeIco(settings.appearance.icon);
+  let n = 0;
+  for (const [lnk, d] of ours) {
+    if (d.icon && path.resolve(d.icon).toLowerCase() === ico.toLowerCase()) continue;
+    if (shell.writeShortcutLink(lnk, 'update', { icon: ico, iconIndex: 0 })) n++;
+  }
+  return n;
+}
+
+async function syncIcon({ startup = false } = {}) {
+  // -> { launcher, shortcuts, restartForDock }: what was updated outside the window
+  const r = { launcher: 'unsupported', shortcuts: 0, restartForDock: false };
+  try {
+    if (!startup || process.platform === 'darwin') applyWindowIcon(); // the window got its icon at creation, the dock did not
+    r.launcher = await syncLauncher();
+    r.shortcuts = await syncWindowsShortcuts({ startup });
+  } catch (err) {
+    r.error = err.message;
+    send('log', { source: 'icon', text: `icon sync failed: ${err.message}` });
+  }
+  // Wayland docks read the launcher when the app starts: the running window keeps its icon until the app is reopened
+  r.restartForDock = isWaylandLinux() && ['updated', 'unchanged'].includes(r.launcher) && !startup;
+  return r;
 }
 
 // ---------- tag lists auto update ----------
+
+function onTagsUpdateDone(params) {
+  // tags.update only starts a background job: the date is recorded when it finished without error
+  if (params.ok && params.module) {
+    settings.tags.lastAutoUpdate[params.module] = Date.now();
+    saveSettings();
+  }
+}
 
 async function maybeAutoUpdateTags() {
   if (!settings.tags.autoUpdate) return;
@@ -631,8 +1133,6 @@ async function maybeAutoUpdateTags() {
     if (Date.now() - last < days) continue;
     try {
       await sidecar.call('tags.update', { module, apiKey: await getSecret(module) });
-      settings.tags.lastAutoUpdate[module] = Date.now();
-      saveSettings();
     } catch (err) {
       send('log', { source: 'tags', text: `auto update ${module} failed: ${err.message}` });
     }
@@ -656,10 +1156,11 @@ function handle(channel, fn) {
 }
 
 function registerIpc() {
+  handle('sidecar:getStatus', () => sidecar.status || { ok: false, error: 'starting' });
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'files.nonEmpty'];
+      'tags.validate', 'tags.status', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};
     if (method === 'ext.uninstall' && !RE_EXT_ID.test(String(params.id || ''))) throw new Error('invalid extension id');
@@ -685,32 +1186,74 @@ function registerIpc() {
   });
   handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
   handle('search:count', async (_e, q) => sidecar.call('search.count', {
-    module: q.module, tags: q.tags, args: [...(await connectionArgs(q.module)), ...searchArgs(q)],
+    module: asQuery(q).module, tags: q.tags, args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module)],
   }));
-  handle('search:preview', async (_e, q, page) => sidecar.call('search.preview', {
-    module: q.module, tags: q.tags, page: page || 0, args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...genderArgs(q.gender)],
-  }, 180000));
+  handle('search:preview', async (_e, q, page) => {
+    const params = {
+      module: asQuery(q).module, tags: q.tags, page: page || 0,
+      args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender)],
+    };
+    if (Number.isInteger(q.pageSize) && q.pageSize > 0) params.pageSize = q.pageSize; // the sidecar caps it to the module page size
+    return sidecar.call('search.preview', params, 180000);
+  });
+  handle('search:related', async (_e, q) => {
+    // tags co-occurring in the first results page: same connection / date args as the preview, no content filter
+    const params = {
+      module: asQuery(q).module, tags: q.tags, args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module)],
+    };
+    if (Number.isInteger(q.limit) && q.limit > 0) params.limit = Math.min(q.limit, 200);
+    return sidecar.call('search.related', params, 180000);
+  });
 
   handle('settings:get', () => ({ settings, appearance: appearanceState(), secrets: secretsStatus() }));
   handle('settings:set', async (_e, patch) => {
-    if (!patch || typeof patch !== 'object') throw new Error('invalid settings patch');
-    if (patch.secrets) delete patch.secrets;
+    if (!isPlainObject(patch)) throw new Error('invalid settings patch');
+    delete patch.secrets;
+    delete patch.version;
     const py = patch.advanced?.pythonPath;
     if (py !== undefined && py !== settings.advanced.pythonPath) {
       // the python path is executed by the app: changing it requires a native confirmation
-      const valid = py === '' || (path.isAbsolute(py) && fs.existsSync(py) && fs.statSync(py).isFile());
+      const valid = py === '' || (typeof py === 'string' && path.isAbsolute(py) && fs.existsSync(py) && fs.statSync(py).isFile());
       if (!valid || (py && !(await confirmMain('Dùng chương trình này làm Python cho Lustra?', py)))) delete patch.advanced.pythonPath;
     }
-    settings = deepMerge(settings, patch || {});
+    if (isPlainObject(patch.search)) {
+      // history / saved queries are written whole by the renderer: drop malformed entries, cap sizes
+      for (const [key, max, named] of [['history', HISTORY_MAX, false], ['saved', SAVED_MAX, true]]) {
+        if (patch.search[key] === undefined) continue;
+        const v = sanitizeQueryList(patch.search[key], max, named);
+        if (v === null) delete patch.search[key];
+        else patch.search[key] = v;
+      }
+      if (patch.search.tagLimits !== undefined) {
+        const v = sanitizeTagLimits(patch.search.tagLimits);
+        if (v === null) delete patch.search.tagLimits;
+        else patch.search.tagLimits = v;
+      }
+    }
+    const replaceMaps = {}; // headers / cookies are edited as a whole: replaced, not merged (a removed entry must go away)
+    if (isPlainObject(patch.connection)) {
+      for (const [key, kind] of [['headers', 'Header'], ['cookies', 'Cookie']]) {
+        if (patch.connection[key] === undefined) continue;
+        replaceMaps[key] = normalizeHttpMap(patch.connection[key], kind, true);
+        delete patch.connection[key];
+      }
+    }
+    settings = deepMerge(settings, patch);
+    Object.assign(settings.connection, replaceMaps);
     saveSettings();
     if (patch?.connection) await applyProxyToSession();
+    let iconSync;
     if (patch?.appearance) {
-      if (patch.appearance.icon) applyWindowIcon();
+      if (patch.appearance.icon) iconSync = await syncIcon();
       send('appearance:changed', appearanceState());
     }
-    return { settings, appearance: appearanceState(), secrets: secretsStatus() };
+    return { settings, appearance: appearanceState(), secrets: secretsStatus(), iconSync };
   });
-  handle('secrets:set', async (_e, module, value) => { await setSecret(module, String(value || '').trim()); return secretsStatus(); });
+  handle('secrets:set', async (_e, module, value) => {
+    await setSecret(module, typeof value === 'string' ? value.trim() : ''); // empty: no change
+    return secretsStatus();
+  });
+  handle('secrets:clear', (_e, module) => { clearSecret(module); return secretsStatus(); });
 
   handle('jobs:start', (_e, q) => jobs.start(q));
   handle('jobs:cancel', (_e, id) => jobs.cancel(id));
@@ -764,12 +1307,15 @@ function registerIpc() {
     return st;
   });
 
-  handle('app:relaunch', () => { app.relaunch(); app.quit(); });
-  handle('app:info', () => ({
-    version: app.getVersion(), electron: process.versions.electron, platform: process.platform, userData: userData(),
-    python: resolvePython(), repo: REPO_ROOT, sidecar: sidecar.info, encryption: encryptionAvailable,
-    launcherInstalled: fs.existsSync(desktopEntryPath()),
-  }));
+  handle('app:relaunch', () => requestQuit(true)); // false: the user kept the app running (download jobs)
+  handle('app:info', () => {
+    const core = coreCommand('server');
+    return {
+      version: app.getVersion(), electron: process.versions.electron, platform: process.platform, userData: userData(),
+      python: core.cmd, core: core.frozen ? 'bundled' : 'python', packaged: app.isPackaged, repo: REPO_ROOT, sidecar: sidecar.info,
+      encryption: encryptionAvailable, launcherInstalled: fs.existsSync(desktopEntryPath()),
+    };
+  });
   handle('launcher:install', () => installLauncher());
   handle('shell:open', (_e, p) => {
     // folders only (download destinations): files could be executables or .desktop launchers
@@ -787,7 +1333,60 @@ function secretsStatus() {
   };
 }
 
+// ---------- quitting ----------
+
+let quitApproved = false; // the user confirmed (or nothing needed confirming): before-quit / window close pass through
+let quitFlow = null;
+// native confirmation, replaced by the self-test
+let askQuit = (message, detail, okLabel) => confirmMain(message, detail, ['Ở lại', okLabel]);
+
+function jobsNeedingConfirm() {
+  return jobs.active().filter((j) => j.status === 'queued' || j.status === 'running');
+}
+
+async function confirmQuit(relaunch) {
+  const pending = jobsNeedingConfirm();
+  const running = pending.filter((j) => j.status === 'running').length;
+  const parts = [running && `${running} job đang tải`, pending.length - running && `${pending.length - running} job đang chờ`].filter(Boolean);
+  return askQuit(relaunch ? 'Khởi động lại Lustra?' : 'Thoát Lustra?',
+    `Đang có ${parts.join(' và ')}. Nếu tiếp tục, các job này sẽ bị huỷ.`,
+    relaunch ? 'Huỷ job và khởi động lại' : 'Huỷ job và thoát');
+}
+
+function requestQuit(relaunch = false) {
+  // quit / relaunch with download jobs queued or running: ask first, then cancel them gracefully before exiting
+  if (!quitFlow) {
+    quitFlow = (async () => {
+      try {
+        if (!quitApproved && jobsNeedingConfirm().length && !(await confirmQuit(relaunch))) return false;
+        quitApproved = true;
+        if (jobs.active().length) await jobs.shutdown();
+        // AppImage: the running binary lives in a mount that goes away with this process, start the AppImage file again
+        if (relaunch) app.relaunch(process.env.APPIMAGE ? { execPath: process.env.APPIMAGE, args: process.argv.slice(1) } : undefined);
+        app.quit();
+        return true;
+      } finally {
+        quitFlow = null;
+      }
+    })();
+  }
+  return quitFlow;
+}
+
 // ---------- window ----------
+
+function setupMenu() {
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null); // no menu bar on Windows / Linux (text fields handle their own shortcuts)
+    return;
+  }
+  // macOS: Cmd+C / Cmd+V / Cmd+A / Cmd+Z only reach text fields through menu roles
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'appMenu' },
+    { role: 'editMenu', label: 'Sửa' },
+    { role: 'windowMenu', label: 'Cửa sổ' },
+  ]));
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -796,10 +1395,15 @@ function createWindow() {
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
-  Menu.setApplicationMenu(null);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
-  mainWindow.on('close', () => {
+  mainWindow.webContents.once('did-finish-load', () => flushStartupNotices());
+  mainWindow.on('close', (e) => {
+    if (!quitApproved && jobs.active().length) {
+      e.preventDefault();
+      requestQuit(false);
+      return;
+    }
     const [width, height] = mainWindow.getSize();
     settings.window = { width, height };
     saveSettings();
@@ -825,66 +1429,103 @@ async function runSelfTest(dir) {
     await fsp.writeFile(path.join(dir, `${name}.png`), img.toPNG());
   };
   const js = (code) => mainWindow.webContents.executeJavaScript(code, true);
-  const report = {};
+  const quick = Boolean(process.env.LUSTRA_SELFTEST_QUICK); // no network steps: contract, settings and quit checks only
+  const report = { settingsLoad: settingsLoadInfo, core: coreCommand('server') };
   try {
     await sidecar.ready;
     await wait(1500);
-    await shot('01-search-empty');
-    report.preview = await js(`(async () => {
-      document.querySelector('#module-btn').click();
-      [...document.querySelectorAll('#module-menu button')].find((b) => b.textContent.includes('Danbooru'))?.click();
-      const inp = document.querySelector('#tag-text');
-      for (const t of ${JSON.stringify((process.env.LUSTRA_SELFTEST_TAGS || 'scenery sky cloud rating:g').split(' '))}) {
-        inp.value = t + ' '; inp.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      inp.value = 'sun'; inp.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 900));
-      const ac = [...document.querySelectorAll('#ac .ac-item .nm')].map((e) => e.textContent);
-      return { ac, query: document.querySelector('#query-text').textContent };
-    })()`);
-    await shot('02-autocomplete');
-    report.previewResult = await js(`(async () => {
-      const inp = document.querySelector('#tag-text'); inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true }));
-      document.querySelector('#btn-count').click();
-      document.querySelector('#btn-preview').click();
-      for (let i = 0; i < 60 && document.querySelector('#btn-preview').disabled !== false; i++) await new Promise((r) => setTimeout(r, 500));
-      await new Promise((r) => setTimeout(r, 1500));
-      for (let i = 0; i < 40 && document.querySelector('#btn-count').textContent !== 'Đếm'; i++) await new Promise((r) => setTimeout(r, 500));
-      return { info: document.querySelector('#results-info').textContent, cards: document.querySelectorAll('#grid .card').length,
-        status: document.querySelector('#query-status').textContent };
-    })()`);
-    await wait(4000);
-    await shot('03-preview');
-    await js(`document.querySelector('#btn-az').click()`);
-    await wait(2500);
-    await shot('04-az-drawer');
-    await js(`document.querySelector('#az-close').click(); document.querySelector('[data-page="extensions"]').click()`);
-    await wait(1500);
-    await shot('05-extensions');
-    await js(`document.querySelector('[data-page="settings"]').click()`);
-    await wait(800);
-    await shot('06-settings');
-    await js(`document.querySelector('.theme-sw:nth-child(3)').click()`);
-    await wait(800);
-    await shot('07-settings-paper');
-    await js(`document.querySelector('.theme-sw:nth-child(1)').click(); document.querySelector('[data-page="tags"]').click()`);
-    await wait(2500);
-    await shot('08-tags');
-    if (process.env.LUSTRA_SELFTEST_DOWNLOAD) {
-      report.download = await js(`(async () => {
-        const job = await window.lustra.jobs.start({ module: 'db', tags: ${JSON.stringify(process.env.LUSTRA_SELFTEST_DOWNLOAD)},
-          path: ${JSON.stringify(path.join(dir, 'dl'))}, options: { limit: 2, threads: 1 } });
-        document.querySelector('[data-page="downloads"]').click();
-        for (let i = 0; i < 120; i++) {
-          const j = (await window.lustra.jobs.list()).find((x) => x.id === job.id);
-          if (j && ['done', 'failed', 'cancelled'].includes(j.status)) return { status: j.status, progress: j.progress, exit: j.exitCode };
-          await new Promise((r) => setTimeout(r, 500));
+    if (!quick) { // UI walkthrough (needs network to danbooru)
+      await shot('01-search-empty');
+      report.preview = await js(`(async () => {
+        document.querySelector('#module-btn').click();
+        [...document.querySelectorAll('#module-menu button')].find((b) => b.textContent.includes('Danbooru'))?.click();
+        const inp = document.querySelector('#tag-text');
+        for (const t of ${JSON.stringify((process.env.LUSTRA_SELFTEST_TAGS || 'scenery sky cloud rating:g').split(' '))}) {
+          inp.value = t + ' '; inp.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        return { status: 'timeout' };
+        inp.value = 'sun'; inp.dispatchEvent(new Event('input', { bubbles: true }));
+        // first use loads the module tag list in the sidecar (~1 s for danbooru's 766k tags)
+        for (let i = 0; i < 20 && !document.querySelector('#ac .ac-item'); i++) await new Promise((r) => setTimeout(r, 250));
+        const ac = [...document.querySelectorAll('#ac .ac-item .nm')].map((e) => e.textContent);
+        return { ac, query: document.querySelector('#query-text').textContent };
       })()`);
+      await shot('02-autocomplete');
+      report.previewResult = await js(`(async () => {
+        const inp = document.querySelector('#tag-text'); inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('#btn-count').click();
+        document.querySelector('#btn-preview').click();
+        for (let i = 0; i < 60 && document.querySelector('#btn-preview').disabled !== false; i++) await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 1500));
+        for (let i = 0; i < 40 && document.querySelector('#btn-count').textContent !== 'Đếm'; i++) await new Promise((r) => setTimeout(r, 500));
+        return { info: document.querySelector('#results-info').textContent, cards: document.querySelectorAll('#grid .card').length,
+          status: document.querySelector('#query-status').textContent };
+      })()`);
+      await wait(4000);
+      await shot('03-preview');
+      // search by file name / post link: dialog -> files.identify -> query -> preview
+      report.filesSearch = await js(`(async () => {
+        document.querySelector('#btn-files').click();
+        const area = document.querySelector('.files-input');
+        area.value = 'db_5000.jpg\\nhttps://danbooru.donmai.us/posts/5001\\nIMG_1.jpg';
+        area.dispatchEvent(new Event('input', { bubbles: true }));
+        for (let i = 0; i < 20 && !document.querySelector('.files-queries .btn'); i++) await new Promise((r) => setTimeout(r, 250));
+        return { items: [...document.querySelectorAll('.files-item')].map((e) => e.textContent) };
+      })()`);
+      await shot('03a-files-dialog');
+      report.filesSearch = { ...report.filesSearch, ...await js(`(async () => {
+        const btn = document.querySelector('.files-queries .btn');
+        const label = btn ? btn.textContent : null;
+        if (btn) btn.click();
+        await new Promise((r) => setTimeout(r, 300));
+        for (let i = 0; i < 60 && document.querySelector('#btn-preview').disabled !== false; i++) await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 1500));
+        return { label, query: document.querySelector('#query-text').textContent, cards: document.querySelectorAll('#grid .card').length };
+      })()`) };
+      await wait(1500);
+      await shot('03b-files-search');
+      await js(`document.querySelector('#btn-az').click()`);
+      await wait(2500);
+      await shot('04-az-drawer');
+      await js(`document.querySelector('#az-close').click(); document.querySelector('[data-page="extensions"]').click()`);
+      await wait(1500);
+      await shot('05-extensions');
+      await js(`document.querySelector('[data-page="settings"]').click()`);
       await wait(800);
-      await shot('09-downloads');
+      await shot('06-settings');
+      await js(`document.querySelector('.theme-sw:nth-child(3)').click()`);
+      await wait(800);
+      await shot('07-settings-paper');
+      await js(`document.querySelector('.theme-sw:nth-child(1)').click(); document.querySelector('[data-page="tags"]').click()`);
+      await wait(2500);
+      await shot('08-tags');
+      if (process.env.LUSTRA_SELFTEST_DOWNLOAD) {
+        report.download = await js(`(async () => {
+          const job = await window.lustra.jobs.start({ module: 'db', tags: ${JSON.stringify(process.env.LUSTRA_SELFTEST_DOWNLOAD)},
+            path: ${JSON.stringify(path.join(dir, 'dl'))}, options: { limit: 2, threads: 1 } });
+          document.querySelector('[data-page="downloads"]').click();
+          for (let i = 0; i < 120; i++) {
+            const j = (await window.lustra.jobs.list()).find((x) => x.id === job.id);
+            if (j && ['done', 'failed', 'cancelled'].includes(j.status)) return { status: j.status, progress: j.progress, exit: j.exitCode };
+            await new Promise((r) => setTimeout(r, 500));
+          }
+          return { status: 'timeout' };
+        })()`);
+        // batch B: a module that is not installed must fail with a reason, not hang the queue
+        report.badModuleJob = await js(`(async () => {
+          const job = await window.lustra.jobs.start({ module: 'rs', tags: 'scenery -webm', path: ${JSON.stringify(path.join(dir, 'dl2'))} });
+          for (let i = 0; i < 60; i++) {
+            const j = (await window.lustra.jobs.list()).find((x) => x.id === job.id);
+            if (j && ['done', 'failed', 'cancelled'].includes(j.status)) return { status: j.status, exit: j.exitCode, error: j.error };
+            await new Promise((r) => setTimeout(r, 500));
+          }
+          return { status: 'timeout' };
+        })()`);
+        await wait(800);
+        await shot('09-downloads');
+      }
     }
+    report.coreStatus = await js('window.lustra.sidecarStatus()');
+    report.contract = await selfTestContract(js, quick);
     if (process.env.LUSTRA_SELFTEST_SECURITY) {
       report.security = await js(`(async () => {
         const jobs = await window.lustra.jobs.list();
@@ -912,12 +1553,134 @@ async function runSelfTest(dir) {
       report.security.navigationBlocked = mainWindow.webContents.getURL() === before;
       report.security.stillHasBridge = await js('typeof window.lustra === "object"');
     }
+    report.quitGuard = await selfTestQuitGuard(dir);
+    if (process.env.LUSTRA_SELFTEST_ICONS) {
+      // writes ~/.local/share/applications/lustra.desktop: run it with a scratch HOME only
+      const read = () => fs.readFileSync(desktopEntryPath(), 'utf8');
+      const iconLine = () => (read().match(/^Icon=(.*)$/m) || [])[1] || '';
+      const setIcon = (id) => js(`window.lustra.settings.set({ appearance: { icon: '${id}' } }).then((r) => r.iconSync)`);
+      const r = { home: os.homedir() };
+      try { fs.unlinkSync(desktopEntryPath()); } catch { /* none */ }
+      r.missing = await setIcon('exposed-jaw-orange');
+      r.install = await js('window.lustra.app.installLauncher()');
+      const firstIcon = iconLine();
+      r.changed = await setIcon('full-mask-monochrome');
+      const secondIcon = iconLine();
+      r.unchanged = await setIcon('full-mask-monochrome');
+      Object.assign(r, {
+        firstIcon: path.basename(firstIcon), secondIcon: path.basename(secondIcon), iconFiles: fs.readdirSync(outsideIconDir()),
+        oldRemoved: !fs.existsSync(firstIcon), newExists: fs.existsSync(secondIcon), marker: read().includes(LAUNCHER_MARKER),
+        wmClass: /^StartupWMClass=lustra$/m.test(read()),
+      });
+      fs.writeFileSync(desktopEntryPath(), '[Desktop Entry]\nName=Other\nIcon=x\n');
+      r.foreign = await setIcon('exposed-jaw-orange');
+      r.foreignUntouched = read().includes('Name=Other');
+      fs.unlinkSync(desktopEntryPath());
+      await setIcon(DEFAULT_SETTINGS.appearance.icon);
+      r.ok = r.missing?.launcher === 'missing' && r.install?.ok === true && r.changed?.launcher === 'updated'
+        && r.unchanged?.launcher === 'unchanged' && r.oldRemoved && r.newExists && r.marker && r.wmClass
+        && r.foreign?.launcher === 'foreign' && r.foreignUntouched;
+      report.iconSync = r;
+    }
     report.sidecar = sidecar.info;
   } catch (err) {
     report.error = String(err && err.stack || err);
   }
   await fsp.writeFile(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
+  quitApproved = true; // a job left over by a failed step must not open the quit confirmation
+  await jobs.shutdown(3000);
   app.quit();
+}
+
+async function selfTestContract(js, quick) {
+  // batch D wiring: allowlisted sidecar methods, related / pageSize, secrets, settings validation, headers, tag limits, locale
+  const out = await js(`(async () => {
+    const r = {};
+    const t = async (name, fn) => {
+      try { r[name] = { ok: true, sample: JSON.stringify(await fn()).slice(0, 400) }; } catch (e) { r[name] = { ok: false, error: String(e.message || e).slice(0, 300) }; }
+    };
+    await t('resolve', () => window.lustra.rpc('tags.resolve', { module: 'db', tags: ['scenery', 'sky', 'skyy', 'rating:g'] }));
+    await t('fuzzy', () => window.lustra.rpc('tags.fuzzy', { module: 'db', text: 'scenrey', limit: 5 }));
+    await t('notAllowed', () => window.lustra.rpc('ext.install', { id: 'x' }));
+    if (!${quick}) {
+      await t('related', () => window.lustra.search.related({ module: 'db', tags: 'scenery rating:g', limit: 10 }));
+      await t('previewPageSize', async () => {
+        const p = await window.lustra.search.preview({ module: 'db', tags: 'scenery rating:g', pageSize: 5 }, 0);
+        return { items: (p.items || []).length, pageSize: p.pageSize, hasMore: p.hasMore };
+      });
+    }
+    let s = await window.lustra.secrets.set('zz', 'selftest-key');
+    const setOk = Boolean(s.modules.zz);
+    s = await window.lustra.secrets.set('zz', '   ');
+    const emptyKeeps = Boolean(s.modules.zz);
+    s = await window.lustra.secrets.clear('zz');
+    r.secrets = { setOk, emptyKeeps, cleared: !s.modules.zz, ok: setOk && emptyKeeps && !s.modules.zz };
+    const prev = (await window.lustra.settings.get()).settings.search;
+    const history = [{ module: 'db', tags: 'a b', at: 2 }, { module: 'db', tags: 'a b', at: 1 }, { module: 'DB!', tags: 'x', at: 1 },
+      { module: 'db', tags: 'x'.repeat(2001), at: 1 }, 'junk', { module: 'rx', tags: 'c', at: 3 }, { module: 'rx', tags: 'd', at: 'x' }];
+    const saved = Array.from({ length: 205 }, (_, i) => ({ name: 'n'.repeat(100), module: 'db', tags: 't' + i, at: i }));
+    const v = (await window.lustra.settings.set({ search: { history, saved, tagLimits: { db: 6, rx: 'x', 'bad key': 3 } } })).settings.search;
+    r.settingsValidation = { history: v.history.length, saved: v.saved.length, nameLen: v.saved[0].name.length, tagLimits: v.tagLimits };
+    r.settingsValidation.ok = v.history.length === 2 && v.saved.length === 200 && v.saved[0].name.length === 80 && v.tagLimits.db === 6 && !('rx' in v.tagLimits);
+    await window.lustra.settings.set({ search: { history: prev.history || [], saved: prev.saved || [], tagLimits: { db: (prev.tagLimits || {}).db || 0 } } });
+    r.headersSave = await window.lustra.settings.set({ connection: { headers: ${JSON.stringify({ 'X-Test': 'a"b\\c' })}, cookies: ${JSON.stringify({ sid: '"q\\z"' })} } })
+      .then(() => 'saved', (e) => e.message);
+    r.badHeaderName = await window.lustra.settings.set({ connection: { headers: { 'bad name': 'v' } } }).then(() => 'ACCEPTED', () => 'rejected');
+    r.lang = { navigator: navigator.language, dateInput: (() => { const d = document.createElement('input'); d.type = 'date'; return d.type; })() };
+    return r;
+  })()`);
+  // main side: what the core receives (secrets go through LUSTRA_SECRET_ARGS, see Jobs._spawn)
+  const args = await connectionArgs('zz');
+  out.httpArgs = args.filter((_a, i) => args[i - 1] === '-header' || args[i - 1] === '-cookie');
+  out.httpArgsOk = out.httpArgs.includes('X-Test=a"b\\c') && out.httpArgs.includes('sid="q\\z"');
+  settings.connection.headers = {};
+  settings.connection.cookies = {};
+  const limits = settings.search.tagLimits;
+  settings.search.tagLimits = { db: 6 };
+  out.tagLimitArgs = tagLimitArgs('db');
+  settings.search.tagLimits = limits;
+  saveSettings();
+  return out;
+}
+
+async function selfTestQuitGuard(dir) {
+  // quit / relaunch with jobs: stand-in processes (Electron as node) for a job that honours 'cancel' and one that ignores it
+  const graceful = "process.stdin.on('data', (d) => { if (String(d).includes('cancel')) process.exit(130); }); setInterval(() => {}, 1000);";
+  const stubborn = "process.on('SIGTERM', () => {}); process.stdin.on('data', () => {}); setInterval(() => {}, 1000);";
+  const make = (name, script) => ({
+    id: `selftest-${name}-${Date.now()}`, module: 'zz', tags: name, dest: path.join(dir, 'quit'), status: 'queued', progress: {},
+    createdAt: Date.now(), startedAt: 0, endedAt: 0, exitCode: null, logTail: [], label: 'selftest', secretArgs: [], args: [],
+    testCommand: { cmd: process.execPath, args: ['-e', script], env: { ELECTRON_RUN_AS_NODE: '1' } },
+  });
+  const maxJobs = settings.download.maxConcurrentJobs;
+  const realAsk = askQuit;
+  const asked = [];
+  const out = {};
+  let ids = [];
+  try {
+    settings.download.maxConcurrentJobs = 2;
+    ids = [make('graceful', graceful), make('stubborn', stubborn), make('queued', graceful)].map((j) => jobs._add(j).id);
+    await new Promise((r) => setTimeout(r, 1000));
+    out.needsConfirm = jobsNeedingConfirm().length;
+    askQuit = async (message, detail) => { asked.push(`${message} ${detail}`); return false; };
+    out.declined = await requestQuit(true);
+    out.asked = asked;
+    out.afterDecline = ids.map((id) => jobs.jobs.get(id).status);
+    const t0 = Date.now();
+    out.shutdown = await jobs.shutdown(1500);
+    out.shutdownMs = Date.now() - t0;
+    await new Promise((r) => setTimeout(r, 300)); // 'close' events
+    out.final = ids.map((id) => { const j = jobs.jobs.get(id); return `${j.status}:${j.exitCode}`; });
+    out.ok = out.needsConfirm === 3 && out.declined === false && asked.length === 1
+      && out.afterDecline.join() === 'running,running,queued' && out.shutdown.stopped === 2 && out.shutdown.killed === 1
+      && out.final.join() === 'cancelled:130,cancelled:130,cancelled:null';
+  } finally {
+    askQuit = realAsk;
+    jobs.closing = false;
+    settings.download.maxConcurrentJobs = maxJobs;
+    for (const id of ids) jobs.jobs.delete(id);
+  }
+  return out;
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -937,11 +1700,23 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc();
     await applyProxyToSession();
     sidecar.start();
+    setupMenu();
     createWindow();
+    syncIcon({ startup: true }).catch(() => {}); // macOS dock, launcher / shortcuts written by an older version or another icon
     pruneThumbCache();
     if (process.env.LUSTRA_SELFTEST_DIR) mainWindow.webContents.once('did-finish-load', () => runSelfTest(process.env.LUSTRA_SELFTEST_DIR));
     sidecar.ready.then(() => maybeAutoUpdateTags()).catch(() => {});
   });
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => { jobs.killAll(); sidecar.stop(); });
+  app.on('before-quit', (e) => {
+    // Cmd+Q, the macOS app menu, OS logout, app.quit(): jobs still queued / running need the user's confirmation first
+    if (!quitApproved && jobs.active().length) {
+      e.preventDefault();
+      requestQuit(false);
+      return;
+    }
+    quitApproved = true;
+    jobs.killAll();
+    sidecar.stop();
+  });
 }

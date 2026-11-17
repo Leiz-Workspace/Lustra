@@ -7,19 +7,22 @@ const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
 
 contextBridge.exposeInMainWorld('lustra', {
   rpc: (method, params) => invoke('rpc', method, params || {}),
+  sidecarStatus: () => invoke('sidecar:getStatus'),
   tags: {
     update: (module) => invoke('tags:update', module),
   },
   search: {
     count: (query) => invoke('search:count', query),
     preview: (query, page) => invoke('search:preview', query, page),
+    related: (query) => invoke('search:related', query),
   },
   settings: {
     get: () => invoke('settings:get'),
     set: (patch) => invoke('settings:set', patch),
   },
   secrets: {
-    set: (module, value) => invoke('secrets:set', module, value),
+    set: (module, value) => invoke('secrets:set', module, value), // empty value: no change
+    clear: (module) => invoke('secrets:clear', module),
   },
   jobs: {
     start: (query) => invoke('jobs:start', query),
