@@ -85,5 +85,5 @@
 2. Hệ thống lưu lựa chọn (`settings.download.gender`) và hiện nhắc "danh sách chặn an toàn cũng được áp dụng". Nếu module có ít tag giới tính, hiện thêm cảnh báo phần lớn post sẽ là "Không rõ".
 3. **Preview**: mỗi card có badge Nữ / Nam / Nam+Nữ / Không có / ?. Nền đặc nghĩa là tin cậy cao, viền liền là vừa, viền gạch là thấp; tooltip ghi bằng chứng. Post không khớp được đánh dấu "lọc giới tính" và bị ẩn trừ khi bật "Hiện post bị lọc". Post bị chặn không hiện, chỉ được đếm.
 4. **Tải xuống**: CLI nhận `-gender …`; card job hiện "Lọc giới tính: n · Chặn (an toàn): m".
-- Bỏ hết chip → tắt lọc; khi đó danh sách chặn cũng không chạy, hành vi như Ruxx gốc.
+- Bỏ hết chip → tắt lọc; khi đó danh sách chặn cũng không chạy, hành vi như bản gốc.
 

@@ -90,7 +90,7 @@ class NetworkPolicyTests(TestCase):
         with _make_downloader(ProcModule.DB) as dwn:
             dwn._parse_args(prepare_arglist(['-module', 'db', '--', 'a']), False)
             self.assertTrue(dwn.add_headers['User-Agent'].startswith('Lustra/'))
-            self.assertNotIn('Ruxx', dwn.add_headers['User-Agent'])
+            self.assertNotIn('github.com', dwn.add_headers['User-Agent'])  # no upstream repository as contact
         with _make_downloader(ProcModule.DB) as dwn:
             dwn._parse_args(prepare_arglist(['-module', 'db', '-header', 'user-agent=Mozilla/5.0 test', '--', 'a']), False)
             self.assertEqual('Mozilla/5.0 test', dwn.add_headers['User-Agent'])
@@ -117,7 +117,10 @@ class NetworkPolicyTests(TestCase):
             stamps = sorted(float(x) for p in procs for x in p.communicate(timeout=60)[0].split())
         self.assertEqual(6, len(stamps))
         gaps = [b - a for a, b in itertools.pairwise(stamps)]
-        self.assertGreaterEqual(min(gaps), 0.18, gaps)
+        # the stamps are printed after the wait returns: a process descheduled in between shortens one gap and lengthens
+        # the next (a loaded CI runner measured 0.133 s once). The limiter's promise is the pace over the 6 requests.
+        self.assertGreaterEqual(stamps[-1] - stamps[0], 5 * 0.2 * 0.9, gaps)
+        self.assertGreaterEqual(min(gaps), 0.1, gaps)
 
 
 class CommentsInfoTests(TestCase):
@@ -172,7 +175,7 @@ class LegacyGuiSettingsTests(TestCase):
 
 
 class HeadersJsonTests(TestCase):
-    """-headers / -cookies json: Ruxx stripped every backslash (escaped quotes rejected, '\\\\' lost, unicode escapes broken)"""
+    """-headers / -cookies json: the original code stripped every backslash (escaped quotes rejected, '\\\\' lost, unicode escapes broken)"""
 
     def test_valid_json(self) -> None:
         from argparse import ArgumentTypeError

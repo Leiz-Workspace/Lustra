@@ -54,7 +54,7 @@ DOWNLOAD_PERMANENT_ERRORS = (400, 401, 403, 404, 405, 410, 451)
 STREAM_READ_SIZE = 65536
 CF_STREAK_STOP = 3
 '''after this many bot challenges in a row the remaining files of the run are not requested'''
-'''file download: these statuses are not retried (Ruxx retried a 404 ten times, > 20 s per dead file)'''
+'''file download: these statuses are not retried (the original code retried a 404 ten times, > 20 s per dead file)'''
 re_content_range_total = re.compile(r'bytes \*/(\d+)')
 PART_SUFFIX = '.part'
 '''incomplete downloads'''
@@ -63,7 +63,7 @@ PART_SUFFIX = '.part'
 
 def shared_rate_wait(site: str, interval: float) -> bool:
     """Site api rate limits are per client address: the desktop app runs the sidecar and several download jobs as separate processes,
-    so the minimal interval is kept in a lock file shared by all of them (Ruxx limited each process separately: 3 e621 jobs = 6 req/s).
+    so the minimal interval is kept in a lock file shared by all of them (the original code limited each process separately: 3 e621 jobs = 6 req/s).
     Returns False if the lock file cannot be used (the caller falls back to its in-process limit)"""
     try:
         from .extensions import data_dir  # local import: extensions imports this module indirectly
@@ -139,7 +139,7 @@ class DownloadInterruptException(BaseException):
 
 class HTMLContent:
     """Response body. The BeautifulSoup tree is built on first access: json pages (danbooru, e621) never need it
-    and parsing a 200 posts json page as html cost tens of ms per page (Ruxx parsed every response)"""
+    and parsing a 200 posts json page as html cost tens of ms per page (the original code parsed every response)"""
     __slots__ = ('_html', 'raw')
 
     def __init__(self, html: BeautifulSoup | None, raw: bytes) -> None:
@@ -237,7 +237,7 @@ class ThreadedHtmlWorker(ThreadedWorker):
         self.bytes_received: int = 0
         '''file bytes written by this run (all threads, resumed parts excluded): download speed in the app'''
         '''consecutive file downloads answered with a bot challenge'''
-        '''429 / 503: every thread waits (Ruxx backed off only the thread that got the response)'''
+        '''429 / 503: every thread waits (the original code backed off only the thread that got the response)'''
         self.cf_challenge_hit: bool = False
         '''set if the website responded with a bot challenge, UI may show a hint'''
 
@@ -323,7 +323,7 @@ class ThreadedHtmlWorker(ThreadedWorker):
             self.sleep_interruptible(left)
 
     def _download_session(self) -> Session:
-        """Per-thread keep-alive session for file downloads. Ruxx opened a new session per file and sent HEAD + GET:
+        """Per-thread keep-alive session for file downloads. The original code opened a new session per file and sent HEAD + GET:
         2 TCP+TLS handshakes per file. Workers live for the whole run (persistent executors), so connections are reused"""
         s: Session | None = getattr(self._tls, 'dl_session', None)
         if s is None:
@@ -411,7 +411,7 @@ class ThreadedHtmlWorker(ThreadedWorker):
     # threaded
     def _download_to_part(self, link: str, item_id: str, part: pathlib.Path, dest: pathlib.Path, is_video_ext: bool, orig_date: bool,
                           result: FileDownloadResult) -> None:
-        """One streaming GET per attempt written straight to the .part file (Ruxx accumulated every chunk in memory with
+        """One streaming GET per attempt written straight to the .part file (the original code accumulated every chunk in memory with
         quadratic 'bytes +=' and sent a HEAD first). A failed attempt is resumed with Range + If-Range when the server supports it,
         a server ignoring Range (200) restarts the file, permanent errors (404, 410, 403...) are not retried.
         Modules asking for chunked downloads (_use_chunked_download) get ranged requests of DOWNLOAD_CHUNK_SIZE on one connection"""

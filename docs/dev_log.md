@@ -4,11 +4,11 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 
 ---
 
-## 2026-11-16 — Khởi tạo Lustra 2.0 r1 (từ Ruxx 1.7 r951)
+## 2026-11-16 — Khởi tạo Lustra 2.0 r1 (từ bản gốc 1.7 r951)
 
 ### 1. Repo & đổi tên
-- Git cũ (chỉ có lịch sử upstream `trickerer01/Ruxx`, không có commit riêng) được **chuyển** sang `~/Workspace/_backup/Ruxx.git-2026-11-16`, không xoá. Thư mục đổi tên `Ruxx` → `Lustra`.
-- Đổi tên package `ruxx` → `lustra`, launcher `lustra.sh`/`lustra.cmd`, `__RUXX_DEBUG__` → `__LUSTRA_DEBUG__`, phiên bản `2.0 r1`.
+- Git cũ (chỉ có lịch sử của dự án gốc, không có commit riêng) được **chuyển** vào thư mục sao lưu trong `~/Workspace/_backup/`, không xoá. Thư mục dự án đổi tên thành `Lustra`.
+- Đổi tên package thành `lustra`, launcher `lustra.sh`/`lustra.cmd`, biến debug thành `__LUSTRA_DEBUG__`, phiên bản `2.0 r1`.
 - Giữ dòng bản quyền MIT gốc trong `LICENSE`, thêm dòng cho Lustra; README ghi rõ là bản phái sinh.
 - `.gitignore`: trước đây bỏ qua mọi `*.json` (sẽ làm mất `2tags/` và manifest), nay chỉ bỏ qua file autoconfig ở thư mục gốc (`/*.json`, `/*.cfg`).
 - `git init`, commit đầu, tạo nhánh `staging` và `develop`; công việc mới nằm trên `develop`. *(Sửa sau: nhánh đầu tiên được đặt nhầm là `main`, đã đổi thành `production` theo quy ước develop / staging / production, trong đó production là nhánh mặc định.)*
@@ -17,7 +17,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 | Lỗi | Sửa | Test |
 |---|---|---|
 | Autocomplete xếp theo `TagInfo` (loại tag trước, số post sau), nên tag META ít post lên đầu | Sắp theo `posts_count`; sắp lại khoá khi nạp | `test_autocomplete_ranks_by_posts_count` |
-| `-proxynodown` mất tác dụng từ Ruxx rev 413 (gộp `make_session`) | `make_session(for_download=True)` tôn trọng `ignore_proxy_dwn` | `test_download_without_proxy` |
+| `-proxynodown` mất tác dụng từ bản gốc rev 413 (gộp `make_session`) | `make_session(for_download=True)` tôn trọng `ignore_proxy_dwn` | `test_download_without_proxy` |
 | Lỗi Proxy/SSL không tính vào số lần retry, nên retry vô hạn | Đếm riêng, giới hạn `retries × 3` (`CONNECT_RETRIES_PROXY_MULT`) | thủ công |
 | 429 không đọc `Retry-After` | `parse_retry_after` (giây hoặc HTTP-date, tối đa 120 s), áp cho 429/503 | `test_retry_after` |
 | Trang challenge Cloudflare bị retry tới hết lượt | `is_cloudflare_challenge` → dừng ngay, bật cờ `cf_challenge_hit`, kèm hướng dẫn | `test_cloudflare_challenge` |
@@ -97,7 +97,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - settings v1/v2 vẫn giữ đúng bộ mặc định cũ được tự chuyển sang thông số mới (`settings.version` = 3). Ảnh nền tuỳ chọn vẫn phủ kín cửa sổ và không làm mờ.
 
 ### 7d. Quyết định sản phẩm: phạm vi blacklist an toàn
-- Chủ sản phẩm chốt: blacklist tag liên quan trẻ vị thành niên **chỉ chạy khi bật bộ lọc nội dung** (bộ lọc giới tính `-gender`), không áp toàn app. Khi không lọc, app giữ hành vi như Ruxx gốc: luật của từng site vẫn áp dụng, và post bị e621 ẩn vẫn luôn bị bỏ qua.
+- Chủ sản phẩm chốt: blacklist tag liên quan trẻ vị thành niên **chỉ chạy khi bật bộ lọc nội dung** (bộ lọc giới tính `-gender`), không áp toàn app. Khi không lọc, app giữ hành vi như bản gốc: luật của từng site vẫn áp dụng, và post bị e621 ẩn vẫn luôn bị bỏ qua.
 - Đã cập nhật các phần tương ứng: [gender-filter-model](plans/gender-filter-model.md) (D5, §4.1, §8.1); [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md) (QĐ5, G9, R9, M1, AC-EXT-04).
 - Khi đang lọc: danh sách không tắt được, và extension/AI không được gỡ hay nới danh sách.
 
@@ -350,10 +350,10 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Chưa kiểm:** thông báo hệ điều hành trên desktop thật (xvfb không có notification daemon).
 
 ### 7r. Đã tải, Preview đa phương tiện, lịch tự tải, bản mới extension, sửa bản nháp bằng AI — 2026-11-17
-- **Asset cũ của Ruxx:**
-  - Xoá `images/8_256.ico` và `images/8_32.ico` (icon cáo của Ruxx).
+- **Asset cũ của bản gốc:**
+  - Xoá `images/8_256.ico` và `images/8_32.ico` (icon cáo của bản gốc).
   - Bản build CLI dùng `images/lustra.ico` (icon mặt nạ cam ở 7 cỡ, 16–256 px).
-  - Icon cửa sổ GUI Tk (`IMG_PROC_LUSTRA_DATA`, trước là GIF của Ruxx) đổi sang icon Lustra 64 px.
+  - Icon cửa sổ GUI Tk (`IMG_PROC_LUSTRA_DATA`, trước là GIF của bản gốc) đổi sang icon Lustra 64 px.
   - Favicon từng site (`IMG_PROC_RX_DATA`…) giữ nguyên.
 - **Báo bản mới của extension:**
   - `ext.list` trả `catalogVersion` / `updateAvailable` (`version_newer`, so từng phần số).
@@ -584,9 +584,9 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Workflow Tests chạy lần đầu trên GitHub:** đạt trên Linux và Windows (Python 3.11–3.15), lỗi trên macOS ở hai test: `/var` → `/private/var` trong `test_dlindex`, OpenSSL của máy macOS không có `pkeyutl -rawin` (chỉ OpenSSL 3 có) trong `test_catalog_trust`. Sửa test (so `realpath`; bỏ qua khi `openssl pkeyutl -help` không có `-rawin`, lần sửa đầu chỉ nhận ra LibreSSL nên chưa đủ); `lustra/tests/` thêm vào danh sách không phát hành của `release.yml`.
 - **Tự kiểm trên CI:** `tools/check_selftest.py` đọc báo cáo self-test của app đã đóng gói. Chạy thử trên máy dev: AppImage và `.deb` (124 MB, gói `lustra-desktop`, mục `net`) build được, self-test của bản `linux-unpacked` đạt.
 
-### 7ad. README viết lại cho Lustra, tài liệu Ruxx chuyển vào docs, kiểm tra image trên ghcr — 2026-11-17
-- **README** (tiếng Anh, cùng bố cục với Mirrix): giới thiệu và tính năng, bảng Download theo tên file của release, ghi chú cài đặt (chưa ký số, AppArmor của `.deb`, thư mục dữ liệu), model server (bản chạy độc lập, Docker trên ghcr, GPU), dòng lệnh, phát triển, bố cục repo, nhánh và release, giấy phép kèm phần ủng hộ tác giả Ruxx. Ba ảnh chụp giao diện thật (`docs/images/`) chụp từ `mock.js` dưới xvfb bằng Electron của app (user agent bỏ `Electron/` để trang nạp mock; thumbnail là SVG trung tính, không có nội dung site).
-- **Tài liệu của Ruxx không bị bỏ:** phần cú pháp tag chuyển nguyên văn sang `docs/tag-syntax.md`; phần giao diện Tk, dùng từ dòng lệnh, build exe sang `docs/legacy-gui.md`. Đã kiểm hai điều README nói: `python -m lustra -module db -path … -- scenery sky -rating:e` được phân tích đúng (tag loại trừ sau `--`), và chạy không tham số thì mở giao diện Tk (`lustra_main`).
+### 7ad. README viết lại cho Lustra, tài liệu cũ chuyển vào docs, kiểm tra image trên ghcr — 2026-11-17
+- **README** (tiếng Anh, cùng bố cục với Mirrix): giới thiệu và tính năng, bảng Download theo tên file của release, ghi chú cài đặt (chưa ký số, AppArmor của `.deb`, thư mục dữ liệu), model server (bản chạy độc lập, Docker trên ghcr, GPU), dòng lệnh, phát triển, bố cục repo, nhánh và release, giấy phép kèm phần ủng hộ tác giả bản gốc. Ba ảnh chụp giao diện thật (`docs/images/`) chụp từ `mock.js` dưới xvfb bằng Electron của app (user agent bỏ `Electron/` để trang nạp mock; thumbnail là SVG trung tính, không có nội dung site).
+- **Tài liệu của bản gốc không bị bỏ:** phần cú pháp tag chuyển nguyên văn sang `docs/tag-syntax.md`; phần giao diện Tk, dùng từ dòng lệnh, build exe sang `docs/legacy-gui.md`. Đã kiểm hai điều README nói: `python -m lustra -module db -path … -- scenery sky -rating:e` được phân tích đúng (tag loại trừ sau `--`), và chạy không tham số thì mở giao diện Tk (`lustra_main`).
 - **Mục lục `docs/README.md`** chia lại theo sản phẩm / vận hành và phát hành / plan và báo cáo, thêm tài liệu mới.
 - **Image trên ghcr:** sau khi chủ repo báo đã đổi package sang công khai, kiểm từ máy không đăng nhập: registry vẫn từ chối cấp token kéo image (`authentication required`), trang package trả 404 và trang package của repo ghi 0 package công khai. Image chưa kéo được công khai lúc ghi mục này; `docs/operations.md` ghi cách đổi và cách kiểm.
 - **Image công khai (kiểm lại sau khi chủ repo đổi lần nữa):** từ máy đã `docker logout ghcr.io`, registry cấp token kéo ẩn danh; `docker pull ghcr.io/leiz-workspace/lustra-model-server:2.0.1` và `:latest` tải về cùng digest `sha256:99b00e3c…` (1,05 GB), manifest có `linux/amd64` và `linux/arm64`. Chạy image vừa kéo (token, model gắn chỉ đọc): server lên, ffmpeg 7.1.5 cho `/v1/frames`, icon app → `only_female` (1,3 s gồm nạp model), clip `testsrc` 8 khung → `unknown`, thiếu token bị từ chối.
@@ -597,7 +597,52 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Sửa:** chỉ GPU `shared` (Intel, Apple) mới là bộ nhớ chung; card khác không đọc được VRAM ghi "VRAM unknown (no nvidia-smi)" với NVIDIA, "VRAM unknown" với hãng khác; app ghi "không đọc được VRAM: server không có nvidia-smi". Tên hãng theo `VENDOR_NAMES` (NVIDIA, AMD, Intel). `hardware_check` không đổi (`no_gpu`). Test: tên card NVIDIA từ sysfs, dòng log với card NVIDIA không đọc được VRAM, GPU Intel dùng chung, APU AMD.
 - **Phát hành:** version 2.0.2 (`app/package.json`, lock file, `pyproject.toml`; lõi `2.0 r2`), ghi chú `docs/releases/v2.0.2.md`; `develop` → `staging` (rc) → `production`.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ae)
+### 7af. CI trên Forgejo của tổ chức, luồng pull request, bỏ tên dự án gốc khỏi repo và lịch sử commit — 2026-11-17
+- **Forgejo:**
+  - `.forgejo/workflows/ci.yml`: ruff và test offline trên Python 3.11; danh sách module lấy từ `run-tests.yml` nên hai nơi không lệch nhau.
+  - `forgejo-release.yml` (tag `v*`): AppImage và `.deb` Linux x64, model server CPU, `SHA256SUMS-linux` ký minisign, package generic và Debian, image model server quét Trivy và ký cosign.
+  - Workflow của GitHub (`.github/`) không chạy trên Forgejo.
+  - Repo chưa được đưa vào platform: chưa có mirror, khoá ký và tag thử.
+- **Luồng pull request:** mọi thay đổi vào `develop`, `staging`, `production` đi qua PR (#1–#3). `run-tests.yml` chạy với mọi PR và có job gộp "Tests passed" làm check bắt buộc cho ruleset sau này. Repo công khai chỉ dùng runner GitHub-hosted.
+- **Bỏ tên dự án gốc khỏi file:**
+  - Repo ghi "bản gốc" hoặc "original work of trickerer01"; `LICENSE` giữ dòng bản quyền MIT của tác giả gốc.
+  - `.claude/` chỉ nằm trên máy dev (`/.claude/` trong `.gitignore`).
+  - Test giới hạn tốc độ bớt nhạy với độ trễ của runner.
+- **Viết lại lịch sử commit (theo yêu cầu chủ repo):**
+  - Message của 4 commit có tên dự án gốc được viết lại bằng `git filter-branch --msg-filter`.
+  - Cây file, tác giả và ngày của cả 58 commit giữ nguyên (đã kiểm từng cặp cũ / mới, cả commit cha); mọi hash commit đổi.
+  - Đã force-push `develop`, `staging`, `production` và 4 tag release. Lượt Release do lần push này kích hoạt nhận ra không có file phát hành nào đổi nên không đăng gì.
+  - `build-info.json` của 4 release giờ ghi commit mới. File phát hành không đổi vì `SHA256SUMS.txt` không gồm `build-info.json`.
+  - `target_commitish` của release đặt theo nhánh, vì GitHub không nhận SHA cho release đã có.
+  - Trang của PR đã merge (#1–#3) vẫn trỏ tới commit cũ (GitHub không cho sửa), và 3 commit gộp tạo trên GitHub mất chữ ký "Verified".
+  - Bản sao lưu trước khi viết lại là một git bundle trong `~/Workspace/_backup/`. Clone cũ cần `git fetch` rồi `git reset --hard origin/<nhánh>`.
+
+### 7ag. Lustra trên Forgejo của tổ chức; lỗi index khi nhiều tiến trình cùng mở file mới — 2026-11-17 / 18
+- **Ruleset và auto-merge trên GitHub:** ruleset "develop, staging, production: CI must pass" đã bật cho ba nhánh: phải qua PR, check `Tests passed` và `Package (linux)` phải đạt, không xoá nhánh, không force-push, không ai được bỏ qua. Repo cho phép auto-merge; PR #5 tự merge sau khi CI đạt.
+- **Đưa repo vào platform** (GUIDE §7 của platform):
+  - tạo pull mirror `mirror/Lustra` và bật Actions;
+  - thêm Lustra vào `RELEASE_REPOSITORIES` rồi chạy lại bootstrap, nên mirror có secret `PACKAGES_TOKEN`;
+  - `signing_keys.py init --repository Lustra` tạo cặp khoá cosign và minisign: khoá bí mật nằm trong Vault và secret của mirror, khoá công khai nằm trong `keys/` (repo này) và `keys/repos/Lustra/` (platform).
+- **Chạy thử bằng `workflow_dispatch`:**
+  - `forgejo-release.yml` trên `production` (run 2, không đăng) đạt sau 10,5 phút: lõi đóng băng 38,5 MiB, `.deb` 121 MB, AppImage 148 MB, self-test của app đạt (8 bước), model server chạy độc lập 44,7 MiB (nén), `SHA256SUMS-linux` được ký minisign. Job image bỏ qua, vì chỉ chạy với tag.
+  - `ci.yml` trên `develop` (run 1) lỗi ở `test_concurrent_writers`.
+  - Phần còn lại (đăng package, Release, image ký cosign) chạy lần đầu với tag phát hành tiếp theo.
+- **Lỗi index do run 1 tìm ra** (không thấy trên runner của GitHub; ở máy dev, test lỗi 1/12 lần):
+  - Khi nhiều tiến trình cùng mở một index chưa có, `PRAGMA journal_mode = WAL` bị báo `database is locked` ngay mà không chờ `busy_timeout`, vì SQLite tránh deadlock. Thử 8 tiến trình mở cùng lúc: 104/120 lần mở lỗi.
+  - Ghi lỗi xong, `_fail` gọi `trace`; ngoài app, logger chưa có cửa sổ nên ném `AssertionError`. Luồng ghi chết, 149 bản ghi còn lại bị bỏ âm thầm, trong khi `close()` vẫn trả `True`.
+  - **Sửa:**
+    - `_enable_wal` thử lại tới `BUSY_TIMEOUT`, cách nhau `RETRY_PAUSE`, và không đổi gì nếu file đã là WAL;
+    - `_flush` nghỉ giữa các lần ghi lại;
+    - lỗi khi báo cáo không còn làm dừng luồng ghi.
+  - **Test:** chuyển WAL khi đang bị khoá (giả lập), 8 tiến trình cùng mở index mới, báo cáo lỗi không làm dừng luồng ghi. Cả 3 test lỗi trên code cũ.
+  - **Sau khi sửa:** 0/120 lần mở lỗi; `MultiProcessTests` đạt 15/15 lần; 333 test offline, test cũ và ruff đạt.
+
+### 7ah. Bản 2.0.3 — 2026-11-18
+- **Nội dung:** sửa index khi nhiều tiến trình cùng mở file mới (7ag); hộp "Giới thiệu", `help.py` và thông tin gói ghi công tác giả bản gốc (7af); thêm khoá công khai `keys/` (7ag).
+- **Phát hành:** version 2.0.3 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r3`), ghi chú `docs/releases/v2.0.3.md`; `develop` → `staging` (rc) → `production` qua PR. Đây cũng là lần đầu tag của GitHub kích hoạt `forgejo-release.yml` trên Forgejo: package generic và Debian, Release, image ký cosign.
+- **CI trên Forgejo sau khi merge PR #6** (run 3, push lên `develop`): 333 test offline đạt, kể cả test index nhiều tiến trình. Bước test cũ (`lustra/tests/tests.py`) lỗi `No module named 'tkinter'`: các test này import giao diện Tk, mà image Debian không có `python3-tk`, và `ci.yml` còn bỏ `tkinterdnd2` khỏi danh sách cài. Ở run 1 bước này chưa chạy tới vì job đã dừng ở test index. Sửa: cài `python3-tk` và đủ `requirements.txt` như workflow của GitHub. Đã chạy nguyên văn các bước của `ci.yml` trong container `node:22-bookworm`: ruff, 333 test offline, 54 test cũ và test icon đều đạt.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ah)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
@@ -610,4 +655,5 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - thử trên máy Windows / macOS thật: app (CI đã self-test cả 6 nền tảng), model server chạy độc lập (CPU, DirectML), script chạy nền;
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
-  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn).
+  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
+  - Forgejo: lần phát hành tiếp theo (cần nâng phiên bản, ví dụ 2.0.3, vì `develop` đã đổi file được phát hành) là lần đầu chạy trọn đường đăng package, Release và image ký cosign; kiểm `SHA256SUMS-linux` bằng `keys/minisign.pub` và image bằng `keys/cosign.pub` (7ag).

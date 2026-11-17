@@ -454,7 +454,7 @@ def _toggle_autocompletion_wrapper() -> None:
 
 
 _api_keys: dict[str, tuple[str, str]] = {}
-'''api key / user id per module abbreviation: Ruxx had one key slot, switching module could send one site's key to another site'''
+'''api key / user id per module abbreviation: the original GUI had one key slot, switching module could send one site's key to another site'''
 
 
 def _set_proc_module(dwnmodule: int) -> None:
@@ -483,7 +483,7 @@ def _set_proc_module(dwnmodule: int) -> None:
 
 
 def _module_caps() -> frozenset[str]:
-    """Capabilities of the selected module (Ruxx hard-coded module names here, extensions were never enabled correctly)"""
+    """Capabilities of the selected module (the original GUI hard-coded module names here, extensions were never enabled correctly)"""
     from .downloaders import DOWNLOADERS_BY_PROC_MODULE
     from .extensions import Extensions
     if ProcModule.value() not in DOWNLOADERS_BY_PROC_MODULE:

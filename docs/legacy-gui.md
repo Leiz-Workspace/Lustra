@@ -1,6 +1,6 @@
-# Legacy Tk GUI and command line (from Ruxx)
+# Legacy Tk GUI and command line
 
-> The Tk GUI inherited from Ruxx still ships with the Python package: `python -m lustra` without arguments opens it. The desktop app (`app/`, Electron) is the main interface now; its features are described in [specs.md](specs.md) and [operations.md](operations.md). This page keeps the Ruxx README sections about the Tk GUI, the command line and the standalone executable build. Tag syntax: [tag-syntax.md](tag-syntax.md).
+> The Tk GUI of the original code still ships with the Python package: `python -m lustra` without arguments opens it. The desktop app (`app/`, Electron) is the main interface now; its features are described in [specs.md](specs.md) and [operations.md](operations.md). This page keeps the original README sections about the Tk GUI, the command line and the standalone executable build. Tag syntax: [tag-syntax.md](tag-syntax.md).
 
 ## How to use
 - \[Optional] Choose **Module** (website) to use. The icon in the bottom left corner will change accordingly
