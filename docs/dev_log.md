@@ -637,7 +637,11 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - **Test:** chuyển WAL khi đang bị khoá (giả lập), 8 tiến trình cùng mở index mới, báo cáo lỗi không làm dừng luồng ghi. Cả 3 test lỗi trên code cũ.
   - **Sau khi sửa:** 0/120 lần mở lỗi; `MultiProcessTests` đạt 15/15 lần; 333 test offline, test cũ và ruff đạt.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ag)
+### 7ah. Bản 2.0.3 — 2026-11-18
+- **Nội dung:** sửa index khi nhiều tiến trình cùng mở file mới (7ag); hộp "Giới thiệu", `help.py` và thông tin gói ghi công tác giả bản gốc (7af); thêm khoá công khai `keys/` (7ag).
+- **Phát hành:** version 2.0.3 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r3`), ghi chú `docs/releases/v2.0.3.md`; `develop` → `staging` (rc) → `production` qua PR. Đây cũng là lần đầu tag của GitHub kích hoạt `forgejo-release.yml` trên Forgejo: package generic và Debian, Release, image ký cosign.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ah)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
