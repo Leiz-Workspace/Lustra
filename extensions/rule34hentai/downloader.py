@@ -261,14 +261,14 @@ class DownloaderRn(Downloader):
                     self._extract_comments(raw_html.html, item_id)
                     full_item_id = f'{self._get_module_abbr_p() if self.add_filename_prefix else ""}{item_id}'
                     if orig_source_div := raw_html.html.find('div', style=re_shimmie_orig_source):
-                        self.item_info_dict_per_task[full_item_id].source = orig_source_div.text
+                        self._item_info_for(full_item_id).source = orig_source_div.text
                     if post_date := self._extract_post_date(raw_html.html):
-                        self.item_info_dict_per_task[full_item_id].date = post_date
+                        self._item_info_for(full_item_id).date = post_date
                     # we can't extract actual score without account credentials AND cf_clearance, but favorites will do just fine
                     if favorited_by_div := raw_html.html.find('h3', string='Favorited By'):
                         fav_sib = favorited_by_div.findNextSibling()
                         score_text = fav_sib.text[:max(fav_sib.text.find(' '), 0)]
-                        self.item_info_dict_per_task[full_item_id].score = score_text
+                        self._item_info_for(full_item_id).score = score_text
 
             if self.download_mode == DownloadModes.SKIP:
                 self._inc_proc_count()
@@ -320,13 +320,13 @@ class DownloaderRn(Downloader):
             author = author_a.text
             body = comment_div.text.strip()
             body = body[body.find(f'{author}: ') + len(f'{author}: '):]
-            self.item_info_dict_per_task[full_item_id].comments.append(Comment(author, body))
+            self._item_info_for(full_item_id).comments.append(Comment(author, body))
 
     def _extract_md5(self, raw: str, full_item_id: str) -> None:
         img_idx = raw.find('images/') + len('images/')
         end_idx = raw.find('/', img_idx)
         md5 = raw[img_idx:end_idx]
-        self.item_info_dict_per_task[full_item_id].md5 = md5
+        self._item_info_for(full_item_id).md5 = md5
 
     @staticmethod
     def _extract_local_addr(raw: str) -> str:

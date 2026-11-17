@@ -33,9 +33,8 @@ from lustra.defines import (
     ModuleCaps,
 )
 from lustra.download import Downloader
-from lustra.help import APP_ADDRESS
 from lustra.logger import trace
-from lustra.network import thread_exit
+from lustra.network import LUSTRA_USER_AGENT, thread_exit
 from lustra.rex import (
     re_favorited_by_tag,
     re_item_info_part_xml,
@@ -46,7 +45,6 @@ from lustra.rex import (
 )
 from lustra.utils import format_score
 from lustra.vcs.debug import __LUSTRA_DEBUG__
-from lustra.vcs.version import APP_VERSION
 
 __all__ = ('DownloaderEn',)
 
@@ -84,11 +82,13 @@ class DownloaderEn(Downloader):
 
     def __init__(self) -> None:
         super().__init__()
-        self._base_headers = {'User-Agent': f'Lustra/{APP_VERSION} (based on Ruxx <{APP_ADDRESS}>)'}
+        self._base_headers = {}
         self._base_cookies = {}
 
     def _get_module_specific_default_headers(self) -> dict[str, str]:
-        return self._base_headers
+        # e621 api rules: '<project>/<version> (by <username> on e621)'; the username is the one of the api key (sent to e621 anyway)
+        user = self.api_key.user_id if self.api_key else ''
+        return {'User-Agent': f'{LUSTRA_USER_AGENT}{f" (by {user} on e621)" if user else ""}', **self._base_headers}
 
     def _get_module_specific_default_cookies(self) -> dict[str, str]:
         return self._base_cookies
@@ -364,7 +364,7 @@ class DownloaderEn(Downloader):
     def _extract_comments(self, raw_html: bytes, item_id: str) -> None:
         comments_json: list[dict[str, str]] = json.loads(raw_html)
         if isinstance(comments_json, list):
-            item_info = self.item_info_dict_per_task[f'{self._get_module_abbr_p() if self.add_filename_prefix else ""}{item_id}']
+            item_info = self._item_info_for(self._item_idstring(item_id))
             for comment in comments_json:
                 item_info.comments.append(Comment(comment['creator_name'], f'{comment["body"]}\n{format_score(str(comment["score"]))}'))
 
