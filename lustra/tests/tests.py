@@ -12,7 +12,7 @@ import pathlib
 from collections.abc import Callable
 from dataclasses import asdict
 from tempfile import TemporaryDirectory
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from lustra.cmdargs import prepare_arglist
 from lustra.defines import DATE_MIN_DEFAULT, IDVAL_EQ_SEPARATORS, MODULE_CHOICES, Comment, DownloadModes, ItemInfo, ThreadInterruptException
@@ -210,9 +210,9 @@ class FileCheckTests(TestCase):
     @test_prepare()
     def test_filecheck03_tags_load(self) -> None:
         TagsDB.try_set_basepath(pathlib.Path(), traverse=False)
-        for module in MODULE_CHOICES:
-            TagsDB._load(module)
-            self.assertGreater(len(TagsDB.DB[module]), 0, msg=f'{self._testMethodName} for module \'{module}\' failed')
+        with mock.patch.object(TagsDB, 'CacheEnabled', False):  # do not write ~70 MB of list caches into the user's data dir
+            for module in MODULE_CHOICES:
+                self.assertGreater(TagsDB.count(module), 0, msg=f'{self._testMethodName} for module \'{module}\' failed')
         print(f'{self._testMethodName} passed')
 
 

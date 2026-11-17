@@ -14,24 +14,29 @@ import base64
 import csv
 import datetime
 import gzip
+import html
 import io
 import json
 import os
 import pathlib
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterator
 
 import requests
 
 from .defines import API_KEY_DEFAULT_RX, API_USER_ID_DEFAULT_RX, UTF8
+from .network import parse_retry_after
 
 __all__ = ('SUPPORTED_MODULES', 'UpdateResult', 'update_tag_list', 'write_tag_list')
 
-USER_AGENT = 'Lustra/2.0 tag list updater (based on Ruxx <github.com/trickerer01/Ruxx>)'
+USER_AGENT = 'Lustra/2.0 tag list updater'
 PAGE_LIMIT = 1000
 SANITY_MIN_RATIO = 0.5
 '''refuse to replace an existing list with one that has less than this ratio of tags (partial/failed fetch)'''
+MAX_PAGES_HARD = 20000
+'''20M tags: a cursor that keeps moving forever means the website ignores it'''
 
 GELBOORU_TYPES = {0: 'general', 1: 'artist', 3: 'copyright', 4: 'character', 5: 'metadata', 6: 'general'}
 DANBOORU_TYPES = {0: 'general', 1: 'artist', 3: 'copyright', 4: 'character', 5: 'metadata'}
@@ -69,8 +74,7 @@ def _get(s: requests.Session, url: str, delay: float, tries=5) -> requests.Respo
         try:
             r = s.get(url, timeout=30)
             if r.status_code in (429, 503):
-                wait = float(r.headers.get('Retry-After', '0') or 0) or 2.0 * (attempt + 1)
-                time.sleep(min(wait, 120))
+                time.sleep(parse_retry_after(r.headers.get('Retry-After')) or 2.0 * (attempt + 1))
                 continue
             r.raise_for_status()
             return r
@@ -94,11 +98,17 @@ def _iter_gelbooru(site: str, auth: str, min_posts: int, delay: float, max_pages
         for t in tags:
             count = int(t.get('count', '0') or 0)
             if count >= min_posts and t.get('name'):
-                yield t['name'], count, GELBOORU_TYPES.get(int(t.get('type', '0') or 0), 'general')
-        after_id = max(int(t.get('id', '0') or 0) for t in tags)
+                # xml attribute values are escaped: '&amp;' -> '&', '&#039;' -> "'"
+                yield html.unescape(t['name']), count, GELBOORU_TYPES.get(int(t.get('type', '0') or 0), 'general')
+        new_after_id = max(int(t.get('id', '0') or 0) for t in tags)
+        if new_after_id <= after_id:
+            raise RuntimeError(f'website ignores the after_id cursor (stuck at {after_id:d}), the list would be incomplete')
+        after_id = new_after_id
         pages += 1
         if len(tags) < PAGE_LIMIT or (max_pages and pages >= max_pages):
             return
+        if pages >= MAX_PAGES_HARD:
+            raise RuntimeError(f'more than {MAX_PAGES_HARD:d} pages, aborting')
 
 
 def _iter_danbooru(min_posts: int, delay: float, max_pages: int, api_key: str) -> Iterator[tuple[str, int, str]]:
@@ -119,10 +129,15 @@ def _iter_danbooru(min_posts: int, delay: float, max_pages: int, api_key: str) -
             count = int(t.get('post_count') or 0)
             if count >= min_posts:
                 yield str(t['name']), count, DANBOORU_TYPES.get(int(t.get('category') or 0), 'general')
-        cursor = max(int(t['id']) for t in tags)
+        new_cursor = max(int(t['id']) for t in tags)
+        if new_cursor <= cursor:
+            raise RuntimeError(f'website ignores the id cursor (stuck at {cursor:d}), the list would be incomplete')
+        cursor = new_cursor
         pages += 1
         if len(tags) < PAGE_LIMIT or (max_pages and pages >= max_pages):
             return
+        if pages >= MAX_PAGES_HARD:
+            raise RuntimeError(f'more than {MAX_PAGES_HARD:d} pages, aborting')
 
 
 def _iter_e621_export(min_posts: int, delay: float) -> Iterator[tuple[str, int, str]]:
@@ -184,22 +199,29 @@ def _count_lines(path: pathlib.Path) -> int:
 
 def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None:
     """Atomic write in bundled list format (one entry per line, sorted by python string order for binary search)"""
-    tmp = path.with_name(f'.{path.name}.tmp')
-    with open(tmp, 'wt', encoding=UTF8, newline='\n') as f:
-        f.write('{\n')
-        names = sorted(tags)
-        for i, name in enumerate(names):
-            count, ttype = tags[name]
-            f.write(f'{json.dumps(name, ensure_ascii=False)}: "{count:d} posts ({ttype})"{"," if i < len(names) - 1 else ""}\n')
-        f.write('}\n')
-    os.replace(tmp, path)
+    tmp = path.with_name(f'.{path.name}.{os.getpid():d}.{uuid.uuid4().hex[:8]}.tmp')  # concurrent writers never share a tmp file
+    try:
+        with open(tmp, 'wt', encoding=UTF8, newline='\n') as f:
+            f.write('{\n')
+            names = sorted(tags)
+            for i, name in enumerate(names):
+                count, ttype = tags[name]
+                f.write(f'{json.dumps(name, ensure_ascii=False)}: "{count:d} posts ({ttype})"{"," if i < len(names) - 1 else ""}\n')
+            f.write('}\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.5, max_pages=0, api_key='', force=False,
-                    progress: ProgressCb | None = None) -> UpdateResult:
+                    progress: ProgressCb | None = None, reference: pathlib.Path | None = None) -> UpdateResult:
+    """reference: the list currently in use (may live in another folder). The sanity check compares against the bigger one,
+    otherwise a failed first update into an empty folder would shadow the bundled list with an almost empty newer file"""
     out_dir.mkdir(parents=True, exist_ok=True)
     res = UpdateResult(module, out_dir / f'{module}_tags.json')
-    res.previous = _count_lines(res.path)
+    res.previous = max(_count_lines(res.path), _count_lines(reference) if reference else 0)
     tags: dict[str, tuple[int, str]] = {}
     for i, (name, count, ttype) in enumerate(_iter_module(module, min_posts, delay, max_pages, api_key)):
         if name not in tags or tags[name][0] < count:
@@ -207,6 +229,9 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
         if progress and i % 5000 == 0:
             progress(f'[{module}] {len(tags):d} tags...', len(tags))
     res.count = len(tags)
+    if res.count == 0:
+        res.message = 'not written: no tags fetched'
+        return res
     partial = bool(max_pages)
     if not force and (partial or res.count < res.previous * SANITY_MIN_RATIO):
         res.message = (f'not written: fetched {res.count:d} tags vs {res.previous:d} existing'
