@@ -38,12 +38,12 @@
   - **Đã có:** `lustra/dlindex.py`, SQLite `<data>/index/downloads.sqlite` (WAL, nhiều job CLI ghi cùng lúc an toàn). Mỗi file tải xong được ghi qua hàng đợi + thread nền theo lô: module, id, md5, đường dẫn, tags, score, rating, ngày post, thời điểm tải. Chỉ metadata, không đọc file. `-skip_known` (mặc định tắt) bỏ qua post trùng module + id hoặc trùng md5 (mọi module) khi file còn trên đĩa. RPC `index.search` (tag / module / khoảng ngày, phân trang) và `index.stats`. App: ô "Bỏ qua file đã tải", số liệu ở Cài đặt.
   - **Để sau:**
     1. *(Đã làm, dev log 7r: trang "Đã tải")* Trang tìm offline đầy đủ trong app: ô tag (dùng lại chip), lọc module / ngày / rating, lưới kết quả từ file trên đĩa (thumbnail cục bộ, không request), mở file / thư mục, đánh dấu file đã mất.
-    2. Dọn index: xoá dòng có file không còn (chạy nền, theo lô, có nút ở Cài đặt).
-    3. Nhập thư viện có sẵn: quét thư mục, nhận id từ tên file (`files.identify`) rồi lấy metadata theo lô, tôn trọng rate limit.
+    2. *(Đã làm, 2026-11-17)* Dọn index: xoá dòng có file không còn (chạy nền, theo lô, có nút ở Cài đặt). `DownloadIndex.clean_missing`, RPC `index.clean` (main hỏi xác nhận), CLI `python -m lustra.dlindex_tools clean`; dòng có cả thư mục đã mất được giữ trừ khi được yêu cầu.
+    3. *(Đã làm, 2026-11-17)* Nhập thư viện có sẵn: quét thư mục, nhận id từ tên file (`files.identify`) rồi lấy metadata theo lô, tôn trọng rate limit. Job `dlindex_tools import` trong hàng đợi; Danbooru 100 post / request, site khác 1 post / request, ≥ 0,5 s giữa hai request; tên không nhận ra được liệt kê.
     4. *(Đã làm, dev log 7r)* Preview đánh dấu post đã tải (tra index theo id / md5 của trang kết quả, không thêm request).
-    5. Tool re-tag (`file_tagger`) đọc tag từ index thay vì file info JSON.
-    6. Truy vấn đa site (mục dưới) khử trùng bằng md5 trong index.
-- **Truy vấn đa site**: một truy vấn chạy trên nhiều module, khử trùng theo md5.
+    5. *(Đã làm, 2026-11-17)* Tool re-tag (`file_tagger`) đọc tag từ index thay vì file info JSON (JSON làm dự phòng). GUI Tk và CLI `dlindex_tools retag`; app desktop không có công cụ này. Re-tag / un-tag / sắp xếp file cập nhật đường dẫn trong index.
+    6. *(Đã làm, 2026-11-17)* Truy vấn đa site (mục dưới) khử trùng bằng md5 trong index.
+- **Truy vấn đa site** — *đã làm (2026-11-17)*: một truy vấn chạy trên nhiều module, khử trùng theo md5. App: "Tải thêm từ site khác"; main tạo một job mỗi module, chạy lần lượt, ép `-skip_known` + `-prefix`; hàng đợi gộp thành một nhóm; Preview vẫn một module. Giới hạn: chuỗi tag gửi nguyên văn (cú pháp, alias khác nhau giữa các site, UI cảnh báo); chỉ khử trùng được khi site báo md5 và file không bị nén / sửa lại. Chưa làm: ánh xạ tag / alias giữa các site.
 
 ## 4. Rủi ro
 - Tag list lớn (db ~0,77 triệu tag, rx ~0,61 triệu) tốn khoảng 150–250 MB RAM mỗi module khi nạp → cân nhắc chuyển sang SQLite FTS cho autocomplete và A–Z.

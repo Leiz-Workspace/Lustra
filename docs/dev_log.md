@@ -447,6 +447,41 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Vấn đề 3:** `--device cpu` trên máy có GPU bị app báo `gpu_fallback` ("thiếu CUDA / cuDNN"). Sửa: status có `deviceSetting`, mã mới `cpu_forced` với lời khuyên bỏ tuỳ chọn.
 - **Kiểm chứng:** `test_model_server` 23 test (thêm tiến trình con: đa luồng, ảnh hỏng, lỗi nạp, tiến trình chết rồi nạp lại, 500 khi model lỗi, tắt thì tiến trình thoát; `cpu_forced`; `deviceSetting`). Bộ test offline có model thật (`LUSTRA_GENDER_MODEL_DIR`): 232 đạt, không bỏ qua test nào. Server systemd thật: `check: gpu`, nạp trên CUDA 0,7 s; `--device cpu` / `--device gpu --preload` trên cổng phụ đúng như mong đợi. Preview Danbooru qua sidecar (`robot rating:g`, `-gender_conf high`): server tự nạp model trên CUDA, model xem 3 post, gán nhãn cả 3. Self-test Electron: `check: gpu`, unload qua main.
 
+### 7?. Index: dọn, nhập thư viện, re-tag, tải nhiều site — 2026-11-17
+- **Yêu cầu ([search-engine](plans/search-engine.md) §3, các mục "để sau" 2, 3, 5, 6):** dọn index, nhập thư viện có sẵn, re-tag đọc index, truy vấn đa site khử trùng bằng md5. Renderer không được thêm quyền truy cập file.
+- **Dọn index:**
+  - `DownloadIndex.clean_missing`: đọc theo id, 500 dòng một lô, `stat` từng file, mỗi lô một transaction ngắn. Xoá theo `id + path + downloaded_at`, nên dòng mà job khác vừa ghi lại không bị xoá. `file_tags` xoá cùng; `tag_names` giữ lại vì writer của job đang chạy giữ cache id.
+  - Dòng có cả thư mục đã mất (ổ ngoài chưa cắm) được giữ, trừ khi chọn "xoá cả dòng có thư mục không còn".
+  - Sidecar: `index.clean` (thread nền, `index.cleanProgress` / `index.cleanDone`, mỗi lúc một lượt), `index.cleanCancel`. Không có trong allowlist `rpc`: app gọi qua `index:clean`, main hỏi bằng hộp thoại native có ô chọn; chạy thử (chỉ đếm) không cần hỏi.
+  - App: Cài đặt → Index các lần tải: **Kiểm tra**, **Dọn index…**, **Dừng**, dòng trạng thái. CLI `python -m lustra.dlindex_tools clean [--dry-run] [--missing-folders] [--json]`.
+- **Nhập thư viện có sẵn:**
+  - `lustra/dlindex_tools.py` (`LibraryImport`): quét thư mục, bỏ file đã có trong index theo đường dẫn, nhận module + id / md5 từ tên file bằng luật của `files.identify`.
+  - Luật này chuyển từ `server.py` sang `lustra/file_identify.py` (server import lại, hành vi không đổi): import `server.py` sẽ đổi `sys.stdout`, CLI không dùng được.
+  - Metadata qua downloader của module: Danbooru `id:a,b,…` / `md5:…` 100 mục một request; module khác một request mỗi post (nhóm OR toàn metatag vẫn bị tách thành task). Giãn cách ≥ 0,5 s hoặc theo `_get_min_request_interval`; module bị bỏ sau 5 request lỗi liên tiếp hoặc khi gặp bot challenge.
+  - Ghi bằng `record_for` (rating từ chuỗi item, thời điểm tải = mtime). Tên không có tiền tố chỉ được tra khi người dùng chọn module cho chúng; tên không nhận ra, post không có, request lỗi, md5 khác (`--verify-md5`) được đếm và liệt kê.
+  - Chạy như job: lệnh lõi mới `index` (`coreCommand`, `frozen_main.py`, smoke test của `build_core.py`), dòng `@@LUSTRA_PROGRESS` (`IMPORT_SCAN` → `IMPORT_FETCH` → `DONE`), `cancel` qua stdin. Khoá API theo module qua `LUSTRA_SECRET_MODULE_ARGS`.
+  - Main: `index:pickFolder` (hộp thoại native, đưa thư mục vào `approvedImportFolders`), `index:import` từ chối thư mục khác. Thẻ job có số liệu riêng và nút **Danh sách**; khi job xong, số liệu index và trang Đã tải được làm mới. Nút nhập ở Cài đặt và ở trang Đã tải.
+- **Re-tag:**
+  - `file_tagger.item_infos_from_index`: tìm theo đường dẫn file, sau đó theo module + id của tên `xx_<id>`. Chỉ nhận tên `[xx_]<id>` có id khớp dòng index, vì công cụ cũ coi mọi tên bắt đầu bằng chữ số là id (`<md5>.jpg` sẽ bị đổi sai tên).
+  - GUI Tk gộp info JSON với info từ index (index thắng). CLI `dlindex_tools retag` theo thư mục, `--types`, `--source`.
+  - Re-tag, un-tag, sắp xếp file (`file_sorter`) gọi `rename_indexed_files`: dòng index đi theo file. Trước đây file đổi tên bị coi là đã mất. App desktop chưa có công cụ này nên không thêm.
+- **Tải nhiều site:**
+  - `Jobs.startMulti` (IPC `jobs:startMulti`): 2–8 module, mỗi module một job (`_build` tách khỏi `start`), cùng `group`. `_waiting` giữ job của site sau ở hàng chờ tới khi mọi site trước kết thúc, để file của chúng đã có trong index. Ép `-skip_known` và `-prefix` (post 123 của hai site không trùng tên file). `jobs:start` bỏ `group` do renderer gửi; huỷ job đang chờ thì `pump` chạy lại.
+  - Renderer: "Tải thêm từ site khác" (chip module, cảnh báo cú pháp / alias, nút "Tải xuống (N site)"), khung nhóm trong hàng đợi (thứ tự site, file mới, file bỏ qua, **Huỷ cả nhóm**, "Chờ site trước tải xong"). Preview, Đếm, "Tải đã chọn" vẫn một site.
+- **Mock / self-test:** mock có `jobs.startMulti`, `index.*` (job nhập giả, dọn giả qua notification). Self-test thêm bước `indexTools`: rpc trực tiếp bị chặn, xác nhận / từ chối dọn, chạy thử, thư mục chưa chọn bị từ chối, module sai, một job nhập chạy thử thật và thẻ job, nhóm nhiều site (kiểm tra tham số, chờ, nhóm giả từ renderer). Phần giao diện: `20-index-settings`, `21-import-dialog`, `22-multi-site`, `23-job-group`, `24-import-job-lists`.
+- **Kiểm chứng:**
+  - `lustra.tests.test_dlindex_tools`: 27 test offline (dọn, RPC nền, nhập với site giả, giao thức job, re-tag, đổi tên, wiring). Đã thêm vào CI và `operations.md` §4.
+  - Toàn bộ suite offline đạt; ruff sạch; `npm run check` sạch; self-test Electron (quick) đạt cả bước cũ lẫn bước mới.
+  - Chạy thật, mọi dữ liệu ở thư mục tạm:
+    - Danbooru: 4 post `scenery no_humans rating:g` (bật lọc giới tính nên có blacklist). Đổi tên thành id trần, md5 và thêm thư mục con: 2 request (danh sách id + danh sách md5), md5 khớp cả 4 file, `db_999999999` không có trên site, `IMG_0001` không nhận ra.
+    - Xbooru: 2 post `no_humans rating:safe`, file giữ chỗ (`-dmode touch`, không tải ảnh): 2 request.
+    - Dọn: file đã xoá bị bỏ khỏi index, thư mục đã mất được giữ. Re-tag CLI đổi `8344.jpg` → `8344_(+18)_canal_dome_overgrown.jpg` và dòng index đi theo.
+- **Chưa làm / giới hạn:**
+  - Ánh xạ tag / alias giữa các site.
+  - Nhập với module không phải Danbooru chậm (1 post mỗi request; 10 000 file rx ≈ 1,5 giờ).
+  - Không xem trước danh sách thư mục bị giữ trong hộp xác nhận (dòng trạng thái của "Kiểm tra" có tối đa 5 thư mục).
+  - Windows / macOS chưa thử.
+
 ### 8. Việc tiếp theo (cập nhật 2026-11-17)
 - Đã xong, không còn là việc tiếp theo: đóng gói app (electron-builder, AppImage, lõi PyInstaller: đợt D), phân trang con trỏ cho Danbooru (đợt C), giai đoạn 2 của plan search-engine (đợt D).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
