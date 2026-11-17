@@ -86,6 +86,8 @@ BIAS_MARGIN = 0.05
 RELEASE_PRECISION_MIN = 0.85
 ECE_BINS = 15
 RISK_THRESHOLDS = (0.35, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98)
+ERRORS_MAX = 300
+'''posts listed where a verdict differs from the reference (first ones a human should look at)'''
 KAPPA_MIN = 0.8
 GOLD_MIN_POSTS = 3000
 GOLD_SPARSE_MIN = 0.3
@@ -734,8 +736,11 @@ def _analyze(rows: list[dict], mode: str) -> dict:
               for (d, v), rs in sorted(groups.items(), key=lambda x: (order.get(x[0][0], 99), -len(x[1]), x[0][1]))]
     flags, not_judged = _bias(g, slices)
     trap = [r for r in rows if ('edge', 'trap') in r['slices']]
+    wrong = [{'key': r['key'], 'ref': r['ref'], 'pred': r['pred'], 'score': None if r['score'] is None else round(r['score'], 3)}
+             for r in rows if r['pred'] not in ('unknown', r['ref'])]
     return {'global': g, 'slices': slices, 'biasFlags': flags, 'notJudged': not_judged,
-            'trapAsOnlyFemale': {'n': len(trap), 'onlyFemale': sorted(r['key'] for r in trap if r['pred'] == 'only_female')}}
+            'trapAsOnlyFemale': {'n': len(trap), 'onlyFemale': sorted(r['key'] for r in trap if r['pred'] == 'only_female')},
+            'disagreements': sorted(wrong, key=lambda x: (x['ref'], x['pred'], x['key']))[:ERRORS_MAX]}
 
 
 def _row(key: str, ref: str, res: GenderResult, score: float | None, min_conf: GenderConf, slices: list) -> dict:
@@ -977,6 +982,9 @@ def render_markdown(report: dict) -> str:
             t = a['trapAsOnlyFemale']
             keys = f' ({", ".join(t["onlyFemale"])})' if t['onlyFemale'] else ''
             L.append(f'Slice trap: {t["n"]} post, {len(t["onlyFemale"])} bị gán only_female{keys}.')
+            if a.get('disagreements'):
+                L.append(f'Post có nhãn khác tham chiếu ({len(a["disagreements"])}, tham chiếu → dự đoán): '
+                         + ', '.join(f'{d["key"]} ({d["ref"]} → {d["pred"]})' for d in a['disagreements']) + '.')
             L.append('')
     if report.get('inputAgreement'):
         ia = report['inputAgreement']

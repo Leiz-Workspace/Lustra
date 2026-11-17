@@ -213,6 +213,8 @@ class EvaluateTests(TestCase):
             self.assertEqual(0.8333, s['macroF1'])
             self.assertEqual({'only_female': 1, 'only_male': 1, 'both': 0, 'none': 0, 'unknown': 0}, s['confusion']['only_male'])
             self.assertEqual(['db:13'], r['systems']['model']['sample']['trapAsOnlyFemale']['onlyFemale'])
+            self.assertEqual([{'key': 'db:13', 'ref': 'only_male', 'pred': 'only_female', 'score': 0.95}],
+                             r['systems']['model']['sample']['disagreements'])
             t = r['systems']['model']['thumb']['global']
             self.assertEqual((5, 0.6, 0.6667), (t['n'], t['coverage'], t['microPrecision']))
             self.assertEqual(0.8, t['coverageAnswered'])  # db:4 answered 'none' at low confidence
