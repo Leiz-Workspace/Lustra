@@ -25,7 +25,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.dummy import current_process
 from typing import Any
-from urllib import parse as url_parse
 
 # protocol channel must stay clean: everything else printed to stdout goes to stderr
 _PROTO_OUT = sys.stdout
@@ -596,110 +595,12 @@ def resolve_user_path(raw: str) -> pathlib.Path:
     return path if path.is_absolute() else pathlib.Path.home() / path
 
 
-# ----- search by file name / post link -----
+# ----- search by file name / post link (rules: lustra/file_identify.py, shared with the library import) -----
+
+from .file_identify import build_file_queries, identify_file_name  # noqa: E402
+from .file_identify import site_hosts as _site_hosts  # noqa: E402
 
 FILES_IDENTIFY_MAX = 500
-ID_LIST_MODULES = frozenset(('db',))
-'''modules accepting lists in one metatag: 'id:1,2,3' / 'md5:a,b' (danbooru, checked 2026-11-17); others get an OR group'''
-ID_LIST_CHUNK = 100
-re_scheme = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
-re_md5_token = re.compile(r'(?<![0-9a-f])([0-9a-f]{32})(?![0-9a-f])')
-re_prefixed_id = re.compile(r'^([a-z0-9]{2,4})_(\d+)(?:[_.(\s-]|$)')
-re_plain_id = re.compile(r'^(\d+)(?:[_.(\s-]|$)')
-re_danbooru_download = re.compile(r'^__.+__[0-9a-f]{32}$')
-POST_URL_PATTERNS = (
-    re.compile(r'/posts?/(?:view/|show/)?(\d+)(?:[/?#]|$)'),  # danbooru, e621 /posts/N; shimmie /post/view/N
-    re.compile(r'[?&]id=(\d+)(?:&|$)'),  # gelbooru 'page=post&s=view&id=N', rule34.us 'r=posts/view&id=N'
-)
-
-
-def _site_hosts() -> dict[str, str]:
-    """host -> module abbr of every known module (builtin, installed and catalog extensions)"""
-    hosts: dict[str, str] = {}
-    for row in Extensions.list_all():
-        site = str(row.get('site') or '')
-        abbr = str(row.get('abbr') or '')
-        host = (url_parse.urlparse(site).hostname or '').lower()
-        if host and abbr:
-            # full host and its base domain: file links come from cdn hosts (cdn.donmai.us, wimg.rule34.xxx)
-            for h in (host, host.removeprefix('www.'), host.removeprefix('api.'), '.'.join(host.split('.')[-2:])):
-                hosts.setdefault(h, abbr)
-    return hosts
-
-
-def _host_module(host: str, hosts: dict[str, str]) -> str:
-    host = host.lower()
-    return hosts.get(host) or hosts.get('.'.join(host.split('.')[-2:]), '')
-
-
-def identify_file_name(raw: str, module: str, hosts: dict[str, str]) -> dict:
-    """One pasted / dropped item: a file name (Lustra 'db_12345_score(3).jpg' or '12345.jpg', booru original '<md5>.jpg',
-    danbooru download '__tags__<md5>.jpg'), a path, or a post / file link. Returns {name, module, kind: 'id'|'md5'|'', value, note}"""
-    s = str(raw).strip().strip('"\'')
-    item = {'name': s, 'module': module, 'kind': '', 'value': '', 'note': ''}
-    known = ProcModule.PROC_MODULES_BY_NAME
-    if re_scheme.match(s):
-        u = url_parse.urlparse(s)
-        if host_module := _host_module(u.hostname or '', hosts):
-            item['module'] = host_module
-        last = u.path.rsplit('/', 1)[-1].lower()
-        if m := re_md5_token.search(last):  # file links: cdn.donmai.us/original/0a/1b/<md5>.jpg
-            item.update(kind='md5', value=m.group(1))
-            return item
-        target = f'{u.path}?{u.query}'
-        for rx in POST_URL_PATTERNS:
-            if m := rx.search(target):
-                item.update(kind='id', value=m.group(1))
-                if not host_module:
-                    item['note'] = 'unknown site, current module assumed'
-                return item
-        item['note'] = 'no post id or md5 in the link'
-        return item
-    name = s.replace('\\', '/').rsplit('/', 1)[-1]
-    stem = (name.rsplit('.', 1)[0] if '.' in name.lstrip('.') else name).lower()
-    if '!info_' in stem:
-        item['note'] = 'info list file, not a post'
-    elif (m := re_prefixed_id.match(stem)) and m.group(1) in known:
-        item.update(module=m.group(1), kind='id', value=str(int(m.group(2))))
-    elif m := re_plain_id.match(stem):
-        item.update(kind='id', value=str(int(m.group(1))))
-    elif m := re_md5_token.search(stem):
-        item.update(kind='md5', value=m.group(1))
-        if re_danbooru_download.match(stem) and 'db' in known:
-            item['module'] = 'db'
-    else:
-        item['note'] = 'not recognized'
-    return item
-
-
-def build_file_queries(items: list[dict]) -> list[dict]:
-    """Recognized items -> one query per module: id / md5 lists (danbooru) or an OR group of metatags (one search per item,
-    at most task.MAX_SPLIT_TASKS). Queries are ordered by number of items"""
-    from .task import MAX_SPLIT_TASKS
-    by_module: dict[str, dict[str, list[str]]] = {}
-    for it in items:
-        if it['kind']:
-            vals = by_module.setdefault(it['module'], {'id': [], 'md5': []})[it['kind']]
-            if it['value'] not in vals:
-                vals.append(it['value'])
-    queries = []
-    for module, v in by_module.items():
-        terms: list[str] = []
-        if module in ID_LIST_MODULES:
-            for kind in ('id', 'md5'):
-                for i in range(0, len(v[kind]), ID_LIST_CHUNK):
-                    terms.append(f'{kind}:{",".join(v[kind][i:i + ID_LIST_CHUNK])}')
-        else:
-            terms = [f'id:{x}' for x in v['id']] + [f'md5:{x}' for x in v['md5']]
-        total = len(v['id']) + len(v['md5'])
-        dropped = 0
-        if len(terms) > MAX_SPLIT_TASKS:
-            dropped = len(terms) - MAX_SPLIT_TASKS if module not in ID_LIST_MODULES else 0
-            terms = terms[:MAX_SPLIT_TASKS]
-        tags = terms[0] if len(terms) == 1 else f'({"~".join(terms)})'
-        queries.append({'module': module, 'tags': tags, 'count': total - dropped, 'dropped': dropped})
-    queries.sort(key=lambda q: -q['count'])
-    return queries
 
 
 def m_files_identify(p: dict) -> dict:
@@ -837,6 +738,65 @@ def _handle(req: dict) -> None:
         if rid is not None:
             _send({'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32000, 'message': _redact(str(err) or type(err).__name__),
                                                             'data': {'trace': _redact(traceback.format_exc(limit=6))}}})
+
+
+# ----- download index maintenance: clean (lustra/dlindex_tools.py; the library import runs as a job, not here) -----
+
+INDEX_CLEAN_NOTIFY_INTERVAL = 0.3
+'''seconds between two index.cleanProgress notifications, at least'''
+_index_clean_lock = threading.Lock()
+_index_clean: dict[str, Any] = {}
+'''the clean in progress: {'job': id, 'cancel': Event}'''
+
+
+def m_index_clean(p: dict) -> dict:
+    """{missingFolders?: bool, dryRun?: bool} -> {job}. Drops the index rows whose file is no longer on disk (rows only, files are
+    never touched) in a background thread: batches of rows, one short write transaction each, so the rpc pool and download jobs
+    keep going. Rows whose folder is gone too are kept unless missingFolders. Notifications: index.cleanProgress {job, total,
+    checked, missing, missingDirs, removed} and index.cleanDone {job, ok, cancelled, ..., message}. One clean at a time (-32004)"""
+    import time  # local: this section keeps the module imports untouched
+
+    from .dlindex_tools import clean_index
+    missing_folders = p.get('missingFolders') is True
+    dry_run = p.get('dryRun') is True
+    cancel = threading.Event()
+    with _index_clean_lock:
+        if _index_clean:
+            raise RpcError(-32004, 'index clean is already running')
+        job = f'index-clean-{int(time.time() * 1000):d}'
+        _index_clean.update(job=job, cancel=cancel)
+    last = [0.0]
+
+    def progress(r) -> None:
+        if time.monotonic() - last[0] >= INDEX_CLEAN_NOTIFY_INTERVAL:
+            last[0] = time.monotonic()
+            notify('index.cleanProgress', {'job': job, **r.as_dict()})
+
+    def run() -> None:
+        try:
+            res = clean_index(include_missing_dirs=missing_folders, dry_run=dry_run, progress=progress, cancel=cancel)
+            notify('index.cleanDone', {'job': job, 'ok': True, **res.as_dict(), 'message': ''})
+        except Exception as err:
+            notify('index.cleanDone', {'job': job, 'ok': False, 'cancelled': False, 'message': _redact(f'{type(err).__name__}: {err}')})
+        finally:
+            with _index_clean_lock:
+                _index_clean.clear()
+
+    threading.Thread(target=run, daemon=True, name=job).start()
+    return {'job': job, 'missingFolders': missing_folders, 'dryRun': dry_run}
+
+
+def m_index_clean_cancel(_: dict) -> dict:
+    """Stops the clean in progress after its current batch (rows already removed stay removed)"""
+    with _index_clean_lock:
+        cancel = _index_clean.get('cancel')
+        job = _index_clean.get('job', '')
+    if cancel is not None:
+        cancel.set()
+    return {'cancelled': cancel is not None, 'job': job}
+
+
+METHODS.update({'index.clean': m_index_clean, 'index.cleanCancel': m_index_clean_cancel})
 
 
 def main() -> int:

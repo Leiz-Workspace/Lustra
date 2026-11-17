@@ -6,6 +6,7 @@ Entry point of the frozen core shipped with the desktop app (PyInstaller one-dir
   lustra-core aigen         extension generator session worker (lustra.aigen.worker, stdin / stdout protocol)
   lustra-core extgen ARGS   extension generator tools (python -m lustra.extgen: survey / new / record / check / pack)
   lustra-core sandbox       test run of an extension draft (lustra.extgen.sandbox_boot, started by lustra.extgen.sandbox)
+  lustra-core index ARGS    download index tools (python -m lustra.dlindex_tools: clean / import / retag)
 The legacy Tk GUI is not bundled.
 """
 #########################################
@@ -17,7 +18,8 @@ import sys
 
 __all__ = ('main',)
 
-USAGE = 'usage: lustra-core server | lustra-core cli ARGS... | lustra-core aigen | lustra-core extgen ARGS... | lustra-core sandbox'
+USAGE = ('usage: lustra-core server | lustra-core cli ARGS... | lustra-core aigen | lustra-core extgen ARGS... | lustra-core sandbox'
+         ' | lustra-core index ARGS...')
 
 
 def _setup_streams() -> None:
@@ -50,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == 'extgen':
         from lustra.extgen.__main__ import main as extgen_main
         return extgen_main(rest)
+    if command == 'index':
+        from lustra.dlindex_tools import main as index_main
+        return index_main(rest)
     if command == 'sandbox':
         import runpy
         runpy.run_module('lustra.extgen.sandbox_boot', run_name='__main__')
