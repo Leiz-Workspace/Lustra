@@ -1,6 +1,6 @@
 # Tag syntax
 
-> Inherited from the Ruxx README (English). It describes the query language of the Lustra core: the desktop app's tag field, the command line (`python -m lustra … -- <tags>`) and the legacy Tk GUI all pass tags through it. Module abbreviations: `rx` Rule34, `db` Danbooru (built in); `rn` Rule34 Hentai, `rs` Rule34.us, `rp` Rule34 Paheal, `en` e621, `xb` Xbooru, `bb` Bbooru (extensions). The desktop app adds chips, OR / exclusion grouping and autocomplete on top (docs/specs.md F-01, F-05).
+> Inherited from the original README (English). It describes the query language of the Lustra core: the desktop app's tag field, the command line (`python -m lustra … -- <tags>`) and the legacy Tk GUI all pass tags through it. Module abbreviations: `rx` Rule34, `db` Danbooru (built in); `rn` Rule34 Hentai, `rs` Rule34.us, `rp` Rule34 Paheal, `en` e621, `xb` Xbooru, `bb` Bbooru (extensions). The desktop app adds chips, OR / exclusion grouping and autocomplete on top (docs/specs.md F-01, F-05).
 
 Lustra normally allows most symbols for tags search, there are some specifics though:  
 1. Wildcards

@@ -97,7 +97,7 @@ def _random_pages(rng: random.Random) -> list[list[str]]:
 
 
 class PageBoundaryTests(TestCase):
-    """B6: Ruxx bisection stopped one page off when pages count was not a power of 2"""
+    """B6: the original bisection stopped one page off when pages count was not a power of 2"""
 
     def test_random_against_brute_force(self) -> None:
         rng = random.Random(1234)
@@ -119,7 +119,7 @@ class PageBoundaryTests(TestCase):
                 self.assertEqual(min(in_range), minpage)
                 if len(pages) - minpage > 2:
                     self.assertEqual(max(in_range), maxpage)
-                else:  # 1-2 pages left: not searched (Ruxx), item filters cover 2 pages worth of items
+                else:  # 1-2 pages left: not searched (as originally), item filters cover 2 pages worth of items
                     self.assertLessEqual(maxpage - max(in_range), 1)
             self.assertLessEqual(fp.requests, 2 * (len(pages).bit_length() + 1))
 

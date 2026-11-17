@@ -1,6 +1,6 @@
 # coding=UTF-8
 """
-Lustra: tests for features added on top of Ruxx (offline, no network)
+Lustra: tests for features added on top of the original code (offline, no network)
 Run: python -m unittest lustra.tests.test_lustra
 """
 #########################################
@@ -103,7 +103,7 @@ class NetworkHelpersTests(TestCase):
         self.assertFalse(is_cloudflare_challenge(_response(200, {'cf-mitigated': 'challenge'})))
 
     def test_download_without_proxy(self) -> None:
-        # regression: '-proxynodown' had no effect since sessions were unified (Ruxx rev 413)
+        # regression: '-proxynodown' had no effect since sessions were unified (original rev 413)
         with _make_downloader(ProcModule.RX) as dwn:
             dwn.proxies = {'http': 'socks5://127.0.0.1:1', 'https': 'socks5://127.0.0.1:1'}
             dwn.ignore_proxy_dwn = True

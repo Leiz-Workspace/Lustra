@@ -2,7 +2,7 @@
 
 > Phiên bản tài liệu: 2.0 r1 · Cập nhật: 2026-11-16 · Liên quan: [specs](specs.md), [user stories](user-stories.md), [use cases](use-cases.md), [acceptance criteria](acceptance-criteria.md), [dev log](dev_log.md)
 
-Lustra là bản phái sinh của **Ruxx** (trickerer01, MIT). Lõi tải xuống bằng Python được giữ lại và tái cấu trúc thành **registry extension**. Giao diện mới dùng **Electron**, nói chuyện với lõi qua **sidecar JSON-RPC**. Mỗi lượt tải chạy trong **một tiến trình CLI riêng**.
+Lustra là bản phái sinh từ mã nguồn gốc của **trickerer01** (MIT). Lõi tải xuống bằng Python được giữ lại và tái cấu trúc thành **registry extension**. Giao diện mới dùng **Electron**, nói chuyện với lõi qua **sidecar JSON-RPC**. Mỗi lượt tải chạy trong **một tiến trình CLI riêng**.
 
 ## 1. Sơ đồ tổng thể
 
@@ -138,11 +138,11 @@ extensions/<id>/{manifest.json, downloader.py}   catalog cục bộ: rule34henta
 | Đánh giá model giới tính | `python -m lustra.gender_eval sample / label / agree / evaluate` → `docs/reports/gender-model-eval-*.md`; manifest đã dùng (id, md5, URL, tag; không có ảnh) ở `tools/gender/`; test `lustra/tests/test_gender_eval.py` (offline) |
 | Cronjob | `tools/cron/lustra-update-tags.sh`, `tools/cron/crontab.example` |
 | systemd user timer | `tools/systemd/lustra-update-tags.{service,timer}` |
-| Test | `lustra/tests/tests.py` (gốc Ruxx), `lustra/tests/test_lustra.py`, `lustra/tests/test_gender.py` (mới) |
+| Test | `lustra/tests/tests.py` (test gốc), `lustra/tests/test_lustra.py`, `lustra/tests/test_gender.py` (mới) |
 | Build exe | `python lustra/release` (PyInstaller, kèm manifest builtin) |
 | Ký catalog từ xa | `tools/sign_catalog.py` (`genkey`, `pubkey`, `sign`, `verify`): khoá bí mật PKCS#8 PEM (như `openssl genpkey -algorithm ed25519`), ghi `index.json.sig`, tuỳ chọn `expires`; dùng `cryptography` nếu có, không thì `lustra.ed25519` |
 | Lõi đóng băng cho app | `tools/build_core.py` + `lustra/frozen_main.py` (`lustra-core server` / `cli …` / `aigen` / `extgen …` / `sandbox` / `index …`), electron-builder trong `app/package.json`. Mã tham khảo cho model được kèm ở `aigen_refs/`; `anthropic` được kèm nếu có trong môi trường build |
-| Skill Claude Code | `.claude/skills/new-site-extension/` (`SKILL.md`, `reference/`): từ link site tạo bản nháp bằng `python -m lustra.extgen`, vào `.extgen-drafts/` (git bỏ qua), không cài |
+| Skill Claude Code | `.claude/skills/new-site-extension/` (`SKILL.md`, `reference/`; chỉ có trên máy phát triển: `.claude/` không đưa vào repo từ 2026-11-17): từ link site tạo bản nháp bằng `python -m lustra.extgen`, vào `.extgen-drafts/` (git bỏ qua), không cài |
 | Test index các lần tải | `lustra/tests/test_dlindex.py`: schema/WAL, upsert, tìm theo tag/module/ngày, writer theo lô không chặn khi CSDL bị khoá, 4 tiến trình ghi đồng thời, pipeline giả (streaming và cổ điển) ghi index, `-skip_known` theo id / md5 khác module / file đã xoá, RPC và wiring app. `lustra/tests/__init__.py` đặt `LUSTRA_DLINDEX=0` cho mọi test khác (không ghi vào index thật) |
 | Test công cụ index | `lustra/tests/test_dlindex_tools.py`: dọn (file đã mất, thư mục đã mất, chạy thử, theo lô, huỷ, dòng được ghi lại giữa chừng, RPC nền), nhập thư viện với site giả (danh sách id Danbooru, một request mỗi post, giãn cách, tên không nhận ra, post không có, request lỗi, so md5, huỷ, giao thức job), re-tag từ index, file đổi tên / chuyển giữ dòng index, wiring app |
 | Test bộ tạo extension | `lustra/tests/test_extgen.py`: site giả qua `SafeFetcher` thật, model giả theo kịch bản, SDK `anthropic` thật nối vào server SSE cục bộ, giao thức worker, danh sách chặn tên miền (các cách lách: tên miền con, dấu chấm cuối, chữ hoa, punycode, full-width, `%xx`, redirect, `\`), `lustra.sdk` và `minSdkVersion` |

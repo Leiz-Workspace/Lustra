@@ -1,6 +1,6 @@
 # coding=UTF-8
 """
-Lustra extension 'paheal' (rp). Originally part of Ruxx core.
+Lustra extension 'paheal' (rp). Originally part of the core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -82,7 +82,7 @@ class DownloaderRp(Downloader):
 
     def __init__(self) -> None:
         super().__init__()
-        # no 'ui-tnc-agreed' cookie: agreeing to the site terms is the user's decision (Ruxx set it silently).
+        # no 'ui-tnc-agreed' cookie: agreeing to the site terms is the user's decision (the original code set it silently).
         # The terms dialog is client side only, listing pages are the same without it (checked 2026-11-17)
         self._base_cookies = {'ui-image-zoom': 'both'}
 

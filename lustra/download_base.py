@@ -263,11 +263,11 @@ class DownloaderBase(ThreadedHtmlWorker):
     def _item_info_for(self, full_item_id: str) -> ItemInfo:
         """Info of an item while it is being downloaded: in item_info_dict_all once its task is done (always with the streaming
         pipeline, which clears the per task dict after each batch), else in the per task dict. A throwaway ItemInfo if there is none
-        (Ruxx raised KeyError for items of earlier tasks, ex. '-dump_comments' with OR groups)"""
+        (the original code raised KeyError for items of earlier tasks, ex. '-dump_comments' with OR groups)"""
         return self.item_info_dict_all.get(full_item_id) or self.item_info_dict_per_task.get(full_item_id) or ItemInfo()
 
     def _item_idstring(self, item_id: str) -> str:
-        """Key of item infos / filtered ids caches (prefixed only when file names are prefixed). Ruxx mixed both forms"""
+        """Key of item infos / filtered ids caches (prefixed only when file names are prefixed). The original code mixed both forms"""
         return f'{(self._get_module_abbr_p() if self.add_filename_prefix else "")}{item_id}'
 
     def _has_capability(self, cap: str) -> bool:
@@ -490,7 +490,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         """Binary search over result pages (newest first, dates non-increasing with page index).
         minpage: first page holding an item <= date_max (its last item is <= date_max);
         maxpage: last page holding an item >= date_min (its first item is >= date_min).
-        Replaces Ruxx bisection which could stop one page off when pages count is not a power of 2"""
+        Replaces the original bisection which could stop one page off when pages count is not a power of 2"""
         if 1 <= self._num_pages() <= 2:
             trace('Only a page or two! Skipping')
             return self.minpage if minpage else self.maxpage
@@ -544,7 +544,7 @@ class DownloaderBase(ThreadedHtmlWorker):
 
     def _filter_last_items(self) -> None:
         """Removes trailing items older than date_min. Only the last 2 pages worth of items can be out of range
-        (page boundaries are found by date first). Replaces Ruxx bisection which stopped one step off and skipped single items"""
+        (page boundaries are found by date first). Replaces the original bisection which stopped one step off and skipped single items"""
         trace('Filtering trailing back items...')
 
         if as_date(self.date_min) <= as_date(DATE_MIN_DEFAULT):
@@ -559,7 +559,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         trace(f'mindate at {self.date_min}, filtering...')
         date_min = as_date(self.date_min)
         boundary = orig_len - min(orig_len, self._get_items_per_page() * 2)
-        # items without a date are kept (Ruxx behavior)
+        # items without a date are kept (original behavior)
         cut = self._first_index_by_date(items_raw_list, boundary, orig_len, lambda d: d is not None and as_date(d) < date_min)
         trace(f'Filtered out {orig_len - cut:d} / {orig_len:d} items')
         del items_raw_list[cut:]
