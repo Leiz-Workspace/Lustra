@@ -30,6 +30,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# electron-builder resources are sources (app/build/after-pack.js), the frozen core is a build output
+!/app/build/
+/app/build/core/
 develop-eggs/
 dist/
 downloads/

@@ -1,5 +1,6 @@
 // Lustra desktop renderer (plain script, no bundler). Talks to main only through window.lustra (preload bridge or mock.js).
-const L = window.lustra;
+// In Electron the preload bridge exists before this script runs; in a plain browser mock.js is loaded first (see start()).
+let L = window.lustra;
 
 // ---------------- helpers ----------------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -26,6 +27,95 @@ const fmt = (n) => {
 const nf = new Intl.NumberFormat('vi-VN');
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// write only on change: no style/layout invalidation for values that did not move
+const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
+const setHidden = (el, hide) => { if (el.hidden !== hide) el.hidden = hide; };
+const slot = (el, text) => { setHidden(el, text == null); if (text != null) setText(el, text); };
+
+// Deferred DOM work (job progress, log lines) runs at most once per animation frame, however many events arrived.
+const frameTasks = new Set();
+let frameReq = 0;
+function runFrame() {
+  frameReq = 0;
+  const tasks = [...frameTasks];
+  frameTasks.clear();
+  for (const fn of tasks) {
+    try { fn(); } catch (err) { console.error(err); }
+  }
+}
+function onFrame(fn) {
+  frameTasks.add(fn);
+  if (!frameReq) frameReq = requestAnimationFrame(runFrame);
+}
+
+// Append-only <pre> log. New lines are buffered and appended once per frame as a block-level chunk (so layout only
+// touches the new block, not the whole text); old lines are dropped chunk by chunk only after `slack` extra lines
+// piled up. Follows new output only while the user is at the bottom.
+const LOG_CHUNK = 250;
+function createLogView(pre, max, slack = Math.ceil(max / 4)) {
+  const chunks = []; // [{ node, n }] in document order
+  let count = 0;
+  let pending = [];
+  let stick = true;
+  const atBottom = () => pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+  pre.addEventListener('scroll', () => { stick = atBottom(); }, { passive: true });
+  const chunked = (lines) => {
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < lines.length; i += LOG_CHUNK) {
+      const part = lines.slice(i, i + LOG_CHUNK);
+      const node = h('span', { class: 'log-chunk' }, part.join('\n'));
+      chunks.push({ node, n: part.length });
+      count += part.length;
+      frag.append(node);
+    }
+    return frag;
+  };
+  const reveal = () => { if (stick && pre.isConnected) pre.scrollTop = pre.scrollHeight; };
+  function flush() {
+    if (!pending.length) return;
+    const add = pending;
+    pending = [];
+    if (!pre.isConnected) return;
+    if (count + add.length > max + slack) {
+      const h0 = stick ? 0 : pre.scrollHeight;
+      const t0 = stick ? 0 : pre.scrollTop;
+      while (chunks.length && count + add.length - chunks[0].n >= max) {
+        const c = chunks.shift();
+        c.node.remove();
+        count -= c.n;
+      }
+      // keep the lines the user is reading in place while the top of the log is trimmed
+      if (!stick) pre.scrollTop = Math.max(0, t0 - (h0 - pre.scrollHeight));
+    }
+    pre.append(chunked(add));
+    reveal();
+  }
+  return {
+    push(lines) {
+      pending.push(...lines);
+      if (pending.length > max) pending.splice(0, pending.length - max);
+      onFrame(flush);
+    },
+    reset(lines = []) {
+      pending = [];
+      chunks.length = 0;
+      count = 0;
+      pre.replaceChildren(chunked(lines.slice(-max)));
+      reveal();
+    },
+    clear() { stick = true; this.reset([]); },
+    reveal,
+  };
+}
+
+const ago = (ts) => {
+  const s = (Date.now() - (Number(ts) || 0)) / 1000;
+  if (s < 60) return 'vừa xong';
+  if (s < 3600) return `${Math.floor(s / 60)} phút trước`;
+  if (s < 86400) return `${Math.floor(s / 3600)} giờ trước`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)} ngày trước`;
+  return new Date(ts).toLocaleDateString('vi-VN');
+};
 
 function toast(msg, kind = '') {
   const el = h('div', { class: `toast ${kind}` }, msg);
@@ -35,6 +125,19 @@ function toast(msg, kind = '') {
 function errMsg(err) {
   const m = String(err?.message || err || 'lỗi');
   return m.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+}
+// Optional sidecar methods (newer than main / the core): the first "not allowed / not found" answer turns the feature off
+// for the session instead of retrying on every keystroke.
+const unsupported = new Set();
+const isUnsupported = (err) => /not allowed|method not found|unknown method|no handler|-32601/i.test(errMsg(err));
+async function rpcOptional(method, params) {
+  if (unsupported.has(method)) return null;
+  try {
+    return await L.rpc(method, params);
+  } catch (err) {
+    if (isUnsupported(err)) { unsupported.add(method); return null; }
+    throw err;
+  }
 }
 function openModal(content) {
   const card = $('#modal-card');
@@ -64,8 +167,11 @@ const S = {
   settings: null, appearance: null, secrets: null, info: null,
   modules: [], module: 'rx',
   chips: [], chipSeq: 0, selected: new Set(),
-  ac: { items: [], index: -1, seq: 0 },
-  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', showExcluded: false },
+  // moved: the user picked a suggestion with the arrow keys (only then Enter takes a suggestion instead of the typed text)
+  ac: { items: [], index: -1, seq: 0, moved: false, fuzzy: false },
+  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', showExcluded: false, seq: 0, hasMore: true },
+  countSeq: 0,
+  tagLists: null, // modules that have a local tag list (tags.status), null until known
   jobs: new Map(),
   logLines: [],
 };
@@ -103,6 +209,8 @@ function showPage(name) {
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${name}`));
   if (name === 'tags') refreshTagStatus();
   if (name === 'extensions') renderExtensions();
+  if (name === 'log') showLogPage();
+  if (name === 'downloads') jobViews.forEach((v) => v.logView?.reveal());
 }
 $$('#nav button').forEach((b) => b.addEventListener('click', () => showPage(b.dataset.page)));
 
@@ -133,6 +241,15 @@ async function loadModules() {
   const installed = S.modules.filter((m) => m.installed);
   if (!installed.some((m) => m.abbr === S.module)) S.module = installed[0]?.abbr || 'rx';
   renderModuleButton();
+  if (S.settings) { renderApiKeys(); renderTagLimits(); }
+}
+async function loadTagLists() {
+  try {
+    const rows = await L.rpc('tags.status');
+    S.tagLists = new Set(rows.filter((r) => r.size > 0).map((r) => r.module));
+    S.chips.forEach(decorateChip);
+    scheduleResolve();
+  } catch { /* sidecar not ready yet: retried when it reports ready */ }
 }
 function renderModuleButton() {
   const m = moduleInfo(S.module);
@@ -196,6 +313,7 @@ function setModule(abbr) {
   renderModuleButton();
   L.settings.set({ search: { module: abbr } });
   azInstances.forEach((az) => az.reset());
+  renderChips(); // chip hints (post counts, aliases) belong to the module's tag list
   onQueryChanged();
 }
 $('#module-btn').addEventListener('click', (e) => {
@@ -207,11 +325,38 @@ $('#module-btn').addEventListener('click', (e) => {
 document.addEventListener('click', (e) => { if (!e.target.closest('#module-picker')) $('#module-menu').hidden = true; });
 
 // ---------------- tag chips ----------------
+// Query text -> tokens. Whitespace splits tokens, except inside an OR group "( a ~ b )" or an exclusion group "-( a , b )".
+// Tags may contain parentheses themselves (star_(sky), :( ), so only a word starting with "(" or "-(" opens a group, and it
+// only takes in the next word across a group boundary ("(", "~", "," or ")"). open: the text ends inside an unclosed group.
+const parenDepth = (s) => { let d = 0; for (const ch of s) { if (ch === '(') d++; else if (ch === ')') d--; } return d; };
+function splitQuery(text) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  const tokens = [];
+  let open = false;
+  for (let i = 0; i < words.length; i++) {
+    let tok = words[i];
+    if (/^-?\(/.test(tok)) {
+      while (parenDepth(tok) > 0 && i + 1 < words.length && (/[(~,]$/.test(tok) || /^[)~,]/.test(words[i + 1]))) tok += words[++i];
+      if (parenDepth(tok) > 0 && i === words.length - 1) open = true;
+    }
+    tokens.push(tok);
+  }
+  return { tokens, open };
+}
 function parseToken(tok) {
   tok = tok.trim();
   if (!tok) return null;
-  if (/^-\([^()]+,[^()]+\)$/.test(tok)) return { kind: 'neg', items: tok.slice(2, -1).split(',').filter(Boolean) };
-  if (/^\([^()]+~[^()]+\)$/.test(tok)) return { kind: 'or', items: tok.slice(1, -1).split('~').map((s) => s.trim()).filter(Boolean) };
+  // groups mirror the core parser (tags_parser.py): parts may contain parentheses, "(star_(sky)~cloud)", "-(star_(sky),cloud)"
+  let m = /^-\((.+)\)$/.exec(tok);
+  if (m && m[1].includes(',')) {
+    const items = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    if (items.length > 1) return { kind: 'neg', items };
+  }
+  m = /^\((.+)\)$/.exec(tok);
+  if (m && m[1].includes('~')) {
+    const items = m[1].split('~').map((s) => s.trim()).filter(Boolean);
+    if (items.length > 1) return { kind: 'or', items };
+  }
   let exclude = false;
   let text = tok;
   if (text.length > 1 && text.startsWith('-')) { exclude = true; text = text.slice(1); }
@@ -222,7 +367,8 @@ function chipToString(c) {
   if (c.kind === 'neg') return `-(${c.items.join(',')})`;
   return `${c.exclude ? '-' : ''}${c.text}`;
 }
-const queryString = () => S.chips.map(chipToString).join(' ');
+const chipsToString = (chips) => chips.map(chipToString).join(' ');
+const queryString = () => chipsToString(S.chips);
 
 function addChip(token) {
   const c = parseToken(token);
@@ -234,9 +380,7 @@ function addChip(token) {
   onQueryChanged();
 }
 function addTokens(text) {
-  // keep groups intact while splitting by whitespace: "(a ~ b)" -> "(a~b)"
-  const norm = text.replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').replace(/\s*~\s*/g, '~').replace(/\s*,\s*/g, ',');
-  norm.split(/\s+/).filter(Boolean).forEach(addChip);
+  splitQuery(text).tokens.forEach(addChip);
 }
 function removeChip(id) {
   S.chips = S.chips.filter((c) => c.id !== id);
@@ -244,25 +388,39 @@ function removeChip(id) {
   renderChips();
   onQueryChanged();
 }
+function setChips(chips) {
+  S.chips = chips;
+  S.selected.clear();
+  renderChips();
+  onQueryChanged();
+}
+
+const CHIP_TITLE = { tag: 'Tag', meta: 'Meta tag', or: 'Nhóm OR: post có ít nhất một tag', neg: 'Nhóm loại trừ: bỏ post có đủ tất cả tag' };
+const chipViews = new Map(); // chip id -> { root, info, title }: tag hints are patched into a chip without rebuilding the row
 function renderChips() {
-  const host = $('#chips');
-  host.replaceChildren(...S.chips.map((c) => {
+  chipViews.clear();
+  $('#chips').replaceChildren(...S.chips.map((c) => {
     const label = c.kind === 'or' ? c.items.join(' ∨ ') : c.kind === 'neg' ? `−(${c.items.join(' ∧ ')})` : c.text;
     const cls = ['chip', c.kind === 'meta' ? 'meta' : '', c.kind === 'or' ? 'or' : '', c.kind === 'neg' ? 'neg' : '',
       c.exclude ? 'exclude' : '', S.selected.has(c.id) ? 'sel' : ''].join(' ');
-    const title = { tag: 'Tag', meta: 'Meta tag', or: 'Nhóm OR: post có ít nhất một tag', neg: 'Nhóm loại trừ: bỏ post có đủ tất cả tag' }[c.kind];
-    return h('span', {
-      class: cls, title: `${title} — bấm để chọn, bấm đúp để sửa`,
+    const title = `${CHIP_TITLE[c.kind]} — bấm để chọn, bấm đúp để sửa`;
+    const info = h('span', { class: 'ci' });
+    const root = h('span', {
+      class: cls, title,
       onclick: (e) => { if (e.target.closest('button')) return; toggleChipSel(c.id); },
-      ondblclick: () => editChip(c),
+      ondblclick: (e) => { if (!e.target.closest('button')) editChip(c); },
     },
-    h('span', { class: 't' }, label),
+    h('span', { class: 't' }, label), info,
     (c.kind === 'tag' || c.kind === 'meta') ? h('button', { class: 'pm', title: 'Đảo bao gồm/loại trừ', onclick: () => { c.exclude = !c.exclude; renderChips(); onQueryChanged(); } }, '±') : null,
     h('button', { class: 'x', title: 'Xoá', onclick: () => removeChip(c.id) }, '×'));
+    chipViews.set(c.id, { root, info, title });
+    decorateChip(c);
+    return root;
   }));
   const n = S.selected.size;
   $('#chip-actions').hidden = n === 0;
   $('#chip-sel-count').textContent = `${n} tag đã chọn`;
+  scheduleResolve();
 }
 function toggleChipSel(id) {
   if (S.selected.has(id)) S.selected.delete(id); else S.selected.add(id);
@@ -275,21 +433,180 @@ function editChip(c) {
   input.focus();
 }
 
-$('#chip-actions').addEventListener('click', (e) => {
+// ----- chip hints from the module tag list (tags.resolve): post count, alias of a renamed tag, unknown tag -----
+const resolveCache = new Map(); // `${module}\n${tag}` -> row | null (request pending) | false (no answer for this tag)
+const resolveQueue = new Map(); // module -> Set(tag)
+const resolveHasList = new Map(); // module -> the sidecar has a tag list for it (tags.resolve hasList)
+const RESOLVE_BATCH = 64;
+const rkey = (module, tag) => `${module}\n${tag}`;
+function chipTags(c) {
+  // tag names and wildcard patterns; metatags and %escaped% tags (no validation on purpose) have nothing to look up
+  const raw = c.kind === 'tag' ? [c.text] : (c.kind === 'or' || c.kind === 'neg') ? c.items : [];
+  return raw.map((t) => t.replace(/^-/, '').trim().toLowerCase()).filter((t) => t && !reMeta.test(t) && !/^%.*%$/.test(t));
+}
+function scheduleResolve() {
+  if (unsupported.has('tags.resolve') || !L) return;
+  const module = S.module;
+  if (resolveHasList.get(module) === false || (S.tagLists && !S.tagLists.has(module))) return; // no tag list: nothing to look up
+  let queued = false;
+  for (const c of S.chips) {
+    for (const t of chipTags(c)) {
+      const k = rkey(module, t);
+      if (resolveCache.has(k)) continue;
+      resolveCache.set(k, null);
+      if (!resolveQueue.has(module)) resolveQueue.set(module, new Set());
+      resolveQueue.get(module).add(t);
+      queued = true;
+    }
+  }
+  if (queued) flushResolve();
+}
+const flushResolve = debounce(async () => {
+  const batches = [...resolveQueue];
+  resolveQueue.clear();
+  for (const [module, set] of batches) {
+    const tags = [...set];
+    for (let i = 0; i < tags.length; i += RESOLVE_BATCH) {
+      const part = tags.slice(i, i + RESOLVE_BATCH);
+      let r = null;
+      try {
+        r = await rpcOptional('tags.resolve', { module, tags: part });
+      } catch { /* transient: forget the pending marks so the next render asks again */ }
+      if (!r) { part.forEach((t) => resolveCache.delete(rkey(module, t))); continue; }
+      if (typeof r.hasList === 'boolean') resolveHasList.set(module, r.hasList);
+      // one item per input tag, same order (the sidecar normalizes the names, so match by position)
+      const items = Array.isArray(r.items) ? r.items : [];
+      const byName = new Map(items.map((it) => [String(it.tag).toLowerCase(), it]));
+      part.forEach((t, k) => resolveCache.set(rkey(module, t), (items.length === part.length ? items[k] : byName.get(t)) || false));
+    }
+    if (module === S.module) S.chips.forEach(decorateChip);
+  }
+  if (resolveCache.size > 5000) for (const [k, v] of resolveCache) if (v !== null) resolveCache.delete(k);
+}, 180);
+function chipHints(c) {
+  const module = S.module;
+  // "unknown tag" only means something when the module has a tag list
+  const listKnown = resolveHasList.has(module) ? resolveHasList.get(module) : !!S.tagLists?.has(module);
+  const rows = chipTags(c).map((t) => [t, resolveCache.get(rkey(module, t))]).filter(([, r]) => r);
+  return {
+    rows,
+    aliases: rows.filter(([t, r]) => r.alias && r.canonical && r.canonical !== t),
+    unknown: listKnown ? rows.filter(([, r]) => !r.known && r.type !== 'meta') : [],
+  };
+}
+function decorateChip(c) {
+  const v = chipViews.get(c.id);
+  if (!v) return;
+  const { rows, aliases, unknown } = chipHints(c);
+  const kids = [];
+  const lines = [];
+  for (const [t, r] of rows) {
+    if (r.alias && r.canonical && r.canonical !== t) lines.push(`${t}: alias của ${r.canonical}${r.posts ? ` (${nf.format(r.posts)} post)` : ''}`);
+    else if (!r.known && r.type === 'wildcard') lines.push(`${t}: mẫu wildcard không khớp tag nào trong danh sách tag của ${S.module.toUpperCase()}`);
+    else if (!r.known && r.type !== 'meta') lines.push(`${t}: không có trong danh sách tag của ${S.module.toUpperCase()} (gõ sai hoặc danh sách cũ?)`);
+    else if (r.posts) lines.push(`${t}: ${nf.format(r.posts)} post`);
+  }
+  if (c.kind === 'tag' && rows.length === 1 && rows[0][1].posts > 0 && !unknown.length) kids.push(h('span', { class: 'cnt' }, fmt(rows[0][1].posts)));
+  if (aliases.length) {
+    const label = c.kind === 'tag' ? `→ ${aliases[0][1].canonical}` : `→ ${aliases.length} alias`;
+    kids.push(h('button', { class: 'alias', title: `Thay bằng tag chuẩn: ${aliases.map(([t, r]) => `${t} → ${r.canonical}`).join(', ')}`,
+      onclick: () => replaceAliases(c) }, label));
+  }
+  if (unknown.length) kids.push(h('span', { class: 'warn', title: lines.filter((l) => /không (có|khớp)/.test(l)).join('\n') }, '?'));
+  v.info.replaceChildren(...kids);
+  v.root.classList.toggle('unknown', unknown.length > 0);
+  v.root.classList.toggle('aliased', aliases.length > 0);
+  v.root.title = lines.length ? `${v.title}\n${lines.join('\n')}` : v.title;
+}
+function replaceAliases(c) {
+  const map = new Map(chipHints(c).aliases.map(([t, r]) => [t, r.canonical]));
+  if (!map.size) return;
+  const swap = (t) => { const neg = t.startsWith('-'); const base = neg ? t.slice(1) : t; const to = map.get(base.toLowerCase()); return to ? `${neg ? '-' : ''}${to}` : t; };
+  const next = { ...c };
+  if (c.kind === 'tag') next.text = swap(c.text);
+  else next.items = [...new Set(c.items.map(swap))];
+  const s = chipToString(next);
+  // the canonical tag may already be in the query: then the alias chip just goes away
+  const chips = S.chips.some((x) => x.id !== c.id && chipToString(x) === s) ? S.chips.filter((x) => x.id !== c.id) : S.chips.map((x) => (x.id === c.id ? next : x));
+  S.chips = chips;
+  S.selected.delete(c.id);
+  renderChips();
+  onQueryChanged();
+  toast(`Đã thay alias: ${[...map].map(([a, b]) => `${a} → ${b}`).join(', ')}`, 'ok');
+}
+
+// ----- grouping: merging chips into an OR / exclusion group can change what the query means -----
+function planGroup(act) {
+  const sel = S.chips.filter((c) => S.selected.has(c.id));
+  const items = [];
+  const warn = [];
+  if (act === 'or') {
+    for (const c of sel) {
+      if (c.kind === 'or') items.push(...c.items);
+      else if (c.kind === 'neg') {
+        items.push(...c.items);
+        warn.push(`Nhóm loại trừ ${chipToString(c)} trở thành các tag bao gồm: post chỉ cần có một trong ${c.items.join(', ')}.`);
+      } else if (c.exclude) {
+        items.push(`-${c.text}`);
+        warn.push(c.kind === 'meta' ? `Meta tag phủ định -${c.text} không dùng được trong nhóm OR (truy vấn sẽ không hợp lệ).`
+          : `-${c.text} trong nhóm OR nghĩa là post không có ${c.text} cũng khớp: kết quả rộng hơn rất nhiều.`);
+      } else items.push(c.text);
+    }
+  } else {
+    let excluded = 0;
+    for (const c of sel) {
+      if (c.kind === 'neg') { items.push(...c.items); excluded++; } else if (c.kind === 'or') {
+        items.push(...c.items);
+        warn.push(`Nhóm OR ${chipToString(c)} trong nhóm loại trừ thành điều kiện “có đủ tất cả”, không còn là “một trong”.`);
+      } else {
+        items.push(c.text);
+        if (c.exclude) excluded++;
+        else warn.push(`${c.text} đang là tag bắt buộc, sẽ đổi thành tag bị loại trừ (trong nhóm).`);
+        if (c.kind === 'meta') warn.push(`Meta tag ${c.text} trong nhóm loại trừ chỉ được so với tên tag của post nên gần như không bao giờ khớp.`);
+      }
+    }
+    if (excluded) warn.push('Trước: mỗi tag/nhóm bị loại trừ bỏ mọi post khớp với nó. Sau: chỉ bỏ post có đủ tất cả tag trong nhóm mới, nên kết quả rộng hơn.');
+  }
+  const uniq = [...new Set(items)];
+  if (uniq.length < 2) return { error: 'Chọn ít nhất 2 tag để gộp nhóm' };
+  const idx = S.chips.findIndex((c) => S.selected.has(c.id));
+  const chips = S.chips.filter((c) => !S.selected.has(c.id));
+  chips.splice(Math.max(0, idx), 0, { kind: act, items: uniq, id: ++S.chipSeq });
+  return { chips, warn };
+}
+function confirmQueryChange(title, chips, warn) {
+  return new Promise((resolve) => {
+    const done = (ok) => { closeModal(); resolve(ok); };
+    openModal(h('div', { class: 'qchange' },
+      h('h2', { text: title }),
+      h('div', { class: 'qc-row' }, h('span', { class: 'muted' }, 'Trước'), h('code', {}, queryString())),
+      h('div', { class: 'qc-row' }, h('span', { class: 'muted' }, 'Sau'), h('code', {}, chipsToString(chips))),
+      h('ul', { class: 'qc-warn' }, warn.map((w) => h('li', {}, w))),
+      h('div', { class: 'modal-actions' },
+        h('button', { class: 'btn ghost', onclick: () => done(false) }, 'Huỷ'),
+        h('button', { class: 'btn primary', onclick: () => done(true) }, 'Vẫn gộp'))));
+    $('#modal-card .btn.primary')?.focus();
+  });
+}
+
+$('#chip-actions').addEventListener('click', async (e) => {
   const act = e.target.closest('button')?.dataset.act;
   if (!act) return;
   const sel = S.chips.filter((c) => S.selected.has(c.id));
   if (act === 'clear') { S.selected.clear(); renderChips(); return; }
-  if (act === 'remove') { S.chips = S.chips.filter((c) => !S.selected.has(c.id)); S.selected.clear(); }
-  if (act === 'toggle') sel.forEach((c) => { if (c.kind === 'tag' || c.kind === 'meta') c.exclude = !c.exclude; });
+  if (act === 'remove') { setChips(S.chips.filter((c) => !S.selected.has(c.id))); return; }
+  if (act === 'toggle') {
+    sel.forEach((c) => { if (c.kind === 'tag' || c.kind === 'meta') c.exclude = !c.exclude; });
+    renderChips();
+    onQueryChanged();
+    return;
+  }
   if (act === 'or' || act === 'neg') {
-    const items = sel.flatMap((c) => (c.kind === 'or' || c.kind === 'neg') ? c.items : [act === 'neg' ? c.text : chipToString(c)]);
-    const uniq = [...new Set(items)];
-    if (uniq.length < 2) { toast('Chọn ít nhất 2 tag để gộp nhóm', 'err'); return; }
-    const idx = S.chips.findIndex((c) => S.selected.has(c.id));
-    S.chips = S.chips.filter((c) => !S.selected.has(c.id));
-    S.chips.splice(Math.max(0, idx), 0, { kind: act, items: uniq, id: ++S.chipSeq });
-    S.selected.clear();
+    const plan = planGroup(act);
+    if (plan.error) { toast(plan.error, 'err'); return; }
+    if (plan.warn.length && !(await confirmQueryChange('Gộp nhóm sẽ đổi nghĩa truy vấn', plan.chips, plan.warn))) return;
+    setChips(plan.chips);
+    return;
   }
   if (act === 'split') {
     const out = [];
@@ -298,11 +615,8 @@ $('#chip-actions').addEventListener('click', (e) => {
         c.items.forEach((it) => { const p = parseToken(c.kind === 'neg' ? `-${it}` : it); if (p) out.push({ ...p, id: ++S.chipSeq }); });
       } else out.push(c);
     }
-    S.chips = out;
-    S.selected.clear();
+    setChips(out);
   }
-  renderChips();
-  onQueryChanged();
 });
 
 // ---------------- autocomplete ----------------
@@ -311,19 +625,49 @@ $('#tag-input').addEventListener('click', () => tagInput.focus());
 tagInput.addEventListener('focus', () => $('#tag-input').classList.add('focus'));
 tagInput.addEventListener('blur', () => { $('#tag-input').classList.remove('focus'); setTimeout(hideAc, 150); });
 
+const acBase = (raw) => raw.replace(/^-/, '');
+function acEligible(raw) {
+  const base = acBase(raw);
+  // a group being typed ("(a~b", "-(a,b") is not a single tag; tags with parentheses ("star_(s") are
+  return !!S.settings?.search?.autocomplete && base.length >= 2 && !reMeta.test(base) && !/^\(|[~,]/.test(base);
+}
 const requestAc = debounce(async () => {
   const raw = tagInput.value.trim();
-  const base = raw.replace(/^-/, '');
-  if (!S.settings?.search?.autocomplete || base.length < 2 || reMeta.test(base) || /[()~,]/.test(base)) { hideAc(); return; }
+  if (!acEligible(raw)) { hideAc(); return; }
+  const base = acBase(raw);
   const seq = ++S.ac.seq;
+  const module = S.module;
   try {
-    const items = await L.rpc('tags.autocomplete', { module: S.module, prefix: raw, limit: 12 });
-    if (seq !== S.ac.seq) return;
-    S.ac.items = items;
-    S.ac.index = items.length ? 0 : -1;
+    let items = await L.rpc('tags.autocomplete', { module, prefix: raw, limit: 12 });
+    if (seq !== S.ac.seq) return; // a newer keystroke (or a pick / hide) happened meanwhile
+    let fuzzy = false;
+    if (!items.length && base.length >= 3) {
+      const neg = raw.startsWith('-');
+      const near = await rpcOptional('tags.fuzzy', { module, text: base.toLowerCase(), limit: 8 }).catch(() => null);
+      if (seq !== S.ac.seq) return;
+      items = (near || []).map((it) => ({ ...it, insert: `${neg ? '-' : ''}${it.tag}` }));
+      fuzzy = items.length > 0;
+    }
+    if (tagInput.value.trim() !== raw) return;
+    Object.assign(S.ac, { items, fuzzy, index: items.length ? 0 : -1, moved: false });
     renderAc(base);
-  } catch { hideAc(); }
+  } catch {
+    if (seq === S.ac.seq) hideAc();
+  }
 }, 110);
+// Called on every keystroke before the debounced request: answers still in flight are now stale (seq), and suggestions
+// that no longer match the typed prefix disappear at once instead of lingering until the next answer.
+function pruneAc() {
+  S.ac.seq++;
+  const raw = tagInput.value.trim();
+  if ($('#ac').hidden || S.ac.fuzzy || !acEligible(raw)) { hideAc(); return; }
+  const base = acBase(raw).toLowerCase();
+  const neg = raw.startsWith('-');
+  const keep = S.ac.items.filter((it) => it.tag.toLowerCase().startsWith(base)).map((it) => ({ ...it, insert: `${neg ? '-' : ''}${it.tag}` }));
+  if (!keep.length) { hideAc(); return; }
+  Object.assign(S.ac, { items: keep, index: 0, moved: false });
+  renderAc(acBase(raw));
+}
 
 function renderAc(base) {
   const box = $('#ac');
@@ -332,36 +676,86 @@ function renderAc(base) {
     box.hidden = false;
     return;
   }
-  const re = new RegExp(`^(${escapeRe(base)})`, 'i');
-  box.replaceChildren(...S.ac.items.map((it, i) => {
-    const nm = h('span', { class: 'nm' });
-    nm.innerHTML = it.tag.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch])).replace(re, '<b>$1</b>');
-    return h('div', { class: `ac-item ${i === S.ac.index ? 'on' : ''}`, onmousedown: (e) => { e.preventDefault(); pickAc(i); } },
-      h('span', { class: `type-dot t-${it.type}`, title: it.type }), nm, h('span', { class: 'cnt' }, fmt(it.posts)));
-  }), h('div', { class: 'ac-hint' }, '↑↓ chọn · Tab/Enter thêm · Shift+Enter thêm dạng loại trừ'));
+  const lo = base.toLowerCase();
+  const { moved, index, fuzzy } = S.ac;
+  box.replaceChildren(
+    ...(fuzzy ? [h('div', { class: 'ac-head' }, `Không có tag bắt đầu bằng “${base}”. Có phải bạn muốn: …`)] : []),
+    ...S.ac.items.map((it, i) => {
+      const nm = !fuzzy && it.tag.toLowerCase().startsWith(lo)
+        ? h('span', { class: 'nm' }, h('b', {}, it.tag.slice(0, lo.length)), it.tag.slice(lo.length))
+        : h('span', { class: 'nm' }, it.tag);
+      const state = i === index ? (moved ? 'on' : 'cand') : '';
+      return h('div', { class: `ac-item ${fuzzy ? 'fuzzy' : ''} ${state}`, onmousedown: (e) => { e.preventDefault(); pickAc(i, e.shiftKey); } },
+        h('span', { class: `type-dot t-${it.type}`, title: it.type }), nm,
+        state === 'cand' ? h('kbd', { title: 'Tab để nhận gợi ý này' }, 'Tab') : null,
+        h('span', { class: 'cnt' }, fmt(it.posts)));
+    }),
+    h('div', { class: 'ac-hint' }, moved
+      ? '↑↓ chọn · Enter/Tab thêm gợi ý đang chọn · Shift+Enter thêm dạng loại trừ'
+      : 'Enter thêm đúng chữ đã gõ · Tab nhận gợi ý đầu · ↑↓ chọn gợi ý khác · Shift+Enter loại trừ'));
   box.hidden = false;
 }
-function hideAc() { $('#ac').hidden = true; S.ac.items = []; S.ac.index = -1; }
+function hideAc() {
+  S.ac.seq++; // whatever is still in flight must not reopen the list
+  const box = $('#ac');
+  box.hidden = true;
+  box.replaceChildren(); // no stale suggestion nodes left behind for the next query
+  Object.assign(S.ac, { items: [], index: -1, moved: false, fuzzy: false });
+}
 function pickAc(i, exclude = false) {
   const it = S.ac.items[i];
   if (!it) return;
-  addChip(exclude && !it.insert.startsWith('-') ? `-${it.insert}` : it.insert);
+  const ins = it.insert || it.tag;
+  addChip(exclude && !ins.startsWith('-') ? `-${ins}` : ins);
   tagInput.value = '';
   hideAc();
 }
+function commitTyped(exclude = false) {
+  const typed = tagInput.value.trim();
+  if (!typed) return false;
+  // Shift+Enter on a single typed tag adds it as an exclusion, like it does for a suggestion
+  addTokens(exclude && !/\s/.test(typed) && !typed.startsWith('-') && !typed.startsWith('(') ? `-${typed}` : typed);
+  tagInput.value = '';
+  hideAc();
+  return true;
+}
 tagInput.addEventListener('input', () => {
   const v = tagInput.value;
-  if (/\s$/.test(v) && !/[(][^)]*$/.test(v)) { addTokens(v); tagInput.value = ''; hideAc(); return; }
+  if (/\s$/.test(v) && !splitQuery(v).open) { addTokens(v); tagInput.value = ''; hideAc(); return; }
+  pruneAc();
   requestAc();
 });
 tagInput.addEventListener('keydown', (e) => {
-  const acOpen = !$('#ac').hidden && S.ac.items.length;
-  if (e.key === 'ArrowDown' && acOpen) { e.preventDefault(); S.ac.index = (S.ac.index + 1) % S.ac.items.length; renderAc(tagInput.value.replace(/^-/, '')); return; }
-  if (e.key === 'ArrowUp' && acOpen) { e.preventDefault(); S.ac.index = (S.ac.index - 1 + S.ac.items.length) % S.ac.items.length; renderAc(tagInput.value.replace(/^-/, '')); return; }
-  if ((e.key === 'Enter' || e.key === 'Tab') && acOpen && S.ac.index >= 0) { e.preventDefault(); pickAc(S.ac.index, e.shiftKey); return; }
+  if (e.isComposing || e.keyCode === 229) return; // IME (Vietnamese input methods): Enter confirms the composition
+  const n = S.ac.items.length;
+  const acOpen = !$('#ac').hidden && n > 0;
+  const base = () => acBase(tagInput.value.trim());
+  if (e.key === 'ArrowDown' && acOpen) {
+    e.preventDefault();
+    S.ac.index = S.ac.moved ? (S.ac.index + 1) % n : 0;
+    S.ac.moved = true;
+    renderAc(base());
+    return;
+  }
+  if (e.key === 'ArrowUp' && acOpen) {
+    e.preventDefault();
+    S.ac.index = S.ac.moved ? (S.ac.index - 1 + n) % n : n - 1;
+    S.ac.moved = true;
+    renderAc(base());
+    return;
+  }
+  if (e.key === 'Tab' && acOpen && S.ac.index >= 0) { e.preventDefault(); pickAc(S.ac.index, e.shiftKey); return; }
+  if (e.key === 'Enter' && acOpen) {
+    // Enter adds exactly what was typed ("cat" stays "cat", never "cat_ears"), unless a suggestion was picked with the
+    // arrow keys or the typed text is itself one of the suggestions
+    const exact = S.ac.items.findIndex((it) => it.tag.toLowerCase() === base().toLowerCase());
+    const i = S.ac.moved && S.ac.index >= 0 ? S.ac.index : exact;
+    if (i >= 0) { e.preventDefault(); pickAc(i, e.shiftKey); return; }
+  }
   if (e.key === 'Enter' || (e.key === 'Tab' && tagInput.value.trim())) {
     e.preventDefault();
-    if (tagInput.value.trim()) { addTokens(tagInput.value); tagInput.value = ''; hideAc(); } else if (e.key === 'Enter' && e.ctrlKey) startDownload();
+    if (commitTyped(e.key === 'Enter' && e.shiftKey)) return;
+    if (e.key === 'Enter' && e.ctrlKey) startDownload();
     else if (e.key === 'Enter') runPreview(0);
     return;
   }
@@ -370,7 +764,17 @@ tagInput.addEventListener('keydown', (e) => {
 });
 tagInput.addEventListener('paste', (e) => {
   const text = e.clipboardData.getData('text');
-  if (/\s/.test(text.trim())) { e.preventDefault(); addTokens(text); }
+  if (looksLikeFiles(text)) { // file names / paths / post links: search by file instead of adding them as tags
+    e.preventDefault();
+    openFilesSearch(text.trim());
+    return;
+  }
+  if (!/\s/.test(text.trim())) return;
+  e.preventDefault();
+  const v = tagInput.value;
+  addTokens(v.slice(0, tagInput.selectionStart ?? v.length) + text + v.slice(tagInput.selectionEnd ?? v.length));
+  tagInput.value = '';
+  hideAc();
 });
 
 // ---------------- query validation / count ----------------
@@ -390,7 +794,11 @@ const validate = debounce(async () => {
     }
   } catch { /* sidecar not ready */ }
 }, 250);
-function onQueryChanged() { validate(); }
+function onQueryChanged() {
+  S.countSeq++; // a count still running belongs to the previous query
+  validate();
+  markRelatedStale();
+}
 
 function currentQuery() {
   return {
@@ -410,51 +818,71 @@ function downloadOptions() {
 $('#btn-count').addEventListener('click', async () => {
   const q = currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  recordHistory(q);
+  const seq = ++S.countSeq;
   const btn = $('#btn-count');
   btn.disabled = true; btn.textContent = 'Đang đếm…';
   try {
     const r = await L.search.count(q);
+    if (seq !== S.countSeq) return; // the query changed (or a newer count started) meanwhile
     const st = $('#query-status');
     st.className = r.count > 0 ? 'ok' : 'err';
-    st.textContent = `≈ ${nf.format(r.count)} kết quả${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}`;
+    const parts = r.taskCounts?.length > 1 ? ` (tổng ${r.taskCounts.length} truy vấn con, có thể trùng)` : '';
+    st.textContent = `${r.approximate ? '≤ ' : ''}${nf.format(r.count)} kết quả${parts}`
+      + `${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}`;
     if (r.cfChallenge) toast('Website đang chặn bằng bot challenge. Xem mục Cài đặt → Kết nối.', 'err');
   } catch (err) {
-    toast(`Đếm thất bại: ${errMsg(err)}`, 'err');
+    if (seq === S.countSeq) toast(`Đếm thất bại: ${errMsg(err)}`, 'err');
   } finally {
     btn.disabled = false; btn.textContent = 'Đếm';
   }
 });
 
 // ---------------- preview ----------------
+// "max" asks for the module's own page size (the sidecar caps pageSize to it, e.g. rx 1000, db 200)
+const PAGE_SIZE_MAX = 100000;
+function previewPageSize() {
+  const v = $('#pv-size').value;
+  return v === 'max' ? PAGE_SIZE_MAX : Number(v) || 200;
+}
 async function runPreview(page = 0) {
-  const q = currentQuery();
+  const q = { ...currentQuery(), pageSize: previewPageSize() };
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  recordHistory(q);
+  // every request gets a sequence number: an older answer arriving late never replaces a newer one
+  const seq = ++S.preview.seq;
   const btn = $('#btn-preview');
   btn.disabled = true; btn.textContent = 'Đang tải…';
   $('#results-info').textContent = 'Đang lấy kết quả…';
   try {
     const r = await L.search.preview(q, page);
+    if (seq !== S.preview.seq) return;
     Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, required: r.requiredTags || [], tasks: r.tasks || [],
-      genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled });
+      genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled,
+      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean' });
     S.preview.selected.clear();
     renderGrid();
   } catch (err) {
+    if (seq !== S.preview.seq) return;
     $('#results-info').textContent = `Lỗi: ${errMsg(err)}`;
     toast(`Preview thất bại: ${errMsg(err)}`, 'err');
   } finally {
-    btn.disabled = false; btn.textContent = 'Preview';
+    if (seq === S.preview.seq) { btn.disabled = false; btn.textContent = 'Preview'; }
   }
 }
 $('#btn-preview').addEventListener('click', () => runPreview(0));
 $('#pg-prev').addEventListener('click', () => { if (S.preview.page > 0) runPreview(S.preview.page - 1); });
-$('#pg-next').addEventListener('click', () => runPreview(S.preview.page + 1));
+$('#pg-next').addEventListener('click', () => { if (S.preview.hasMore) runPreview(S.preview.page + 1); });
+$('#pv-size').addEventListener('change', () => { if (S.preview.tags && S.preview.tags === queryString()) runPreview(0); });
 $('#show-excluded').addEventListener('change', (e) => { S.preview.showExcluded = e.target.checked; renderGrid(); });
 
 function renderGrid() {
   const P = S.preview;
   const items = P.items.filter((it) => P.showExcluded || !it.excluded);
   const hidden = P.items.length - items.length;
-  const parts = [`Trang ${P.page + 1}: ${P.items.length} post`];
+  // merged multi-task pages hold up to pageSize posts of every sub-query
+  const size = !P.pageSize ? '' : P.merged && P.tasks?.length > 1 ? ` (${P.pageSize}/trang mỗi truy vấn con)` : ` (tối đa ${P.pageSize}/trang)`;
+  const parts = [`Trang ${P.page + 1}: ${P.items.length} post${size}`];
   const byGender = P.items.filter((it) => (it.excludedBy || []).includes('gender')).length;
   const byOther = P.items.filter((it) => it.excluded && !(it.excludedBy || []).includes('gender')).length;
   if (byOther) parts.push(`${byOther} bị lọc cục bộ`);
@@ -467,12 +895,19 @@ function renderGrid() {
   }
   if (hidden) parts.push('post bị lọc đang ẩn');
   if (P.required?.length) parts.push(`tag kiểm tra cục bộ: ${P.required.join(', ')}`);
-  if (P.tasks?.length > 1) parts.push(`truy vấn tách thành ${P.tasks.length} task, preview hiển thị task đầu`);
+  if (P.tasks?.length > 1) {
+    parts.push(P.merged ? `gộp ${P.tasks.length} truy vấn con (đã khử trùng, id giảm dần)` : `truy vấn tách thành ${P.tasks.length} task, preview hiển thị task đầu`);
+  }
+  if (!P.hasMore) parts.push('trang cuối');
   $('#results-info').textContent = parts.join(' · ');
   $('#results-tools').hidden = false;
   $('#pg-num').textContent = String(P.page + 1);
+  $('#pg-prev').disabled = P.page === 0;
+  $('#pg-next').disabled = !P.hasMore;
+  $('#pg-next').title = P.hasMore ? 'Trang sau' : 'Không còn trang sau';
   $('#grid-empty').hidden = items.length > 0;
   $('#grid-empty').textContent = 'Không có post nào trên trang này.';
+  gridCards.clear();
   $('#grid').replaceChildren(...items.map((it) => {
     const img = h('img', { loading: 'lazy', alt: '', src: it.preview ? L.thumbUrl(it.preview, P.site) : '' });
     const g = it.gender;
@@ -482,7 +917,7 @@ function renderGrid() {
     const card = h('div', {
       class: `card ${P.selected.has(it.id) ? 'sel' : ''} ${it.excluded ? 'excluded' : ''}`, 'data-why': why,
       title: gTitle + (it.tags || []).slice(0, 40).join(' '),
-      onclick: () => { toggleSel(it.id); card.classList.toggle('sel', P.selected.has(it.id)); },
+      onclick: () => toggleSel(it.id),
       ondblclick: () => openLightbox(it),
     }, img, h('span', { class: 'tick' }, '✓'),
     h('div', { class: 'badges' },
@@ -491,14 +926,28 @@ function renderGrid() {
       it.score !== undefined && it.score !== '' ? h('span', { class: 'b' }, `★ ${it.score}`) : null,
       it.rating ? h('span', { class: 'b' }, it.rating) : null,
       g ? h('span', { class: `b g ${g.conf || 'low'}` }, GENDER_VI[g.label] || '?') : null));
+    const same = gridCards.get(it.id);
+    if (same) same.push(card); else gridCards.set(it.id, [card]);
     return card;
   }));
   updateSelButton();
 }
+// post id -> its card(s) in the current grid: selection changes touch only those nodes, never rebuild the grid
+const gridCards = new Map();
 function toggleSel(id) {
   const s = S.preview.selected;
   if (s.has(id)) s.delete(id); else s.add(id);
+  gridCards.get(id)?.forEach((card) => card.classList.toggle('sel', s.has(id)));
   updateSelButton();
+}
+function syncSelection() {
+  // bulk change: without .no-anim every card would start its own border-color transition (~3x the cost)
+  const grid = $('#grid');
+  grid.classList.add('no-anim');
+  const s = S.preview.selected;
+  for (const [id, cards] of gridCards) for (const card of cards) card.classList.toggle('sel', s.has(id));
+  updateSelButton();
+  onFrame(() => onFrame(() => grid.classList.remove('no-anim')));
 }
 function updateSelButton() {
   const n = S.preview.selected.size;
@@ -506,11 +955,11 @@ function updateSelButton() {
   b.disabled = n === 0;
   b.textContent = `Tải đã chọn (${n})`;
 }
-$('#sel-all').addEventListener('click', () => { S.preview.items.filter((i) => !i.excluded).forEach((i) => S.preview.selected.add(i.id)); renderGrid(); });
-$('#sel-none').addEventListener('click', () => { S.preview.selected.clear(); renderGrid(); });
+$('#sel-all').addEventListener('click', () => { S.preview.items.filter((i) => !i.excluded).forEach((i) => S.preview.selected.add(i.id)); syncSelection(); });
+$('#sel-none').addEventListener('click', () => { S.preview.selected.clear(); syncSelection(); });
 $('#sel-invert').addEventListener('click', () => {
   S.preview.items.filter((i) => !i.excluded).forEach((i) => (S.preview.selected.has(i.id) ? S.preview.selected.delete(i.id) : S.preview.selected.add(i.id)));
-  renderGrid();
+  syncSelection();
 });
 $('#dl-selected').addEventListener('click', () => {
   const ids = [...S.preview.selected];
@@ -543,7 +992,7 @@ function openLightbox(it) {
       h('div', { class: 'lb-tags' }, (it.tags || []).map((t) => h('span', { class: 'lb-tag' }, t,
         h('button', { title: 'Thêm', onclick: () => addTag(t, false) }, '+'), h('button', { title: 'Loại trừ', onclick: () => addTag(t, true) }, '−')))),
       h('div', { class: 'modal-actions' },
-        h('button', { class: 'btn', onclick: () => { toggleSel(it.id); renderGrid(); closeModal(); } }, S.preview.selected.has(it.id) ? 'Bỏ chọn' : 'Chọn'),
+        h('button', { class: 'btn', onclick: () => { toggleSel(it.id); closeModal(); } }, S.preview.selected.has(it.id) ? 'Bỏ chọn' : 'Chọn'),
         h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
 }
 
@@ -551,6 +1000,7 @@ function openLightbox(it) {
 async function startDownload(override = null) {
   const q = override ? { ...currentQuery(), ...override } : currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!override?.tags) recordHistory(q); // "download selected" builds an id: query, not something the user typed
   const path = $('#f-path').value.trim() || S.settings.download.path;
   try {
     if (S.settings.download.warnNonEmpty) {
@@ -567,50 +1017,149 @@ async function startDownload(override = null) {
 }
 $('#btn-download').addEventListener('click', () => startDownload());
 
+// Each job owns one DOM subtree that is created once and then patched in place (at most once per frame), so buttons
+// never get swapped out from under the cursor and an open log keeps its scroll position.
+const JOB_LOG_MAX = 200;
+const JOB_ACTIVE = new Set(['queued', 'running', 'cancelling']);
+const jobViews = new Map(); // job id -> view
+const dirtyJobs = new Set();
+let jobsResort = false;
+
 function upsertJob(job) {
-  const prev = S.jobs.get(job.id);
-  S.jobs.set(job.id, { ...prev, ...job, showLog: prev?.showLog || false });
-  renderJobs();
+  // logTail only seeds a job we have not seen yet; afterwards every line arrives once through 'jobs:log'
+  const { logTail, ...rest } = job;
+  const j = S.jobs.get(job.id);
+  if (j) Object.assign(j, rest);
+  else {
+    S.jobs.set(job.id, { ...rest, showLog: false, log: (logTail || []).slice(-JOB_LOG_MAX) });
+    jobsResort = true;
+  }
+  dirtyJobs.add(job.id);
+  onFrame(flushJobs);
 }
 function renderJobs() {
-  const list = [...S.jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
-  const active = list.filter((j) => ['queued', 'running', 'cancelling'].includes(j.status)).length;
+  S.jobs.forEach((_, id) => dirtyJobs.add(id));
+  jobsResort = true;
+  onFrame(flushJobs);
+}
+function jobProgress(j) {
+  const p = j.progress || {};
+  // streaming: files download while search pages are still being scanned, so totalAll can keep growing
+  const downloading = (p.stateName === 'DOWNLOADING' || !!p.streaming) && p.totalAll > 0;
+  const pct = j.status === 'done' ? 100 : downloading ? Math.min(100, (100 * (p.processed || 0)) / p.totalAll) : 0;
+  return { p, pct, indet: j.status === 'running' && !downloading };
+}
+function createJobView(id) {
+  const job = () => S.jobs.get(id);
+  const m = {
+    module: h('span'), state: h('span'), task: h('span'), files: h('span'),
+    scan: h('span', { class: 'hint', title: 'Vẫn đang quét thêm trang kết quả, tổng số file có thể còn tăng' }, 'đang quét thêm…'),
+    counts: h('span'), cf: h('span', { class: 'danger' }, 'Bị bot challenge chặn'), error: h('span', { class: 'danger' }),
+    partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), dest: h('span', { class: 'mono' }),
+  };
+  Object.values(m).forEach((el) => { el.hidden = true; });
+  const v = {
+    m, width: null, pre: null, logView: null,
+    status: h('span', { class: 'status' }),
+    q: h('span', { class: 'job-q' }),
+    cancel: h('button', { class: 'btn sm danger', onclick: () => L.jobs.cancel(id) }, 'Huỷ'),
+    logBtn: h('button', { class: 'btn sm ghost', onclick: () => toggleJobLog(id) }, 'Log'),
+    fill: h('i'),
+  };
+  v.bar = h('div', { class: 'bar' }, v.fill);
+  v.root = h('div', { class: 'job glass', dataset: { id } },
+    h('div', { class: 'job-head' }, v.status, v.q,
+      h('div', { class: 'job-actions' }, v.cancel,
+        h('button', { class: 'btn sm ghost', onclick: () => { const j = job(); if (j) L.app.openPath(j.dest); } }, 'Mở thư mục'),
+        v.logBtn)),
+    v.bar, h('div', { class: 'job-meta' }, Object.values(m)));
+  return v;
+}
+function updateJobView(v, j) {
+  const { p, pct, indet } = jobProgress(j);
+  const cls = `status ${j.status}`;
+  if (v.status.className !== cls) v.status.className = cls;
+  setText(v.status, JOB_VI[j.status] || j.status);
+  setText(v.q, j.label || j.tags);
+  if (v.q.title !== j.tags) v.q.title = j.tags;
+  setHidden(v.cancel, !['queued', 'running'].includes(j.status));
+  setText(v.logBtn, j.showLog ? 'Ẩn log' : 'Log');
+  v.bar.classList.toggle('indet', indet);
+  const width = indet ? '' : `${pct}%`; // inline width would override the indeterminate animation's width
+  if (v.width !== width) { v.width = width; v.fill.style.width = width; }
+  const { m } = v;
+  slot(m.module, `Module: ${j.module}`);
+  slot(m.state, p.stateName && j.status !== 'failed' ? `Trạng thái: ${STATE_VI[p.stateName] || p.stateName}` : null);
+  slot(m.task, p.tasks > 1 ? `Task ${p.task || 0}/${p.tasks}` : null);
+  const files = p.totalAll ? `${nf.format(p.processed || 0)} / ${nf.format(p.totalAll)} file` : p.total ? `Tìm thấy ${nf.format(p.total)}` : null;
+  slot(m.files, files);
+  setHidden(m.scan, !(files && p.scanning && j.status === 'running'));
+  slot(m.counts, (p.success || p.failed) ? `✓ ${p.success || 0} · ✗ ${p.failed || 0}` : null);
+  setHidden(m.cf, !p.cfChallenge);
+  slot(m.error, j.status === 'failed' && j.error ? `Lỗi: ${j.error}` : null);
+  setHidden(m.partial, !(j.status === 'done' && j.exitCode === 3));
+  slot(m.gender, p.genderFiltered ? `Lọc giới tính: ${nf.format(p.genderFiltered)}` : null);
+  slot(m.blocked, p.blocked ? `Chặn (an toàn): ${nf.format(p.blocked)}` : null);
+  slot(m.dest, j.dest ? String(j.dest) : null);
+}
+function flushJobs() {
+  const host = $('#jobs');
+  for (const [id, v] of jobViews) if (!S.jobs.has(id)) { v.root.remove(); jobViews.delete(id); }
+  for (const id of dirtyJobs) {
+    const j = S.jobs.get(id);
+    if (!j) continue;
+    let v = jobViews.get(id);
+    if (!v) { v = createJobView(id); jobViews.set(id, v); jobsResort = true; }
+    updateJobView(v, j);
+  }
+  dirtyJobs.clear();
+  if (jobsResort) {
+    jobsResort = false;
+    // newest first; only nodes that are out of place are moved (a new job is inserted, existing ones stay put)
+    let i = 0;
+    for (const j of [...S.jobs.values()].sort((a, b) => b.createdAt - a.createdAt)) {
+      const el = jobViews.get(j.id)?.root;
+      if (!el) continue;
+      if (host.children[i] !== el) host.insertBefore(el, host.children[i] || null);
+      i++;
+    }
+  }
+  let active = 0;
+  for (const j of S.jobs.values()) if (JOB_ACTIVE.has(j.status)) active++;
   const badge = $('#badge-jobs');
-  badge.hidden = active === 0;
-  badge.textContent = String(active);
-  $('#jobs-empty').hidden = list.length > 0;
-  $('#jobs').replaceChildren(...list.map((j) => {
-    const p = j.progress || {};
-    const downloading = p.stateName === 'DOWNLOADING' && p.totalAll > 0;
-    const pct = j.status === 'done' ? 100 : downloading ? Math.min(100, (100 * (p.processed || 0)) / p.totalAll) : 0;
-    const indet = j.status === 'running' && !downloading;
-    const meta = [
-      h('span', {}, `Module: ${j.module}`),
-      p.stateName ? h('span', {}, `Trạng thái: ${STATE_VI[p.stateName] || p.stateName}`) : null,
-      p.tasks > 1 ? h('span', {}, `Task ${p.task || 0}/${p.tasks}`) : null,
-      p.totalAll ? h('span', {}, `${nf.format(p.processed || 0)} / ${nf.format(p.totalAll)} file`) : p.total ? h('span', {}, `Tìm thấy ${nf.format(p.total)}`) : null,
-      (p.success || p.failed) ? h('span', {}, `✓ ${p.success || 0} · ✗ ${p.failed || 0}`) : null,
-      p.cfChallenge ? h('span', { style: 'color:var(--danger)' }, 'Bị bot challenge chặn') : null,
-      p.genderFiltered ? h('span', {}, `Lọc giới tính: ${nf.format(p.genderFiltered)}`) : null,
-      p.blocked ? h('span', {}, `Chặn (an toàn): ${nf.format(p.blocked)}`) : null,
-      h('span', { class: 'mono' }, j.dest),
-    ];
-    return h('div', { class: 'job glass' },
-      h('div', { class: 'job-head' },
-        h('span', { class: `status ${j.status}` }, JOB_VI[j.status] || j.status),
-        h('span', { class: 'job-q', title: j.tags }, j.label || j.tags),
-        h('div', { class: 'job-actions' },
-          ['queued', 'running'].includes(j.status) ? h('button', { class: 'btn sm danger', onclick: () => L.jobs.cancel(j.id) }, 'Huỷ') : null,
-          h('button', { class: 'btn sm ghost', onclick: () => L.app.openPath(j.dest) }, 'Mở thư mục'),
-          h('button', { class: 'btn sm ghost', onclick: () => { S.jobs.get(j.id).showLog = !j.showLog; renderJobs(); } }, j.showLog ? 'Ẩn log' : 'Log'))),
-      h('div', { class: `bar ${indet ? 'indet' : ''}` }, h('i', { style: `width:${pct}%` })),
-      h('div', { class: 'job-meta' }, meta),
-      j.showLog ? h('pre', {}, (j.logTail || []).join('\n')) : null);
-  }));
+  setHidden(badge, active === 0);
+  setText(badge, String(active));
+  setHidden($('#jobs-empty'), S.jobs.size > 0);
+}
+function toggleJobLog(id) {
+  const j = S.jobs.get(id);
+  const v = jobViews.get(id);
+  if (!j || !v) return;
+  j.showLog = !j.showLog;
+  if (j.showLog) {
+    v.pre = h('pre', { class: 'job-log' });
+    v.root.append(v.pre);
+    v.logView = createLogView(v.pre, JOB_LOG_MAX, 50);
+    v.logView.reset(j.log);
+  } else {
+    v.pre?.remove();
+    v.pre = null;
+    v.logView = null;
+  }
+  setText(v.logBtn, j.showLog ? 'Ẩn log' : 'Log');
+}
+function appendJobLog(id, text) {
+  const j = S.jobs.get(id);
+  if (!j) return;
+  j.log.push(text);
+  if (j.log.length > JOB_LOG_MAX + 50) j.log.splice(0, j.log.length - JOB_LOG_MAX);
+  if (j.showLog) jobViews.get(id)?.logView?.push([text]);
 }
 $('#jobs-clear').addEventListener('click', async () => {
   const list = await L.jobs.clear();
-  S.jobs = new Map(list.map((j) => [j.id, j]));
+  const keep = new Set(list.map((j) => j.id));
+  for (const id of [...S.jobs.keys()]) if (!keep.has(id)) S.jobs.delete(id);
+  list.forEach(upsertJob);
   renderJobs();
 });
 
@@ -640,15 +1189,19 @@ function createAZ(host) {
   host.replaceChildren(letters, h('div', { class: 'az-tools' }, prefixInput, minSel, sortSeg), types, list, foot);
 
   async function load(append) {
-    if (st.loading) return;
-    st.loading = true;
+    // paging waits for the running load; a reload (letter, prefix, filter or module change) always starts and makes
+    // whatever is still in flight stale through the sequence number
+    if (append && st.loading) return;
     const seq = ++st.seq;
-    const prefix = st.letter === '#' ? '#' : (st.prefix && st.prefix.startsWith(st.letter) ? st.prefix : st.letter + (st.prefix.startsWith(st.letter) ? '' : st.prefix));
+    st.loading = true;
+    const module = S.module;
+    // a typed prefix is used as is ("big_" -> big_*, never letter + prefix); otherwise the selected letter
+    const prefix = st.prefix || st.letter;
     try {
-      const r = await L.rpc('tags.browse', { module: S.module, prefix, offset: append ? st.offset : 0, limit: 150, minPosts: st.minPosts,
+      const r = await L.rpc('tags.browse', { module, prefix, offset: append ? st.offset : 0, limit: 150, minPosts: st.minPosts,
         types: [...st.types], sort: st.sort });
-      if (seq !== st.seq) return;
-      if (!append) { list.replaceChildren(); st.offset = 0; }
+      if (seq !== st.seq || module !== S.module) return;
+      if (!append) { list.replaceChildren(); list.scrollTop = 0; st.offset = 0; }
       st.total = r.total;
       st.offset += r.items.length;
       list.append(...r.items.map((it) => h('div', { class: 'az-row' },
@@ -656,22 +1209,26 @@ function createAZ(host) {
         h('span', { class: 'cnt' }, fmt(it.posts)),
         h('button', { class: 'btn sm', title: 'Thêm vào truy vấn', onclick: () => { addChip(it.tag); toast(`Đã thêm ${it.tag}`); } }, '+'),
         h('button', { class: 'btn sm', title: 'Loại trừ', onclick: () => { addChip(`-${it.tag}`); toast(`Đã loại trừ ${it.tag}`); } }, '−'))));
-      foot.firstChild.textContent = `${nf.format(st.total)} tag · ${S.module.toUpperCase()}`;
-      foot.lastChild.textContent = st.total === 0 ? 'Chưa có danh sách tag cho module này' : st.offset < st.total ? 'Cuộn để tải thêm' : '';
+      foot.firstChild.textContent = `${nf.format(st.total)} tag · ${module.toUpperCase()}${st.prefix ? ` · tiền tố “${st.prefix}”` : ''}`;
+      foot.lastChild.textContent = st.total === 0 ? (st.prefix ? 'Không có tag nào với tiền tố này' : 'Chưa có danh sách tag cho module này')
+        : st.offset < st.total ? 'Cuộn để tải thêm' : '';
     } catch (err) {
-      foot.firstChild.textContent = `Lỗi: ${errMsg(err)}`;
+      if (seq === st.seq) foot.firstChild.textContent = `Lỗi: ${errMsg(err)}`;
     } finally {
-      st.loading = false;
+      if (seq === st.seq) st.loading = false;
     }
   }
   function reload() {
-    $$('button', letters).forEach((b) => b.classList.toggle('on', b.textContent === st.letter));
+    // the highlighted letter follows a typed prefix
+    const on = st.prefix ? (/^[a-z]/.test(st.prefix) ? st.prefix[0] : '') : st.letter;
+    $$('button', letters).forEach((b) => b.classList.toggle('on', b.textContent === on));
     load(false);
   }
   list.addEventListener('scroll', () => {
     if (list.scrollTop + list.clientHeight > list.scrollHeight - 200 && st.offset < st.total) load(true);
   });
-  const api = { reload, reset: () => reload(), loaded: false };
+  // module change: only an instance that was opened before reloads now, the others load when first shown
+  const api = { reload, reset: () => { if (api.loaded) reload(); }, loaded: false };
   azInstances.push(api);
   return api;
 }
@@ -680,16 +1237,267 @@ const azPage = createAZ($('#az-page-host'));
 $('#btn-az').addEventListener('click', () => {
   const d = $('#az-drawer');
   d.hidden = !d.hidden;
+  if (!d.hidden) $('#hist-drawer').hidden = true;
   if (!d.hidden && !azDrawer.loaded) { azDrawer.loaded = true; azDrawer.reload(); }
 });
 $('#az-close').addEventListener('click', () => { $('#az-drawer').hidden = true; });
+
+// ---------------- search history / saved queries (settings.search.history, settings.search.saved) ----------------
+// Both lists are written whole (main's deep merge replaces arrays); main validates and caps them as well.
+const HISTORY_MAX = 50;
+const SAVED_MAX = 200;
+const QUERY_MAX_LEN = 2000;
+const NAME_MAX_LEN = 80;
+const searchList = (key) => (Array.isArray(S.settings?.search?.[key]) ? S.settings.search[key] : []);
+async function saveSearchList(key, list) {
+  S.settings.search[key] = list; // shown at once; the saved copy (validated by main) replaces it when it comes back
+  try { await saveSettings({ search: { [key]: list } }); } catch (err) { toast(`Không lưu được: ${errMsg(err)}`, 'err'); }
+  if (!$('#hist-drawer').hidden) renderHistory();
+}
+function recordHistory(q) {
+  const tags = String(q.tags || '').trim().slice(0, QUERY_MAX_LEN);
+  if (!tags || !S.settings) return;
+  const list = searchList('history').filter((e) => !(e.module === q.module && e.tags === tags));
+  list.unshift({ module: q.module, tags, at: Date.now() });
+  saveSearchList('history', list.slice(0, HISTORY_MAX));
+}
+function loadQuery(e) {
+  if (e.module !== S.module) {
+    if (!moduleInfo(e.module)?.installed) { toast(`Module ${e.module} chưa được cài`, 'err'); return; }
+    setModule(e.module);
+  }
+  S.chips = [];
+  S.selected.clear();
+  splitQuery(e.tags).tokens.forEach((t) => { const c = parseToken(t); if (c) S.chips.push({ ...c, id: ++S.chipSeq }); });
+  renderChips();
+  onQueryChanged();
+  $('#hist-drawer').hidden = true;
+  tagInput.focus();
+}
+async function saveQuery(src = null) {
+  const q = src || currentQuery();
+  const tags = String(q.tags || '').trim();
+  if (!tags) { toast('Chưa có tag nào', 'err'); return; }
+  const v = await prompt2('Lưu truy vấn', [{ label: `Tên (${q.module}: ${tags.length > 60 ? `${tags.slice(0, 60)}…` : tags})`, value: tags.slice(0, NAME_MAX_LEN) }]);
+  const name = v?.[0]?.slice(0, NAME_MAX_LEN);
+  if (!name) return;
+  const list = searchList('saved').filter((e) => e.name !== name);
+  if (list.length >= SAVED_MAX) { toast(`Tối đa ${SAVED_MAX} truy vấn đã lưu`, 'err'); return; }
+  list.unshift({ name, module: q.module, tags: tags.slice(0, QUERY_MAX_LEN), at: Date.now() });
+  await saveSearchList('saved', list);
+  toast(`Đã lưu truy vấn “${name}”`, 'ok');
+}
+async function renameSaved(e) {
+  const v = await prompt2('Đổi tên truy vấn', [{ label: 'Tên mới', value: e.name }]);
+  const name = v?.[0]?.slice(0, NAME_MAX_LEN);
+  if (!name || name === e.name) return;
+  if (searchList('saved').some((x) => x.name === name) && !window.confirm(`Đã có truy vấn tên “${name}”. Ghi đè?`)) return;
+  saveSearchList('saved', searchList('saved').filter((x) => x.name !== name).map((x) => (x.name === e.name ? { ...x, name } : x)));
+}
+function deleteSaved(e) {
+  if (!window.confirm(`Xoá truy vấn đã lưu “${e.name}”?`)) return;
+  saveSearchList('saved', searchList('saved').filter((x) => x.name !== e.name));
+}
+let histTab = 'history';
+function renderHistory() {
+  $$('#hist-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === histTab));
+  $('#hist-clear').hidden = histTab !== 'history' || !searchList('history').length;
+  const host = $('#hist-list');
+  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
+  if (histTab === 'history') {
+    const list = searchList('history');
+    host.replaceChildren(...(list.length ? list.map((e) => h('div', { class: 'hist-row', title: `${e.module}: ${e.tags}`, onclick: () => loadQuery(e) },
+      h('span', { class: 'mod-abbr' }, e.module),
+      h('div', { class: 'hist-main' }, h('code', {}, e.tags), h('span', { class: 'muted' }, ago(e.at))),
+      h('button', { class: 'btn sm ghost', title: 'Lưu truy vấn này', onclick: stop(() => saveQuery(e)) }, '☆'),
+      h('button', { class: 'btn sm ghost', title: 'Xoá khỏi lịch sử', onclick: stop(() => saveSearchList('history', searchList('history').filter((x) => !(x.module === e.module && x.tags === e.tags)))) }, '×')))
+      : [h('div', { class: 'empty' }, 'Chưa có lịch sử. Mỗi lần Đếm, Preview hoặc Tải xuống, truy vấn được ghi lại ở đây.')]));
+  } else {
+    const list = searchList('saved');
+    host.replaceChildren(...(list.length ? list.map((e) => h('div', { class: 'hist-row', title: `${e.module}: ${e.tags}`, onclick: () => loadQuery(e) },
+      h('span', { class: 'mod-abbr' }, e.module),
+      h('div', { class: 'hist-main' }, h('b', {}, e.name), h('code', {}, e.tags)),
+      h('button', { class: 'btn sm ghost', title: 'Đổi tên', onclick: stop(() => renameSaved(e)) }, 'Đổi tên'),
+      h('button', { class: 'btn sm ghost danger', title: 'Xoá', onclick: stop(() => deleteSaved(e)) }, 'Xoá')))
+      : [h('div', { class: 'empty' }, 'Chưa có truy vấn nào được lưu. Bấm “☆ Lưu truy vấn” để lưu truy vấn hiện tại.')]));
+  }
+}
+$('#btn-history').addEventListener('click', () => {
+  const d = $('#hist-drawer');
+  d.hidden = !d.hidden;
+  if (!d.hidden) { $('#az-drawer').hidden = true; renderHistory(); }
+});
+$('#hist-close').addEventListener('click', () => { $('#hist-drawer').hidden = true; });
+$('#hist-tabs').addEventListener('click', (e) => { const t = e.target.closest('button')?.dataset.tab; if (t) { histTab = t; renderHistory(); } });
+$('#hist-save').addEventListener('click', () => saveQuery());
+$('#btn-save-query').addEventListener('click', () => saveQuery());
+
+// ---------------- search by file name / post link ----------------
+// Pasted, dropped or picked file names, paths and post / file links -> 'id:' / 'md5:' query (sidecar files.identify).
+// Only names are used: dropped and picked files are never opened or read.
+const reFileish = new RegExp([
+  '\\.(?:jpe?g|jfif|png|gif|webp|avif|bmp|webm|mp4|mkv|mov|m4v|swf)(?=\\s|$|[?#])', // a media file name
+  '^\\s*https?://\\S+', // a link
+  '(?:^|[^0-9a-f])[0-9a-f]{32}(?:[^0-9a-f]|$)', // an md5
+].join('|'), 'im');
+const looksLikeFiles = (text) => reFileish.test(String(text || ''));
+const FILE_NOTE_VI = {
+  'not recognized': 'Không nhận ra',
+  'info list file, not a post': 'File danh sách info, không phải post',
+  'no post id or md5 in the link': 'Link không có id post hoặc md5',
+  'unknown site, current module assumed': 'site lạ, dùng module đang chọn',
+};
+function namesFromTransfer(dt) {
+  const names = [...(dt?.files || [])].map((f) => f.name);
+  if (!names.length) {
+    const uris = (dt?.getData('text/uri-list') || dt?.getData('text/plain') || '').split(/\r?\n/).filter((s) => s && !s.startsWith('#'));
+    names.push(...uris);
+  }
+  return names;
+}
+function openFilesSearch(initial = '') {
+  const area = h('textarea', {
+    class: 'files-input', rows: '6', spellcheck: 'false',
+    placeholder: 'Mỗi dòng một mục: tên file (db_12345.jpg, 12345.jpg, <md5>.png), đường dẫn, link post hoặc link ảnh',
+  });
+  area.value = initial;
+  const picker = h('input', { type: 'file', multiple: true, hidden: true });
+  const list = h('div', { class: 'files-list' });
+  const actions = h('div', { class: 'files-queries' });
+  let seq = 0;
+  const run = async () => {
+    const my = ++seq;
+    const lines = area.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) { list.replaceChildren(); actions.replaceChildren(); return; }
+    let r;
+    try {
+      r = await rpcOptional('files.identify', { names: lines, module: S.module });
+    } catch (err) {
+      if (my === seq) list.replaceChildren(h('div', { class: 'err' }, errMsg(err)));
+      return;
+    }
+    if (my !== seq) return; // a newer edit is being identified
+    if (!r) { list.replaceChildren(h('div', { class: 'err' }, 'Lõi Python chưa hỗ trợ tìm theo tên file (cần cập nhật).')); return; }
+    const ok = r.items.filter((it) => it.kind).length;
+    list.replaceChildren(
+      h('div', { class: 'muted files-sum' }, `Nhận ra ${ok}/${r.items.length} mục${lines.length > r.max ? ` (chỉ xét ${r.max} mục đầu)` : ''}`),
+      ...r.items.map((it) => h('div', { class: `files-item${it.kind ? '' : ' bad'}` },
+        h('span', { class: 'files-name mono', title: it.name }, it.name),
+        h('span', { class: 'files-res' }, it.kind
+          ? `${it.module} · ${it.kind} ${it.kind === 'md5' ? `${it.value.slice(0, 12)}…` : it.value}${it.note ? ` (${FILE_NOTE_VI[it.note] || it.note})` : ''}`
+          : (FILE_NOTE_VI[it.note] || it.note || 'Không nhận ra')))),
+    );
+    // the current module first, then by number of items
+    const qs = [...r.queries].sort((a, b) => (b.module === S.module) - (a.module === S.module) || b.count - a.count);
+    actions.replaceChildren(...qs.map((q, i) => {
+      const mi = moduleInfo(q.module);
+      const name = mi?.name || q.module.toUpperCase();
+      return h('button', {
+        class: `btn ${i === 0 ? 'primary' : ''}`,
+        title: q.tags,
+        onclick: () => {
+          if (!mi?.installed) { toast(`Module ${name} chưa được cài (Extensions)`, 'err'); return; }
+          closeModal();
+          loadQuery({ module: q.module, tags: q.tags });
+          runPreview(0);
+          if (q.dropped) toast(`Chỉ tìm ${q.count} mục đầu trên ${name}: mỗi mục là một lượt tìm riêng, tối đa 64`, 'err');
+        },
+      }, `Tìm ${q.count} mục trên ${name}`);
+    }));
+  };
+  const runSoon = debounce(run, 250);
+  area.addEventListener('input', runSoon);
+  const addNames = (names) => {
+    if (!names.length) return;
+    area.value = [area.value.trim(), ...names].filter(Boolean).join('\n');
+    run();
+  };
+  picker.addEventListener('change', () => { addNames([...picker.files].map((f) => f.name)); picker.value = ''; });
+  area.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); addNames(namesFromTransfer(e.dataTransfer)); });
+  openModal(h('div', { class: 'files-modal' },
+    h('h3', {}, 'Tìm theo tên file / link'),
+    h('p', { class: 'muted' }, 'Dán hoặc kéo-thả file đã tải, đường dẫn, link post hay link ảnh. Lustra chỉ đọc tên file, không đọc nội dung. '
+      + 'Nhận ra: tên Lustra đặt (db_12345…, 12345…), tên gốc md5, tên tải từ Danbooru (__…__md5), link post của các site đã biết.'),
+    area,
+    h('div', { class: 'files-tools' },
+      h('button', { class: 'btn sm', onclick: () => picker.click() }, 'Chọn file…'),
+      h('button', { class: 'btn sm ghost', onclick: () => { area.value = ''; run(); area.focus(); } }, 'Xoá hết'),
+      picker),
+    list,
+    h('div', { class: 'modal-actions' }, actions, h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng'))));
+  area.focus();
+  if (initial) run();
+}
+$('#btn-files').addEventListener('click', () => openFilesSearch());
+// files / links dropped on the search bar open the same dialog (the window itself never navigates, see below)
+$('.searchbar').addEventListener('drop', (e) => {
+  const names = namesFromTransfer(e.dataTransfer);
+  if (!names.length) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openFilesSearch(names.join('\n'));
+});
+$('#hist-clear').addEventListener('click', () => { if (window.confirm('Xoá toàn bộ lịch sử tìm kiếm?')) saveSearchList('history', []); });
+
+// ---------------- related tags (search.related: tags that co-occur in the first results page) ----------------
+const related = { seq: 0, tags: '', module: '', items: [], sample: 0 };
+function relatedSupported() { return typeof L?.search?.related === 'function'; }
+async function loadRelated() {
+  const q = currentQuery();
+  if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  const seq = ++related.seq;
+  $('#related').hidden = false;
+  $('#related-info').textContent = 'Đang lấy tag liên quan…';
+  $('#related-refresh').disabled = true;
+  try {
+    const r = await L.search.related(q);
+    if (seq !== related.seq) return;
+    Object.assign(related, { tags: q.tags, module: q.module, items: r.items || [], sample: r.sample || 0 });
+    renderRelated();
+  } catch (err) {
+    if (seq === related.seq) $('#related-info').textContent = `Lỗi: ${errMsg(err)}`;
+  } finally {
+    if (seq === related.seq) $('#related-refresh').disabled = false;
+  }
+}
+function renderRelated() {
+  const inQuery = new Set(S.chips.flatMap((c) => (c.kind === 'or' || c.kind === 'neg' ? c.items : [c.text])).map((t) => t.replace(/^-/, '').toLowerCase()));
+  const { sample } = related;
+  const showMeta = $('#related-meta').checked;
+  const items = showMeta ? related.items : related.items.filter((it) => it.type !== 'metadata');
+  const hiddenMeta = related.items.length - items.length;
+  $('#related-info').textContent = related.items.length
+    ? `hay đi kèm trong ${sample} post đầu của “${related.tags}”${hiddenMeta ? ` · ẩn ${hiddenMeta} tag metadata` : ''}`
+    : sample ? 'Không có tag nào đi kèm' : 'Website này không trả tag trong kết quả tìm kiếm';
+  $('#related-list').replaceChildren(...items.map((it) => {
+    const has = inQuery.has(it.tag.toLowerCase());
+    return h('span', { class: `rel-item ${has ? 'in' : ''}`, title: `${it.tag}: ${it.count}/${sample} post đầu · ${nf.format(it.posts || 0)} post trên site` },
+      h('span', { class: `type-dot t-${it.type}` }), h('span', { class: 'nm' }, it.tag), h('span', { class: 'cnt' }, `${it.count}`),
+      h('button', { title: 'Thêm vào truy vấn', disabled: has, onclick: () => { addChip(it.tag); renderRelated(); } }, '+'),
+      h('button', { title: 'Loại trừ', disabled: has, onclick: () => { addChip(`-${it.tag}`); renderRelated(); } }, '−'));
+  }));
+  markRelatedStale();
+}
+function markRelatedStale() {
+  if ($('#related').hidden || !related.tags) return;
+  const stale = related.tags !== queryString() || related.module !== S.module;
+  $('#related').classList.toggle('stale', stale);
+  $('#related-refresh').textContent = stale ? 'Làm mới theo truy vấn mới' : 'Làm mới';
+}
+$('#btn-related').addEventListener('click', () => loadRelated());
+$('#related-refresh').addEventListener('click', () => loadRelated());
+$('#related-meta').addEventListener('change', () => { if (related.tags) renderRelated(); });
+$('#related-close').addEventListener('click', () => { related.seq++; $('#related').hidden = true; });
 
 // ---------------- tag lists status / update ----------------
 const UPDATABLE = ['rx', 'db', 'xb', 'bb', 'en'];
 async function refreshTagStatus() {
   if (!azPage.loaded) { azPage.loaded = true; azPage.reload(); }
   let rows = [];
-  try { rows = await L.rpc('tags.status'); } catch { /* ignore */ }
+  try {
+    rows = await L.rpc('tags.status');
+    S.tagLists = new Set(rows.filter((r) => r.size > 0).map((r) => r.module));
+  } catch { /* ignore */ }
   const byMod = Object.fromEntries(rows.map((r) => [r.module, r]));
   const mods = S.modules.filter((m) => m.installed).map((m) => m.abbr);
   const table = $('#tag-status');
@@ -796,7 +1604,7 @@ function renderAppearanceSettings() {
     class: `icon-sw ${ic.id === a.icon ? 'on' : ''}`, title: ic.name,
     onclick: async () => {
       const r = await saveSettings({ appearance: { icon: ic.id } });
-      if (!r.appearance.liveTaskbarIcon) showIconNotice();
+      showIconNotice(r.iconSync, r.appearance);
     },
   }, h('img', { src: ic.url, alt: ic.name }))));
   const bg = a.background;
@@ -808,14 +1616,43 @@ function renderAppearanceSettings() {
   $('#bg-opacity').value = Math.round((bg.opacity ?? 0.9) * 100);
   $('#bg-dim-range').value = Math.round((bg.dim ?? 0.18) * 100);
 }
-function showIconNotice() {
+// sync: what main updated outside the window (iconSync of settings:set): launcher 'updated' | 'unchanged' | 'missing' |
+// 'foreign' | 'unsupported', shortcuts (Windows), restartForDock (Wayland reads the launcher when the app starts)
+function showIconNotice(sync, a) {
   const n = $('#icon-notice');
+  const done = [];
+  if (sync?.launcher === 'updated') done.push('launcher');
+  if (sync?.shortcuts) done.push(`${sync.shortcuts} shortcut`);
+  if (sync?.error) toast(`Không cập nhật được icon ngoài app: ${sync.error}`, 'err');
+  const relaunch = h('button', { class: 'btn sm primary', onclick: () => L.app.relaunch() }, 'Khởi động lại ngay');
+  if (a?.liveTaskbarIcon !== false) {
+    n.hidden = true;
+    toast(`Đã đổi icon${done.length ? ` (cả ${done.join(', ')})` : ''}`, 'ok');
+    return;
+  }
+  // Wayland: the dock / taskbar icon comes from the launcher (lustra.desktop) only
   n.hidden = false;
-  n.replaceChildren(
-    h('div', {}, 'Icon trong app đã đổi. Phiên làm việc này chạy trên Wayland: icon ở taskbar/dock được lấy từ desktop entry (lustra.desktop) nên chỉ đổi sau khi mở lại app.'),
-    h('div', { class: 'row' },
-      h('button', { class: 'btn sm', onclick: async () => { const r = await L.app.installLauncher(); toast(r.ok ? `Đã cập nhật launcher: ${r.path}` : r.message, r.ok ? 'ok' : 'err'); } }, 'Cập nhật launcher'),
-      h('button', { class: 'btn sm primary', onclick: () => L.app.relaunch() }, 'Khởi động lại ngay')));
+  if (sync?.launcher === 'missing') {
+    n.replaceChildren(
+      h('div', {}, 'Icon trong app đã đổi. Trên Wayland, dock/taskbar lấy icon từ launcher (lustra.desktop) nhưng máy chưa có launcher của Lustra, '
+        + 'nên dock đang hiện icon chung. Tạo launcher (Lustra sẽ tự cập nhật nó mỗi khi bạn đổi icon) rồi mở lại app.'),
+      h('div', { class: 'row' },
+        h('button', {
+          class: 'btn sm', onclick: async () => {
+            const r = await L.app.installLauncher();
+            toast(r.ok ? `Đã tạo launcher: ${r.path}` : r.message, r.ok ? 'ok' : 'err');
+            if (r.ok) showIconNotice({ launcher: 'updated', restartForDock: true }, a);
+          },
+        }, 'Tạo launcher'), relaunch));
+  } else if (sync?.launcher === 'foreign') {
+    n.replaceChildren(
+      h('div', {}, 'Icon trong app đã đổi. Launcher lustra.desktop trên máy do công cụ khác tạo (ví dụ công cụ tích hợp AppImage) nên Lustra không sửa nó; '
+        + 'dock trên Wayland vẫn hiện icon của launcher đó.'));
+  } else {
+    n.replaceChildren(
+      h('div', {}, 'Icon trong app và launcher đã đổi. Dock trên Wayland chỉ đọc launcher khi app mở: khởi động lại để dock hiện icon mới.'),
+      h('div', { class: 'row' }, relaunch));
+  }
 }
 $('#bg-mode').addEventListener('click', async (e) => {
   const mode = e.target.dataset.mode;
@@ -889,6 +1726,7 @@ function renderSettings() {
   $('#f-limit').value = s.download.limit;
   $('#f-parchi').checked = s.download.parchi;
   renderApiKeys();
+  renderTagLimits();
 }
 $('#s-path-pick').addEventListener('click', async () => {
   const p = await L.dialogs.folder($('#s-path').value);
@@ -909,9 +1747,8 @@ $('#c-save').addEventListener('click', async () => {
     const cookies = parse('#c-cookies');
     const proxy = $('#c-proxy').value.trim();
     if (proxy && !/^(https?|socks5h?):\/\/([^@/]+@)?[^/:]+:\d+\/?$/i.test(proxy)) throw new Error('proxy dạng type://[user:pass@]host:port');
-    // replace objects entirely (deep merge would keep removed keys)
-    S.settings.connection.headers = {}; S.settings.connection.cookies = {};
-    await saveSettings({ connection: { headers: null, cookies: null } });
+    // one save: main replaces the headers / cookies maps as a whole (removed entries go away) and rejects invalid
+    // entries before writing anything
     await saveSettings({ connection: { proxy, ignoreProxy: $('#c-ignore').checked, proxyNoDownload: $('#c-nodown').checked,
       timeout: Number($('#c-timeout').value) || 0, retries: Number($('#c-retries').value) || 0, headers, cookies } });
     toast('Đã lưu cài đặt kết nối', 'ok');
@@ -926,14 +1763,56 @@ function renderApiKeys() {
   $('#keys-note').textContent = sec.encryption
     ? 'Key được mã hoá bằng keyring của hệ điều hành (safeStorage) và không bao giờ gửi tới giao diện.'
     : 'Không có keyring hệ điều hành: key sẽ được lưu dạng văn bản thường trong settings.json.';
+  const canClear = typeof L.secrets?.clear === 'function';
   const mods = S.modules.filter((m) => m.installed && m.auth?.apiKey);
   $('#api-keys').replaceChildren(...mods.map((m) => {
-    const input = h('input', { type: 'password', placeholder: m.auth.apiKeyFormat || 'KEY,USER', autocomplete: 'off' });
     const st = sec.modules?.[m.abbr];
-    return h('div', { class: 'setting' }, h('span', {}, h('span', { class: 'mod-abbr' }, m.abbr), ` ${m.name} `, st ? h('span', { class: 'tagpill ok' }, st.encrypted ? 'đã lưu (mã hoá)' : 'đã lưu') : null),
+    const input = h('input', { type: 'password', placeholder: st ? 'Key mới (trống = giữ nguyên)' : (m.auth.apiKeyFormat || 'KEY,USER'),
+      title: st ? 'Nhập key mới để thay key đã lưu. Để trống thì key đã lưu được giữ nguyên.' : '', autocomplete: 'off' });
+    const save = async () => {
+      // an empty field never deletes the stored key: that is what "Xoá key" is for
+      if (!input.value.trim()) { toast(st ? 'Ô trống: key đã lưu được giữ nguyên.' : 'Nhập key trước khi lưu.', st ? '' : 'err'); return; }
+      try {
+        S.secrets = await L.secrets.set(m.abbr, input.value);
+        input.value = '';
+        renderApiKeys();
+        toast(`Đã lưu API key cho ${m.name}`, 'ok');
+      } catch (err) { toast(`Không lưu được key: ${errMsg(err)}`, 'err'); }
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+    const clear = async () => {
+      if (!window.confirm(`Xoá API key của ${m.name}? Key sẽ bị xoá khỏi máy và không khôi phục được.`)) return;
+      try {
+        S.secrets = await L.secrets.clear(m.abbr);
+        renderApiKeys();
+        toast(`Đã xoá API key của ${m.name}`, 'ok');
+      } catch (err) { toast(`Không xoá được key: ${errMsg(err)}`, 'err'); }
+    };
+    return h('div', { class: 'setting key-row' }, h('span', {}, h('span', { class: 'mod-abbr' }, m.abbr), ` ${m.name} `, st ? h('span', { class: 'tagpill ok' }, st.encrypted ? 'đã lưu (mã hoá)' : 'đã lưu') : null),
       h('span', { class: 'row' }, input,
-        h('button', { class: 'btn sm', onclick: async () => { S.secrets = await L.secrets.set(m.abbr, input.value); input.value = ''; renderApiKeys(); toast('Đã lưu API key', 'ok'); } }, 'Lưu'),
-        st ? h('button', { class: 'btn sm ghost', onclick: async () => { S.secrets = await L.secrets.set(m.abbr, ''); renderApiKeys(); } }, 'Xoá') : null));
+        h('button', { class: 'btn sm', onclick: save }, 'Lưu'),
+        st && canClear ? h('button', { class: 'btn sm ghost danger', onclick: clear }, 'Xoá key') : null));
+  }));
+}
+// Account tag limit per module (settings.search.tagLimits, 0 = module default): main passes it to the core as -tags_limit.
+// Shown for modules whose manifest declares a tag limit (syntax.maxTags), and always for Danbooru.
+function renderTagLimits() {
+  const limits = S.settings?.search?.tagLimits || {};
+  const mods = S.modules.filter((m) => m.installed && (m.syntax?.maxTags > 0 || m.abbr === 'db'));
+  $('#tag-limits').replaceChildren(...mods.map((m) => {
+    const def = m.syntax?.maxTags || (m.abbr === 'db' ? 2 : 0);
+    const input = h('input', { type: 'number', min: 0, max: 100, step: 1, class: 'tiny', value: Number(limits[m.abbr]) || 0, title: `0 = mặc định của module (${def})` });
+    input.addEventListener('change', async () => {
+      const n = Math.max(0, Math.min(100, Math.floor(Number(input.value) || 0)));
+      input.value = n;
+      try {
+        await saveSettings({ search: { tagLimits: { [m.abbr]: n } } });
+        toast(n ? `${m.name}: tối đa ${n} tag mỗi lần tìm` : `${m.name}: dùng giới hạn mặc định (${def} tag)`, 'ok');
+      } catch (err) { toast(`Không lưu được: ${errMsg(err)}`, 'err'); }
+    });
+    return h('div', { class: 'setting' },
+      h('span', {}, h('span', { class: 'mod-abbr' }, m.abbr), ` ${m.name} `, h('span', { class: 'muted' }, `(mặc định ${def})`)),
+      h('span', { class: 'row' }, input, h('span', { class: 'muted' }, 'tag')));
   }));
 }
 async function renderAbout() {
@@ -949,49 +1828,64 @@ async function renderAbout() {
 }
 
 // ---------------- log ----------------
+// S.logLines is the model (trimmed in batches); the <pre> is only touched while the log page is visible, otherwise
+// it is rebuilt once when the page is opened.
+const LOG_MAX = 3000;
+const LOG_SLACK = 500;
+const logView = createLogView($('#log'), LOG_MAX, LOG_SLACK);
+let logStale = false;
 function appendLog(source, text) {
-  S.logLines.push(`[${source}] ${text}`);
-  if (S.logLines.length > 3000) S.logLines.splice(0, S.logLines.length - 3000);
-  if ($('#page-log').classList.contains('active')) {
-    const el = $('#log');
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-    el.textContent = S.logLines.join('\n');
-    if (atBottom) el.scrollTop = el.scrollHeight;
-  }
+  const line = `[${source}] ${text}`;
+  S.logLines.push(line);
+  if (S.logLines.length > LOG_MAX + LOG_SLACK) S.logLines.splice(0, S.logLines.length - LOG_MAX);
+  if ($('#page-log').classList.contains('active')) logView.push([line]);
+  else logStale = true;
 }
-$('#log-clear').addEventListener('click', () => { S.logLines = []; $('#log').textContent = ''; });
-$$('#nav button[data-page="log"]').forEach((b) => b.addEventListener('click', () => { $('#log').textContent = S.logLines.join('\n'); }));
+function showLogPage() {
+  if (logStale) { logStale = false; logView.reset(S.logLines); } else logView.reveal();
+}
+$('#log-clear').addEventListener('click', () => { S.logLines = []; logStale = false; logView.clear(); });
 
 // ---------------- events from main ----------------
-L.on('sidecar:status', (st) => {
-  $('#core-dot').className = `dot ${st.ok ? 'ok' : 'err'}`;
-  $('#core-status').textContent = st.ok ? `Lõi sẵn sàng · ${st.info?.version || ''}` : `Lõi lỗi: ${st.error}`;
-  if (st.ok) { loadModules(); renderAbout(); warmupTags(S.module); }
-});
-L.on('log', (m) => appendLog(m.source, m.text));
-L.on('jobs:update', (job) => upsertJob(job));
-L.on('jobs:log', (m) => {
-  const j = S.jobs.get(m.id);
-  if (!j) return;
-  j.logTail = [...(j.logTail || []), m.text].slice(-200);
-  if (j.showLog) renderJobs();
-});
-L.on('sidecar:notify', ({ method, params }) => {
-  if (method === 'tags.updateProgress') {
-    const cell = $(`#tagupd-${params.module}`);
-    if (cell) cell.textContent = `đang tải… ${nf.format(params.count)} tag`;
-  } else if (method === 'tags.updateDone') {
-    toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
-    refreshTagStatus();
-  }
-});
-L.on('appearance:changed', (a) => applyAppearance(a));
+let coreOk = false;
+function onSidecarStatus(st) {
+  if (!st) return;
+  $('#core-dot').className = `dot ${st.ok ? 'ok' : st.error === 'starting' ? '' : 'err'}`;
+  $('#core-status').textContent = st.ok ? `Lõi sẵn sàng · ${st.info?.version || ''}`
+    : st.error === 'starting' ? 'Đang khởi động lõi…' : `Lõi lỗi: ${st.error}`;
+  if (st.ok && !coreOk) { loadModules(); renderAbout(); warmupTags(S.module); loadTagLists(); }
+  coreOk = !!st.ok;
+}
+function listen() {
+  L.on('sidecar:status', onSidecarStatus);
+  L.on('log', (m) => appendLog(m.source, m.text));
+  L.on('jobs:update', (job) => upsertJob(job));
+  L.on('jobs:log', (m) => appendJobLog(m.id, m.text));
+  L.on('sidecar:notify', ({ method, params }) => {
+    if (method === 'tags.updateProgress') {
+      const cell = $(`#tagupd-${params.module}`);
+      if (cell) cell.textContent = `đang tải… ${nf.format(params.count)} tag`;
+    } else if (method === 'app.notice') {
+      // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
+      toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');
+    } else if (method === 'tags.updateDone') {
+      toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
+      if (params.written) {
+        for (const k of [...resolveCache.keys()]) if (k.startsWith(`${params.module}\n`)) resolveCache.delete(k);
+        resolveHasList.delete(params.module);
+      }
+      refreshTagStatus();
+      loadTagLists();
+    }
+  });
+  L.on('appearance:changed', (a) => applyAppearance(a));
+}
 
 // files or links dropped on the window must not navigate the app away
 ['dragover', 'drop'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault()));
 
 // ---------------- boot ----------------
-(async function boot() {
+async function boot() {
   const r = await L.settings.get();
   S.settings = r.settings;
   S.secrets = r.secrets;
@@ -999,9 +1893,28 @@ L.on('appearance:changed', (a) => applyAppearance(a));
   applyAppearance(r.appearance);
   renderSettings();
   renderModuleButton();
+  $('#btn-related').hidden = !relatedSupported();
   await loadModules();
-  renderApiKeys();
   renderAbout().catch(() => {});
   try { renderJobs(); (await L.jobs.list()).forEach(upsertJob); } catch { /* ignore */ }
+  // the first status event may have been sent before this page loaded
+  try { onSidecarStatus(await L.sidecarStatus()); } catch { /* ignore */ }
   tagInput.focus();
-}());
+}
+function start() {
+  L = window.lustra;
+  listen();
+  boot();
+}
+// The preload bridge is defined before any page script runs, so in Electron start() runs synchronously and mock.js is
+// never fetched. In a plain browser (design work, UI tests) the mock bridge is loaded first.
+if (window.lustra) start();
+else if (/\bElectron\//.test(navigator.userAgent)) {
+  $('#core-dot').className = 'dot err';
+  $('#core-status').textContent = 'Lỗi: không có cầu nối tới tiến trình chính (preload)';
+} else {
+  const mock = document.createElement('script');
+  mock.src = 'mock.js';
+  mock.addEventListener('load', start);
+  document.head.append(mock);
+}
