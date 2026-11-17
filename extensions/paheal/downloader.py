@@ -82,7 +82,9 @@ class DownloaderRp(Downloader):
 
     def __init__(self) -> None:
         super().__init__()
-        self._base_cookies = {'ui-tnc-agreed': 'true', 'ui-image-zoom': 'both'}
+        # no 'ui-tnc-agreed' cookie: agreeing to the site terms is the user's decision (Ruxx set it silently).
+        # The terms dialog is client side only, listing pages are the same without it (checked 2026-11-17)
+        self._base_cookies = {'ui-image-zoom': 'both'}
 
     def _get_module_specific_default_headers(self) -> dict[str, str]:
         return {}
@@ -325,7 +327,7 @@ class DownloaderRp(Downloader):
             author_a = comment_div.find(class_='username')
             author: str = author_a.text
             body: str = comment_div.find('span', class_='bbcode').text.strip()
-            self.item_info_dict_per_task[full_item_id].comments.append(Comment(author, body))
+            self._item_info_for(full_item_id).comments.append(Comment(author, body))
 
     def extract_file_url(self, h: str) -> tuple[str, str]:
         fullid = f'{self._get_module_abbr_p()}{self._extract_id(h)}'

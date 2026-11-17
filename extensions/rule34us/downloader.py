@@ -265,7 +265,7 @@ class DownloaderRs(Downloader):
                     trace(f'ERROR: ProcItem: unable to retreive html for {item_id}!', True)
                     self._inc_proc_count()
                     return
-                else:
+                elif self.dump_comments:
                     self._extract_comments(raw_html.html, item_id)
 
             if self.download_mode == DownloadModes.SKIP:
@@ -296,21 +296,32 @@ class DownloaderRs(Downloader):
                 f'{self._get_sitename()}index.php?r=posts/index&q={tags}')
 
     def _extract_comments(self, raw_html: BeautifulSoup, item_id: str) -> None:
-        # find pagination first
-        full_item_id = f'{self._get_module_abbr_p() if self.add_filename_prefix else ""}{item_id}'
-        comment_page_as = raw_html.find_all('a', href=re_comment_page_rs)
-        cpages = max(int(a.text) for a in comment_page_as) if comment_page_as else 1
-        for cpage in range(cpages):
-            if cpage > 0:
-                raw_html = self.fetch_html(self._form_comments_search_address(item_id, cpage))
-            comment_divs = raw_html.find_all('div', class_='commentBox')
-            for comment_div in comment_divs:
+        """Ruxx crashed on posts with 2+ comment pages (fetch_html returns HTMLContent, not soup; page links are not all numbers)
+        and on items of earlier tasks (their info is in item_info_dict_all only)"""
+        full_item_id = self._item_idstring(item_id)
+        info = self.item_info_dict_all.get(full_item_id) or self.item_info_dict_per_task.get(full_item_id)
+        if info is None:
+            return
+        # other comment pages: follow pagination links as they are (no assumption about page numbering), skip duplicates
+        page_hrefs = list(dict.fromkeys(str(a.get('href')).replace('&amp;', '&') for a in raw_html.find_all('a', href=re_comment_page_rs)))
+        seen: set[tuple[str, str]] = set((c.author, c.body) for c in info.comments)
+        pages: list[BeautifulSoup] = [raw_html]
+        for href in page_hrefs:
+            page = self.fetch_html(f'{self._get_sitename()}index.php{href}')
+            if page is None:
+                trace(f'Warning (W2): unable to fetch comments page {href} for {item_id}', True)
+                continue
+            pages.append(page.html)
+        for page_html in pages:
+            for comment_div in page_html.find_all('div', class_='commentBox'):
                 author_a = comment_div.find('a', href=re_comment_a_rs)
-                author: str = author_a.text
+                author: str = author_a.text if author_a else ''
                 body: str = comment_div.text.strip()
                 if '  ' in body:
                     body = body[body.find('  ') + 2:]
-                self.item_info_dict_per_task[full_item_id].comments.append(Comment(author, body))
+                if (author, body) not in seen:
+                    seen.add((author, body))
+                    info.comments.append(Comment(author, body))
 
     @staticmethod
     def _extract_local_addr(raw: str) -> str:
