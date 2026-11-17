@@ -1,0 +1,9 @@
+# build context of tools/model_server/Dockerfile (docker build -f tools/model_server/Dockerfile .): the lustra package only
+*
+!lustra/
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+lustra/tests/
+lustra/release/
+**/__pycache__
+**/*.pyc
