@@ -6,7 +6,7 @@
 > - **Tầng 0** suy nhãn từ tag sẵn có. Không cần ML, không tải ảnh, ra mắt được ngay.
 > - **Tầng 1** là model thị giác chạy cục bộ, chỉ dùng cho post thiếu tag hoặc tag nhiễu.
 >
-> Cả hai tầng đứng sau một **blacklist an toàn cứng** (§4). Khi bộ lọc đang bật, blacklist không tắt được. Khi không lọc, app giữ hành vi như Ruxx gốc (**Quyết định 2026-11-16:** blacklist chỉ chạy khi bộ lọc được bật, không áp toàn app).
+> Cả hai tầng đứng sau một **blacklist an toàn cứng** (§4). Khi bộ lọc đang bật, blacklist không tắt được. Khi không lọc, app giữ hành vi như bản gốc (**Quyết định 2026-11-16:** blacklist chỉ chạy khi bộ lọc được bật, không áp toàn app).
 
 ## Mục lục
 
@@ -636,7 +636,7 @@ P0 phát hành được độc lập. P1 bắt đầu được ngay khi `safety.
 
 ## 8. Câu hỏi mở
 
-1. ~~**Blacklist an toàn toàn cục**~~: **đã chốt 2026-11-16, chỉ khi lọc.** `_filter_items_safety` chạy mỗi khi bật `-gender` (CLI, RPC, UI), cho mọi task kể cả parent; khi đang lọc thì không tắt được. Không bật `-gender` thì giữ hành vi như Ruxx gốc.
+1. ~~**Blacklist an toàn toàn cục**~~: **đã chốt 2026-11-16, chỉ khi lọc.** `_filter_items_safety` chạy mỗi khi bật `-gender` (CLI, RPC, UI), cho mọi task kể cả parent; khi đang lọc thì không tắt được. Không bật `-gender` thì giữ hành vi như bản gốc.
 2. **Đẩy luật tag lên server** cho site không giới hạn tag (rx): có làm ở P3+ như một tuỳ chọn để giảm số trang phải tải?
 3. **Host catalog model** và quy trình ký gói (SHA-256 trong catalog có đủ, hay cần chữ ký)?
 4. **Phân phối trọng số** train trên tranh có bản quyền: chỉ phát hành head và để người dùng tự tải backbone từ nguồn gốc, hay đóng gói cả hai?

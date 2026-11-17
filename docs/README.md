@@ -1,6 +1,6 @@
 # Tài liệu Lustra
 
-Giới thiệu, tải về và cách build ngắn gọn (tiếng Anh): [README của repo](../README.md). Các tài liệu dưới đây là bản đầy đủ, viết bằng tiếng Việt, trừ hai tài liệu kế thừa từ Ruxx (tiếng Anh).
+Giới thiệu, tải về và cách build ngắn gọn (tiếng Anh): [README của repo](../README.md). Các tài liệu dưới đây là bản đầy đủ, viết bằng tiếng Việt, trừ hai tài liệu kế thừa từ bản gốc (tiếng Anh).
 
 ## Sản phẩm
 | Tài liệu | Nội dung |
@@ -10,8 +10,8 @@ Giới thiệu, tải về và cách build ngắn gọn (tiếng Anh): [README c
 | [user-stories.md](user-stories.md) | User stories (US-01…US-22) |
 | [use-cases.md](use-cases.md) | Use cases (UC-01…UC-11) |
 | [acceptance-criteria.md](acceptance-criteria.md) | Acceptance criteria (AC-01…AC-20) và cách kiểm chứng |
-| [tag-syntax.md](tag-syntax.md) | Cú pháp truy vấn tag của lõi: wildcard, nhóm OR / AND, meta tag, tag đặc biệt theo site (tiếng Anh, từ README của Ruxx) |
-| [legacy-gui.md](legacy-gui.md) | Giao diện Tk cũ, dùng từ dòng lệnh, build file exe kiểu Ruxx (tiếng Anh, từ README của Ruxx) |
+| [tag-syntax.md](tag-syntax.md) | Cú pháp truy vấn tag của lõi: wildcard, nhóm OR / AND, meta tag, tag đặc biệt theo site (tiếng Anh, từ README gốc) |
+| [legacy-gui.md](legacy-gui.md) | Giao diện Tk cũ, dùng từ dòng lệnh, build file exe kiểu cũ (tiếng Anh, từ README gốc) |
 
 ## Vận hành và phát hành
 | Tài liệu | Nội dung |

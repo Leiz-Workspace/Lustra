@@ -20,7 +20,7 @@
   "build": {
     "appId": "app.lustra.desktop",
     "productName": "Lustra",
-    "copyright": "MIT License, Lustra contributors (derived from Ruxx by trickerer01)",
+    "copyright": "MIT License, Lustra contributors (based on the original work of trickerer01)",
     "artifactName": "lustra-${os}-${arch}_v${version}.${ext}",
     "directories": {
       "output": "dist",

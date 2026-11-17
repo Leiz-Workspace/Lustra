@@ -137,7 +137,7 @@ def _pick_local_required_tags(tags_list: list[str], limit: int, required_out: li
 
 
 MAX_SPLIT_TASKS = 64
-'''OR groups split into separate searches multiply: (a~b) (c~d) (e~f) = 8 searches. Ruxx had no cap (12 groups of 2 = 4096 searches)'''
+'''OR groups split into separate searches multiply: (a~b) (c~d) (e~f) = 8 searches. The original code had no cap (12 groups of 2 = 4096 searches)'''
 
 
 def split_tags_into_tasks(tag_groups_arr: Iterable[str], cc: str, sc: str, split_always: bool) -> list[str]:

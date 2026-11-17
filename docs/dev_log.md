@@ -4,11 +4,11 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 
 ---
 
-## 2026-11-16 — Khởi tạo Lustra 2.0 r1 (từ Ruxx 1.7 r951)
+## 2026-11-16 — Khởi tạo Lustra 2.0 r1 (từ bản gốc 1.7 r951)
 
 ### 1. Repo & đổi tên
-- Git cũ (chỉ có lịch sử upstream `trickerer01/Ruxx`, không có commit riêng) được **chuyển** sang `~/Workspace/_backup/Ruxx.git-2026-11-16`, không xoá. Thư mục đổi tên `Ruxx` → `Lustra`.
-- Đổi tên package `ruxx` → `lustra`, launcher `lustra.sh`/`lustra.cmd`, `__RUXX_DEBUG__` → `__LUSTRA_DEBUG__`, phiên bản `2.0 r1`.
+- Git cũ (chỉ có lịch sử của dự án gốc, không có commit riêng) được **chuyển** vào thư mục sao lưu trong `~/Workspace/_backup/`, không xoá. Thư mục dự án đổi tên thành `Lustra`.
+- Đổi tên package thành `lustra`, launcher `lustra.sh`/`lustra.cmd`, biến debug thành `__LUSTRA_DEBUG__`, phiên bản `2.0 r1`.
 - Giữ dòng bản quyền MIT gốc trong `LICENSE`, thêm dòng cho Lustra; README ghi rõ là bản phái sinh.
 - `.gitignore`: trước đây bỏ qua mọi `*.json` (sẽ làm mất `2tags/` và manifest), nay chỉ bỏ qua file autoconfig ở thư mục gốc (`/*.json`, `/*.cfg`).
 - `git init`, commit đầu, tạo nhánh `staging` và `develop`; công việc mới nằm trên `develop`. *(Sửa sau: nhánh đầu tiên được đặt nhầm là `main`, đã đổi thành `production` theo quy ước develop / staging / production, trong đó production là nhánh mặc định.)*
@@ -17,7 +17,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 | Lỗi | Sửa | Test |
 |---|---|---|
 | Autocomplete xếp theo `TagInfo` (loại tag trước, số post sau), nên tag META ít post lên đầu | Sắp theo `posts_count`; sắp lại khoá khi nạp | `test_autocomplete_ranks_by_posts_count` |
-| `-proxynodown` mất tác dụng từ Ruxx rev 413 (gộp `make_session`) | `make_session(for_download=True)` tôn trọng `ignore_proxy_dwn` | `test_download_without_proxy` |
+| `-proxynodown` mất tác dụng từ bản gốc rev 413 (gộp `make_session`) | `make_session(for_download=True)` tôn trọng `ignore_proxy_dwn` | `test_download_without_proxy` |
 | Lỗi Proxy/SSL không tính vào số lần retry, nên retry vô hạn | Đếm riêng, giới hạn `retries × 3` (`CONNECT_RETRIES_PROXY_MULT`) | thủ công |
 | 429 không đọc `Retry-After` | `parse_retry_after` (giây hoặc HTTP-date, tối đa 120 s), áp cho 429/503 | `test_retry_after` |
 | Trang challenge Cloudflare bị retry tới hết lượt | `is_cloudflare_challenge` → dừng ngay, bật cờ `cf_challenge_hit`, kèm hướng dẫn | `test_cloudflare_challenge` |
@@ -97,7 +97,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - settings v1/v2 vẫn giữ đúng bộ mặc định cũ được tự chuyển sang thông số mới (`settings.version` = 3). Ảnh nền tuỳ chọn vẫn phủ kín cửa sổ và không làm mờ.
 
 ### 7d. Quyết định sản phẩm: phạm vi blacklist an toàn
-- Chủ sản phẩm chốt: blacklist tag liên quan trẻ vị thành niên **chỉ chạy khi bật bộ lọc nội dung** (bộ lọc giới tính `-gender`), không áp toàn app. Khi không lọc, app giữ hành vi như Ruxx gốc: luật của từng site vẫn áp dụng, và post bị e621 ẩn vẫn luôn bị bỏ qua.
+- Chủ sản phẩm chốt: blacklist tag liên quan trẻ vị thành niên **chỉ chạy khi bật bộ lọc nội dung** (bộ lọc giới tính `-gender`), không áp toàn app. Khi không lọc, app giữ hành vi như bản gốc: luật của từng site vẫn áp dụng, và post bị e621 ẩn vẫn luôn bị bỏ qua.
 - Đã cập nhật các phần tương ứng: [gender-filter-model](plans/gender-filter-model.md) (D5, §4.1, §8.1); [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md) (QĐ5, G9, R9, M1, AC-EXT-04).
 - Khi đang lọc: danh sách không tắt được, và extension/AI không được gỡ hay nới danh sách.
 
@@ -350,10 +350,10 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Chưa kiểm:** thông báo hệ điều hành trên desktop thật (xvfb không có notification daemon).
 
 ### 7r. Đã tải, Preview đa phương tiện, lịch tự tải, bản mới extension, sửa bản nháp bằng AI — 2026-11-17
-- **Asset cũ của Ruxx:**
-  - Xoá `images/8_256.ico` và `images/8_32.ico` (icon cáo của Ruxx).
+- **Asset cũ của bản gốc:**
+  - Xoá `images/8_256.ico` và `images/8_32.ico` (icon cáo của bản gốc).
   - Bản build CLI dùng `images/lustra.ico` (icon mặt nạ cam ở 7 cỡ, 16–256 px).
-  - Icon cửa sổ GUI Tk (`IMG_PROC_LUSTRA_DATA`, trước là GIF của Ruxx) đổi sang icon Lustra 64 px.
+  - Icon cửa sổ GUI Tk (`IMG_PROC_LUSTRA_DATA`, trước là GIF của bản gốc) đổi sang icon Lustra 64 px.
   - Favicon từng site (`IMG_PROC_RX_DATA`…) giữ nguyên.
 - **Báo bản mới của extension:**
   - `ext.list` trả `catalogVersion` / `updateAvailable` (`version_newer`, so từng phần số).
@@ -584,9 +584,9 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Workflow Tests chạy lần đầu trên GitHub:** đạt trên Linux và Windows (Python 3.11–3.15), lỗi trên macOS ở hai test: `/var` → `/private/var` trong `test_dlindex`, OpenSSL của máy macOS không có `pkeyutl -rawin` (chỉ OpenSSL 3 có) trong `test_catalog_trust`. Sửa test (so `realpath`; bỏ qua khi `openssl pkeyutl -help` không có `-rawin`, lần sửa đầu chỉ nhận ra LibreSSL nên chưa đủ); `lustra/tests/` thêm vào danh sách không phát hành của `release.yml`.
 - **Tự kiểm trên CI:** `tools/check_selftest.py` đọc báo cáo self-test của app đã đóng gói. Chạy thử trên máy dev: AppImage và `.deb` (124 MB, gói `lustra-desktop`, mục `net`) build được, self-test của bản `linux-unpacked` đạt.
 
-### 7ad. README viết lại cho Lustra, tài liệu Ruxx chuyển vào docs, kiểm tra image trên ghcr — 2026-11-17
-- **README** (tiếng Anh, cùng bố cục với Mirrix): giới thiệu và tính năng, bảng Download theo tên file của release, ghi chú cài đặt (chưa ký số, AppArmor của `.deb`, thư mục dữ liệu), model server (bản chạy độc lập, Docker trên ghcr, GPU), dòng lệnh, phát triển, bố cục repo, nhánh và release, giấy phép kèm phần ủng hộ tác giả Ruxx. Ba ảnh chụp giao diện thật (`docs/images/`) chụp từ `mock.js` dưới xvfb bằng Electron của app (user agent bỏ `Electron/` để trang nạp mock; thumbnail là SVG trung tính, không có nội dung site).
-- **Tài liệu của Ruxx không bị bỏ:** phần cú pháp tag chuyển nguyên văn sang `docs/tag-syntax.md`; phần giao diện Tk, dùng từ dòng lệnh, build exe sang `docs/legacy-gui.md`. Đã kiểm hai điều README nói: `python -m lustra -module db -path … -- scenery sky -rating:e` được phân tích đúng (tag loại trừ sau `--`), và chạy không tham số thì mở giao diện Tk (`lustra_main`).
+### 7ad. README viết lại cho Lustra, tài liệu cũ chuyển vào docs, kiểm tra image trên ghcr — 2026-11-17
+- **README** (tiếng Anh, cùng bố cục với Mirrix): giới thiệu và tính năng, bảng Download theo tên file của release, ghi chú cài đặt (chưa ký số, AppArmor của `.deb`, thư mục dữ liệu), model server (bản chạy độc lập, Docker trên ghcr, GPU), dòng lệnh, phát triển, bố cục repo, nhánh và release, giấy phép kèm phần ủng hộ tác giả bản gốc. Ba ảnh chụp giao diện thật (`docs/images/`) chụp từ `mock.js` dưới xvfb bằng Electron của app (user agent bỏ `Electron/` để trang nạp mock; thumbnail là SVG trung tính, không có nội dung site).
+- **Tài liệu của bản gốc không bị bỏ:** phần cú pháp tag chuyển nguyên văn sang `docs/tag-syntax.md`; phần giao diện Tk, dùng từ dòng lệnh, build exe sang `docs/legacy-gui.md`. Đã kiểm hai điều README nói: `python -m lustra -module db -path … -- scenery sky -rating:e` được phân tích đúng (tag loại trừ sau `--`), và chạy không tham số thì mở giao diện Tk (`lustra_main`).
 - **Mục lục `docs/README.md`** chia lại theo sản phẩm / vận hành và phát hành / plan và báo cáo, thêm tài liệu mới.
 - **Image trên ghcr:** sau khi chủ repo báo đã đổi package sang công khai, kiểm từ máy không đăng nhập: registry vẫn từ chối cấp token kéo image (`authentication required`), trang package trả 404 và trang package của repo ghi 0 package công khai. Image chưa kéo được công khai lúc ghi mục này; `docs/operations.md` ghi cách đổi và cách kiểm.
 - **Image công khai (kiểm lại sau khi chủ repo đổi lần nữa):** từ máy đã `docker logout ghcr.io`, registry cấp token kéo ẩn danh; `docker pull ghcr.io/leiz-workspace/lustra-model-server:2.0.1` và `:latest` tải về cùng digest `sha256:99b00e3c…` (1,05 GB), manifest có `linux/amd64` và `linux/arm64`. Chạy image vừa kéo (token, model gắn chỉ đọc): server lên, ffmpeg 7.1.5 cho `/v1/frames`, icon app → `only_female` (1,3 s gồm nạp model), clip `testsrc` 8 khung → `unknown`, thiếu token bị từ chối.

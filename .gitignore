@@ -31,8 +31,8 @@ signing-key*
 !.env.example
 # tools and OS
 .ruff_cache/
-.claude/worktrees/
-.claude/settings.local.json
+# Claude Code: local skills, settings and worktrees, not part of the repository
+/.claude/
 .DS_Store
 Thumbs.db
 

@@ -2945,7 +2945,7 @@ async function renderAbout() {
     `Lustra desktop ${i.version} · Electron ${i.electron} · ${i.platform}`,
     `Lõi Python: ${i.sidecar ? `${i.sidecar.name} ${i.sidecar.version} (Python ${i.sidecar.python})` : 'chưa sẵn sàng'}`,
     `Python: ${i.python}`, `Dữ liệu: ${i.userData}`, `Mã nguồn: ${i.repo}`,
-    '', 'Lustra là bản phái sinh của Ruxx (github.com/trickerer01/Ruxx), giấy phép MIT.',
+    '', 'Lustra dựa trên mã nguồn gốc của trickerer01 (github.com/trickerer01), giấy phép MIT.',
   ].join('\n');
 }
 

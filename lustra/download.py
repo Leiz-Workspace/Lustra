@@ -82,7 +82,7 @@ ENV_STREAMING = 'LUSTRA_STREAMING'
 '''0 disables the streaming pipeline (debug / comparison)'''
 STREAM_BACKLOG = 64
 '''items queued for download beyond 4 per thread before scanning waits'''
-'''an empty / overloaded search page is retried this many times, then skipped (Ruxx retried forever)'''
+'''an empty / overloaded search page is retried this many times, then skipped (the original code retried forever)'''
 LINE_BREAKS_AT = 99 if sys.platform == PLATFORM_WINDOWS else 90
 BR = '=' * LINE_BREAKS_AT
 '''line breaker'''
@@ -169,7 +169,7 @@ class Downloader(DownloaderBase):
                 self.max_item_id = max(self.max_item_id, int(digits))
 
     def _process_item_safe(self, raw: str) -> None:
-        """A failing item is counted as failed, it does not abort the whole run (Ruxx killed every thread)"""
+        """A failing item is counted as failed, it does not abort the whole run (the original code killed every thread)"""
         self._item_tls.active = True
         self._item_tls.raw = raw
         with contextlib.suppress(Exception):
@@ -586,7 +586,7 @@ class Downloader(DownloaderBase):
 
     def _get_executor(self, kind: str) -> ThreadPoolExecutor:
         """'scan' (search pages), 'info' (item pages of modules without item info in listings) and 'dl' (files) executors live
-        for the whole run: worker threads and their keep-alive sessions are reused (Ruxx created a new pool per phase)"""
+        for the whole run: worker threads and their keep-alive sessions are reused (the original code created a new pool per phase)"""
         with self._executors_lock:
             ex = self._executors.get(kind)
             if ex is None:
@@ -603,7 +603,7 @@ class Downloader(DownloaderBase):
 
     def _run_parallel(self, kind: str, fn: Callable[..., Any], args_list: Iterable[tuple], *, ordered=False,
                       on_result: Callable[[Future], None] | None = None, window=0) -> None:
-        """Runs fn(*args) for every args on the executor 'kind' with at most 'window' calls queued (Ruxx queued everything at once:
+        """Runs fn(*args) for every args on the executor 'kind' with at most 'window' calls queued (the original code queued everything at once:
         100k items ~ 155 MB of pending objects). Cancel is checked every 0.25 s; queued calls are dropped on cancel.
         ordered: on_result gets futures in submission order (else in completion order)"""
         ex = self._get_executor(kind)
