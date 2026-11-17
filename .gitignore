@@ -2,7 +2,7 @@
 1venv/
 version_info.txt
 *.pyc
-# autoconfig files live in project root only (see README: ruxx/auto/settings/config)
+# autoconfig files of the legacy Tk GUI live in project root only (docs/legacy-gui.md: lustra/auto/settings/config)
 /*.cfg
 /*.json
 *.lnk
