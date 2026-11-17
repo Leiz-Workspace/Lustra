@@ -118,7 +118,11 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
   - Linux: giải nén vào `~/.local/share/lustra-model-server`, chép `lustra-model-server-bundle.service` (trong bản đóng gói, hoặc `tools/systemd/`) thành `~/.config/systemd/user/lustra-model-server.service`, rồi `systemctl --user daemon-reload && systemctl --user enable --now lustra-model-server`. Đã thử bản đóng gói dưới `systemd-run --user`.
   - macOS: `sh install-model-server.sh` trong thư mục bản đóng gói (LaunchAgent `local.lustra.model-server`, log `~/Library/Logs/lustra-model-server.log`); gỡ: `--uninstall`. Mới thử phần sinh plist trên Linux với `launchctl` giả; chưa chạy trên macOS.
   - Windows: `powershell -ExecutionPolicy Bypass -File install-model-server.ps1` trong thư mục bản đóng gói (Scheduled Task "Lustra model server" lúc đăng nhập, ẩn cửa sổ bằng `conhost.exe --headless`); gỡ: `-Uninstall`. Chưa chạy trên Windows.
-- **Docker** (máy này hoặc máy chủ; lắng nghe ngoài loopback bắt buộc có token):
+- **Image đã phát hành** (CPU, amd64 + arm64): `ghcr.io/leiz-workspace/lustra-model-server:<version>` và `:latest`, đăng bởi workflow release. Lắng nghe trong container là ngoài loopback nên cần token (nhập cùng token ở Cài đặt của app):
+  ```bash
+  docker run -d --name lustra-model --restart unless-stopped -e LUSTRA_GENDER_MODEL_TOKEN=<token> -p 127.0.0.1:8765:8765 -v lustra-model:/models ghcr.io/leiz-workspace/lustra-model-server:latest
+  ```
+- **Docker tự build** (máy này hoặc máy chủ; lắng nghe ngoài loopback bắt buộc có token):
   ```bash
   docker build -f tools/model_server/Dockerfile -t lustra-model-server .
   ```
@@ -240,10 +244,11 @@ LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests
   2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
   3. Model server chạy độc lập (tuỳ chọn, phát hành riêng với app): `python tools/build_model_server.py`, xem mục 3c.
 - **Release** (`.github/workflows/release.yml`, cùng cách làm với Mirrix). Tên file: `<app>-<os>-<arch>_v<version>.<ext>`.
-  - Push lên `staging`: build mọi nền tảng rồi đăng pre-release `v<version>-rc.<lượt chạy>`. Push lên `production`: đăng release `v<version>` (latest) bằng chính các file của bản rc mới nhất có `build-info.json` khớp cây commit (kiểm lại `SHA256SUMS.txt`, không build lại); không có bản rc khớp thì build lại tất cả. Pull request và chạy tay: chỉ build và tự kiểm Linux x64, không đăng gì. Push chỉ đổi `docs/`, `.github/`, `.claude/`, `lustra/tests/`, `*.md` sau khi `v<version>` đã ra thì không đăng gì.
+  - Push lên `staging`: build mọi nền tảng rồi đăng pre-release `v<version>-rc.<lượt chạy>`. Push lên `production`: đăng release `v<version>` (latest) bằng chính các file của bản rc mới nhất có `build-info.json` khớp cây commit (kiểm lại `SHA256SUMS.txt`, không build lại); không có bản rc khớp thì build lại tất cả. Pull request và chạy tay: chỉ build và tự kiểm Linux x64, không đăng gì. Push chỉ đổi `docs/`, `.github/`, `.claude/`, `lustra/tests/`, `.gitignore`, `*.md` ở gốc sau khi `v<version>` đã ra thì không đăng gì.
   - App: Linux x64 / arm64 (`lustra-linux-x86_64_v….AppImage`, `lustra-linux-amd64_v….deb`), Windows x64 / arm64 (`lustra-setup-<arch>_v….exe`), macOS arm64 / Intel (`lustra-mac-<arch>_v….dmg`, `.zip`, chưa ký). Lõi Python là bản PyInstaller nên mỗi kiến trúc build trên máy của nó (`ubuntu-24.04-arm`, `windows-11-arm`, `macos-15-intel`), không build chéo. Bản Linux: chuẩn hoá quyền file (umask 0022) và kiểm quyền từng mục trong `.deb`.
   - Mỗi bản app được tự kiểm bằng self-test của app (`LUSTRA_SELFTEST_QUICK=1`, kết quả đọc bằng `tools/check_selftest.py`): bắt buộc đạt trên mọi nền tảng (Linux chạy dưới xvfb; giới hạn 10 phút bằng Python vì macOS không có lệnh `timeout`).
   - Model server chạy độc lập: Linux x64 / arm64, Windows x64, macOS arm64 (CPU), Windows x64 DirectML. Image Docker CPU (amd64 + arm64) lên `ghcr.io/<owner>/lustra-model-server:<version>-rc.<n>`; release đổi tag bản rc thành `<version>` và `latest`. Image GPU không được đăng (thư viện NVIDIA có điều khoản riêng): người dùng tự build.
+  - Package `lustra-model-server` trên ghcr được tạo ở chế độ riêng tư: chủ tổ chức chuyển sang Public trong Package settings → Danger Zone → Change visibility (tổ chức phải cho phép package công khai). Kiểm tra từ máy không đăng nhập ghcr: `docker logout ghcr.io && docker pull ghcr.io/leiz-workspace/lustra-model-server:<version>`.
   - Mọi release có `SHA256SUMS.txt` và `build-info.json` (version, cây commit, commit, lượt chạy, image). Ghi chú phát hành lấy từ `docs/releases/v<version>.md` nếu có, nếu không thì GitHub tự tạo.
   - Đưa code đi: `develop` → `staging` (bản rc) → `production` (bản chính thức). Version nằm ở `app/package.json` và `pyproject.toml` (bước plan báo lỗi khi hai nơi khác nhau); version đã phát hành thì phải tăng mới đăng được bản rc mới.
   - App đã đóng gói dùng `<resources>/core/lustra-core`. Biến `LUSTRA_CORE` trỏ app dev sang một lõi đóng băng.
