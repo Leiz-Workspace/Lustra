@@ -11,7 +11,7 @@ import re
 from collections.abc import Collection, Iterable, Sequence
 from enum import IntEnum, auto
 
-from .defines import Mem
+from .defines import Mem, media_kind_by_ext
 
 __all__ = ('FileTypeFilter', 'sort_files_by_score', 'sort_files_by_size', 'sort_files_by_type')
 
@@ -44,7 +44,7 @@ def sort_files_by_type(files: Iterable[pathlib.Path], filter_type: FileTypeFilte
             if filter_type == FileTypeFilter.BY_EXTENSION:
                 sub_name = 'jpg' if ext == 'jpeg' else ext
             else:
-                sub_name = 'video' if ext in ('mp4', 'webm') else 'flash' if ext in ('swf',) else 'image'
+                sub_name = 'flash' if ext == 'swf' else media_kind_by_ext(ext)
             _move_file(full_path, base_path / sub_name, full_name)
             moved_count += 1
         except Exception:

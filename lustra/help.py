@@ -28,6 +28,7 @@ HELP_ARG_TAGS_LIMIT = ('Maximum tags per search allowed by your account, overrid
 HELP_ARG_REVERSE_DOWNLOAD_ORDER = 'Download in reverse order (highest id to lowest, unless changed by sort:X type tags)'
 HELP_ARG_SKIP_IMAGES = 'Skip all images'
 HELP_ARG_SKIP_VIDEOS = 'Skip all videos'
+HELP_ARG_SKIP_AUDIO = 'Skip all audio files (modules with audio media)'
 HELP_ARG_HIDE_PERSONAL_INFO = 'Mask API key, proxy and other sensitive info in logs'
 HELP_ARG_INCLUDE_PARCHI = 'Include all parent posts and all child posts (recursive, downloads whole chain, no filters)'
 HELP_ARG_GET_MAXID = 'Print maximum id (for module) and exit'
@@ -37,7 +38,15 @@ HELP_ARG_PREFER_LOWRES = 'Prefer low resolution images over the originals'
 HELP_ARG_PRESERVE_DATE = 'Preserve original modification date for saved files'
 HELP_ARG_GENDER = ('Keep only posts with these character gender labels (comma separated): '
                    'only_female,only_male,both,none,unknown. Labels come from post tags. Enables safety blacklist')
-HELP_ARG_GENDER_MODE = 'Gender labeling mode: \'tags\' (default) or \'model\' (not available yet)'
+HELP_ARG_GENDER_EXCLUDE = ('Drop posts with these character gender labels and keep all the others (comma separated, same labels '
+                           'as -gender, not all of them). Ex. robot -gender_exclude only_male: robots shown female only, both, '
+                           'with no character or unknown. With -gender: the labels of -gender minus these. Enables safety blacklist')
+HELP_ARG_GENDER_MODE = ('Gender labeling mode: \'tags\' (default) or \'model\': posts whose tags are not conclusive are looked at '
+                        'by an image model, through a model server (-gender_model_url) or in this process '
+                        '(pip install "lustra[model]", python -m lustra.gender_model install, ~380 MB)')
+HELP_ARG_GENDER_MODEL_URL = ('Address of the gender model server (python -m lustra.model_server), ex. http://127.0.0.1:8765. '
+                             'Default: environment variable LUSTRA_GENDER_MODEL_URL, else the model in this process')
+HELP_ARG_GENDER_MODEL_TOKEN = 'Token of the gender model server (default: environment variable LUSTRA_GENDER_MODEL_TOKEN)'
 HELP_ARG_GENDER_CONF = 'Minimal label confidence, lower confidence labels count as \'unknown\'. Default is \'medium\''
 HELP_ARG_GENDER_STRICT = 'Posts with futanari, trap or ambiguous characters never count as only_female / only_male'
 HELP_ARG_SKIP_KNOWN = ('Skip posts already in the local download index (same md5, or same module and id) whose file is still on disk. '
@@ -48,6 +57,7 @@ HELP_ARG_THREADS = 'Maximum simultaneous downloads (affects pages scan too), def
 HELP_ARG_PATH = 'Full path to destination folder, default is \'<current folder>\''
 HELP_ARG_SUBFOLDER_VIDEOS = 'Subfolder name to download videos into'
 HELP_ARG_SUBFOLDER_IMAGES = 'Subfolder name to download images into'
+HELP_ARG_SUBFOLDER_AUDIO = 'Subfolder name to download audio files into'
 HELP_ARG_PROXY = 'Proxy server address'
 HELP_ARG_NOPROXY = 'Ignore proxy during this run'
 HELP_ARG_PROXYNODOWN = 'Do not use proxy for downloads, only for search'

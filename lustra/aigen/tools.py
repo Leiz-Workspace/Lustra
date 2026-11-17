@@ -22,7 +22,7 @@ from ..extgen.fetch import FetchPolicyError, SafeFetcher, redact_url, strip_html
 from ..extgen.policy import check_manifest, check_source
 from ..extgen.sandbox import record
 from ..extgen.scaffold import create_draft, survey
-from ..extgen.templates import render_downloader
+from ..extgen.templates import HTML_EXAMPLE, render_downloader
 
 __all__ = ('TOOLS', 'ToolBox')
 
@@ -52,8 +52,24 @@ REFERENCES = {
     'template_moebooru': 'downloader.py template for moebooru_json sites (DownloaderJsonApi, count endpoint)',
     'template_philomena': 'downloader.py template for philomena_json sites (DownloaderJsonApi, tag syntax conversion)',
     'template_szurubooru': 'downloader.py template for szurubooru_json sites (DownloaderJsonApi, relative urls)',
+    'template_shimmie': 'downloader.py template for shimmie_api sites (DownloaderJsonApi parsing XML, file ext from file_name)',
+    'template_html': 'example for HTML listing pages: DownloaderJsonApi._parse with BeautifulSoup (adapt url and selectors)',
     'manifest_schema': 'JSON schema of manifest.json',
 }
+
+
+RULE_VI = {  # user facing reason of a refusal (the technical detail of the core stays in English after it)
+    'R1': 'Chỉ dùng được truy cập công khai hoặc API chính thức bằng khoá của bạn',
+    'R2': 'robots.txt của site không cho phép',
+    'R3': 'Điều khoản của site cấm tải tự động',
+    'R4': 'Đã chạm giới hạn tốc độ / số yêu cầu tới site',
+    'R5': 'Site có chống bot (Cloudflare…), Lustra không vượt qua',
+    'R10': 'Chỉ hỗ trợ site https, địa chỉ công khai, đúng host của site',
+}
+
+
+def refusal_text(rule: str, detail: str) -> str:
+    return f'{RULE_VI.get(rule, "Bị từ chối")} ({rule}). Chi tiết: {detail}'
 
 
 def _obj(props: dict, required: list[str] | None = None) -> dict:
@@ -131,8 +147,10 @@ def _base_hooks() -> str:
 def reference_text(name: str) -> str:
     if name == 'base':
         return _base_hooks()
+    if name == 'template_html':
+        return HTML_EXAMPLE
     if name.startswith('template_'):
-        engine = {'gelbooru': 'gelbooru_dapi'}.get(name[9:], f'{name[9:]}_json')
+        engine = {'gelbooru': 'gelbooru_dapi', 'shimmie': 'shimmie_api'}.get(name[9:], f'{name[9:]}_json')
         return render_downloader(engine, ext_id='example', abbr='ex', site='https://example.com/')
     files = {
         'danbooru': ['lustra/download_db.py', 'lustra/builtin_ext/danbooru/manifest.json'],

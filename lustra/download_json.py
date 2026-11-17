@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 from collections.abc import MutableSet
 from dataclasses import dataclass, field
 from multiprocessing.dummy import current_process
@@ -22,7 +23,7 @@ from urllib import parse as url_parse
 
 from bs4 import BeautifulSoup
 
-from .defines import FILE_NAME_FULL_MAX_LEN, FMT_DATE, KNOWN_EXTENSIONS_VID, DownloadModes, ItemInfo
+from .defines import FILE_NAME_FULL_MAX_LEN, FMT_DATE, KNOWN_EXTENSIONS_VID, DownloadModes, ItemInfo, MediaKind, media_kind_by_ext
 from .download import Downloader
 from .logger import trace
 from .network import LUSTRA_USER_AGENT, thread_exit
@@ -31,6 +32,7 @@ from .rex import re_item_info_part_xml, re_orig_file_link, re_tags_exclude_rx, r
 __all__ = ('DownloaderJsonApi', 'JsonPost')
 
 ITEM_INFO_FIELDS = {'file_url': 'ext', 'post_id': 'id', 'created_at': 'date'}
+re_ext_attr = re.compile(r' ext="([a-z\d]{2,5})"')
 TAG_NO_FILE_URL = 'json_file_unavailable'
 '''internal marker: the API gives no file url for this post (hidden / restricted / deleted): skipped, never rebuilt (rule R6)'''
 
@@ -52,6 +54,8 @@ class JsonPost:
     source: str = ''
     parent_id: str = ''
     has_children: bool = False
+    ext: str = ''
+    '''file extension when the file url has none (ex. shimmie '/_images/<hash>/<name>')'''
 
 
 def _attr(value: object) -> str:
@@ -65,7 +69,7 @@ class DownloaderJsonApi(Downloader):
     ABBR = ''
     ITEMS_PER_PAGE = 100
     MAX_PAGES = 1000
-    '''deepest page the API serves'''
+    '''deepest page the API serves, 0: no limit'''
     TAGS_CONCAT = '+'
     ACCEPT = 'application/json'
 
@@ -196,7 +200,8 @@ class DownloaderJsonApi(Downloader):
         return self._cursor_url(self.cursor_base_tags, cursor, ascending, self.ITEMS_PER_PAGE)
 
     def _prefer_id_cursor(self, count: int | None) -> bool:
-        return count is None or count > self._get_max_search_depth()
+        depth = self._get_max_search_depth()
+        return count is None or 0 < depth < count
 
     def _cursor_first_page_ok(self, ids: list[int], ascending: bool) -> bool:
         return ids == sorted(ids, reverse=not ascending)  # the site really sorted by id
@@ -210,6 +215,7 @@ class DownloaderJsonApi(Downloader):
     # ----- search
 
     def _parse(self, raw: bytes) -> Any:
+        """a search page as data for _posts / _count: json by default; override for XML or HTML listings (None: unreadable)"""
         try:
             return json.loads(raw)
         except ValueError:
@@ -249,9 +255,10 @@ class DownloaderJsonApi(Downloader):
             return len(posts)
         # no count: binary search for the last non-empty page (~log2(MAX_PAGES) requests)
         trace(f'Info: [{self.ABBR.upper()}] post count is unavailable, looking for the last page...')
-        lo, hi = 0, self.MAX_PAGES - 1
+        max_pages = self.MAX_PAGES if self.MAX_PAGES > 0 else 1000
+        lo, hi = 0, max_pages - 1
         if self._page_len(hi, tries) >= per_page:
-            return self.MAX_PAGES * per_page
+            return max_pages * per_page
         while hi - lo > 1:  # page lo is full, page hi is not
             mid = (lo + hi) // 2
             if self._page_len(mid, tries) >= per_page:
@@ -277,17 +284,21 @@ class DownloaderJsonApi(Downloader):
     def _item_string(self, post: JsonPost) -> str:
         tags = [str(t).strip().replace(' ', '_') for t in post.tags if str(t).strip()]
         furl = self._absolute(post.file_url)
-        surl = self._absolute(post.sample_url) or furl
-        purl = self._absolute(post.preview_url) or surl
+        audio = media_kind_by_ext(self._file_ext(furl) or str(post.ext)) == MediaKind.AUDIO
+        # an audio file is never a sample / thumbnail: without a cover image the preview shows a placeholder
+        surl = self._absolute(post.sample_url) or ('' if audio else furl)
+        purl = self._absolute(post.preview_url) or ('' if audio else surl)
         if not furl:
             tags.append(TAG_NO_FILE_URL)
             furl = surl = purl = f'{self.SITE}#unavailable.none'
+        ext = str(post.ext or '').lower().lstrip('.')
+        ext_attr = f' ext="{ext}"' if ext and furl and not self._file_ext(furl) and re.fullmatch(r'[a-z\d]{2,5}', ext) else ''
         created = post.created_at
         if isinstance(created, (int, float)) or (isinstance(created, str) and created.isdigit()):
             created = datetime.datetime.fromtimestamp(int(created), datetime.UTC).isoformat()
         return (
             f'<post_id="{_attr(post.id)}" height="{int(post.height or 0)}" width="{int(post.width or 0)}" md5="{_attr(post.md5)}" '
-            f'file_url="{_attr(furl)}" sample_url="{_attr(surl)}" preview_url="{_attr(purl)}" created_at="{_attr(created)}" '
+            f'file_url="{_attr(furl)}"{ext_attr} sample_url="{_attr(surl)}" preview_url="{_attr(purl)}" created_at="{_attr(created)}" '
             f'score="{_attr(post.score or 0)}" has_children="{str(bool(post.has_children)).lower()}" '
             f'parent_id="{_attr(post.parent_id)}" rating="{_attr(post.rating)}" source="{_attr(post.source)}" '
             f'tags="{_attr(" ".join(tags))}">'
@@ -312,7 +323,9 @@ class DownloaderJsonApi(Downloader):
 
     def _extract_file_url(self, h: str) -> tuple[str, str]:
         if m := re_orig_file_link.search(h):
-            return m.group(1), self._file_ext(m.group(1))
+            url = m.group(1)
+            ext = self._file_ext(url) or ((e := re_ext_attr.search(h)) and e.group(1)) or ''
+            return url, ext
         return '', ''
 
     def _extract_sample_url(self, h: str) -> tuple[str, str]:
@@ -324,6 +337,9 @@ class DownloaderJsonApi(Downloader):
 
     def _is_video(self, h: str) -> bool:
         return self._extract_file_url(h)[1] in KNOWN_EXTENSIONS_VID
+
+    def _media_kind(self, h: str) -> str:
+        return media_kind_by_ext(self._extract_file_url(h)[1])
 
     def _extract_post_date(self, raw: str) -> str:
         try:
@@ -357,10 +373,10 @@ class DownloaderJsonApi(Downloader):
             if self.is_killed():
                 return item_info
             for part in re_item_info_part_xml.findall(item):
-                name, value = tuple(str(part).split('=', 1))
-                name = ITEM_INFO_FIELDS.get(name, name)
-                if name == 'ext':
-                    value = f'"{self._file_ext(value.strip(chr(34)))}"'
+                field_name, value = tuple(str(part).split('=', 1))
+                name = ITEM_INFO_FIELDS.get(field_name, field_name)
+                if field_name == 'file_url':  # extension of the url, or the explicit ext="" attribute of the item
+                    value = f'"{self._extract_file_url(item)[1]}"'
                 elif name == 'date':
                     value = self._extract_post_date(item)
                 if name in item_info.__slots__:
@@ -373,8 +389,10 @@ class DownloaderJsonApi(Downloader):
     # ----- download
 
     def _send_to_download(self, raw: str, item_id: str, is_video: bool) -> None:
-        address, fmt = self._get_video_address(raw) if is_video else self._get_image_address(raw)
-        subfolder = self.subfolder_vid if is_video else self.subfolder_img
+        kind = self._media_kind(raw)
+        # audio: always the original file (a 'sample' of an audio post is usually its cover image)
+        address, fmt = self._get_video_address(raw) if kind != MediaKind.IMAGE else self._get_image_address(raw)
+        subfolder = self._subfolder_for(kind)
         hint_maxlen = FILE_NAME_FULL_MAX_LEN - (len(self.dest_base_s.as_posix()) + len(item_id) + 1 + len(fmt))
         self._download(address, item_id, self.dest_base_s / subfolder / f'{self._try_append_extra_info(item_id, hint_maxlen)}.{fmt}')
 

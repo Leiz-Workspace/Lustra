@@ -9,8 +9,10 @@ Run: python -m unittest lustra.tests.test_gender
 #
 
 import json
+import os
 import pathlib
 import tempfile
+import unittest
 from multiprocessing.dummy import current_process
 from unittest import TestCase, mock
 
@@ -193,6 +195,96 @@ class GenderPipelineTests(TestCase):
             self.assertEqual((H, True), (dwn.gender_min_conf, dwn.gender_strict))
         with self.assertRaises(SystemExit):
             prepare_arglist(['-module', 'db', '-gender', 'girls_only', 'x'])
+
+    def test_model_verdicts_from_predicted_tags(self) -> None:
+        from lustra.gender_model import classify
+        v = classify({'1girl': 0.97, 'solo': 0.93, 'long_hair': 0.8})
+        self.assertEqual(('only_female', H), (str(v.result.label), v.result.conf))
+        self.assertEqual('model', v.result.source)
+        self.assertEqual(M_, classify({'1girl': 0.7, 'solo': 0.9}).result.conf)  # weakest evidence 0.70 -> medium
+        self.assertEqual(M_, classify({'1girl': 0.97, 'solo': 0.93}, video=True).result.conf)  # one frame of a video
+        self.assertEqual('both', str(classify({'1girl': 0.9, '1boy': 0.9, 'hetero': 0.8}).result.label))
+        self.assertEqual('none', str(classify({'no_humans': 0.95, 'scenery': 0.9}).result.label))
+        self.assertEqual('loli', classify({'1girl': 0.9, 'solo': 0.9, 'loli': 0.2}).safety_tag)  # gate at 0.15
+        self.assertEqual('', classify({'1girl': 0.9, 'solo': 0.9, 'loli': 0.1}).safety_tag)
+        photo = classify({'1girl': 0.95, 'solo': 0.95, 'photo_(medium)': 0.9, 'realistic': 0.9})
+        self.assertEqual(('unknown', True), (str(photo.result.label), photo.real))
+
+    def test_model_combines_with_tags(self) -> None:
+        from lustra.gender import GenderLabel as GL
+        from lustra.gender import GenderResult as GR
+        from lustra.gender_model import combine, needs_model
+        tag_high = GR(GL.ONLY_MALE, H)
+        tag_low = GR(GL.ONLY_FEMALE, L_)
+        unknown = GR(GL.UNKNOWN, None)
+        model_f = GR(GL.ONLY_FEMALE, H, source='model')
+        self.assertFalse(needs_model(tag_high, M_))
+        self.assertTrue(needs_model(tag_low, M_) and needs_model(unknown, M_))
+        self.assertFalse(needs_model(GR(GL.UNKNOWN, None, frozenset({'real'})), M_))  # photos of real people: no model
+        self.assertIs(tag_high, combine(tag_high, model_f, M_))  # confident tags win, the model is not used
+        agree = combine(tag_low, model_f, M_)
+        self.assertEqual((GL.ONLY_FEMALE, H, 'tags+model'), (agree.label, agree.conf, agree.source))
+        self.assertEqual(GL.UNKNOWN, combine(GR(GL.ONLY_MALE, L_), model_f, M_).label)  # disagreement: unknown
+        self.assertEqual((GL.ONLY_FEMALE, 'model'), (combine(unknown, model_f, M_).label, combine(unknown, model_f, M_).source))
+        self.assertEqual(GL.UNKNOWN, combine(GR(GL.UNKNOWN, None, frozenset({'trap'})), model_f, M_).label)  # never trap -> female
+
+    def test_model_in_the_download_filter(self) -> None:
+        from lustra.gender import GenderLabel as GL
+        from lustra.gender import GenderResult as GR
+        from lustra.gender_model import ModelVerdict
+        with _make_downloader(ProcModule.DB) as dwn:
+            me = current_process()
+            me.killed = False
+            dwn.reset_root_thread(me)
+            dwn.no_conflict_delay = True
+            dwn._parse_args(prepare_arglist(['-module', 'db', '-gender', 'only_female', 'x']), False)
+            dwn.gender_mode = 'model'
+            posts = _db_posts_json()
+            dwn.items_raw_per_task = dwn._get_all_post_tags(posts)
+            dwn._extract_cur_task_infos(set())
+            ids = [dwn._extract_id(h) for h in dwn.items_raw_per_task]
+            unknown_ids = [i for i in ids if str(infer_from_tags(dwn.item_info_dict_per_task[i].tags.split(), rules_for_module('db')).label) == 'unknown']
+            self.assertTrue(unknown_ids, 'the fixture needs posts without gender tags')
+            seen: list[list[str]] = []
+
+            def fake_verdicts(_dwn, items):
+                seen.append([i for i, _ in items])
+                return {unknown_ids[0]: ModelVerdict(GR(GL.ONLY_FEMALE, H, source='model')),
+                        **({unknown_ids[1]: ModelVerdict(GR(GL.ONLY_FEMALE, H, source='model'), safety_tag='loli')} if len(unknown_ids) > 1 else {})}
+            with mock.patch('lustra.gender_model.verdicts_for', fake_verdicts):
+                dwn._filter_items_by_gender(set())
+            self.assertEqual(set(unknown_ids), set(seen[0]))  # only posts without conclusive tags go to the model
+            kept = {dwn._extract_id(h) for h in dwn.items_raw_per_task}
+            self.assertIn(unknown_ids[0], kept)
+            self.assertEqual('model', dwn.gender_results[unknown_ids[0]].source)
+            if len(unknown_ids) > 1:
+                self.assertNotIn(unknown_ids[1], kept)
+                self.assertEqual(1, dwn.safety_blocked_count)
+
+    @unittest.skipUnless(os.environ.get('LUSTRA_GENDER_MODEL_DIR'), 'real model: set LUSTRA_GENDER_MODEL_DIR to a folder with model.onnx')
+    def test_real_model_on_the_app_icon(self) -> None:
+        from lustra.gender_model import GenderTagger, classify
+        icon = (pathlib.Path(__file__).resolve().parents[2] / 'app/assets/icons/full-mask-orange.png').read_bytes()
+        probs = GenderTagger.get().predict(icon)
+        self.assertGreater(probs.get('1girl', 0), 0.5, sorted(probs.items(), key=lambda x: -x[1])[:10])
+        self.assertEqual('only_female', str(classify(probs).result.label))
+
+    def test_exclude_labels(self) -> None:
+        # 'robot, no male only': every label but only_male is kept (none / unknown included)
+        with _make_downloader(ProcModule.DB) as dwn:
+            me = current_process()
+            me.killed = False
+            dwn.reset_root_thread(me)
+            dwn.no_conflict_delay = True
+            dwn._parse_args(prepare_arglist(['-module', 'db', '-gender_exclude', 'only_male', 'robot']), False)
+            self.assertEqual(frozenset({'only_female', 'both', 'none', 'unknown'}), dwn.gender_select)
+        with _make_downloader(ProcModule.DB) as dwn:
+            dwn.reset_root_thread(me)
+            dwn.no_conflict_delay = True
+            dwn._parse_args(prepare_arglist(['-module', 'db', '-gender', 'only_female,only_male,both', '-gender_exclude', 'only_male', 'robot']), False)
+            self.assertEqual(frozenset({'only_female', 'both'}), dwn.gender_select)
+        with self.assertRaises(SystemExit):  # nothing would be left
+            prepare_arglist(['-module', 'db', '-gender_exclude', 'only_female,only_male,both,none,unknown', 'x'])
 
     def test_preview_never_returns_blocked_posts(self) -> None:  # AC-S02
         from lustra import server

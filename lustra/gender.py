@@ -56,10 +56,12 @@ class GenderResult:
     flags: frozenset[str] = frozenset()
     evidence: tuple[str, ...] = ()
     conflict: bool = False
+    source: str = 'tags'
+    '''tags | model | tags+model (lustra/gender_model.py)'''
 
     def as_dict(self) -> dict:
         return {'label': str(self.label), 'conf': self.conf.name.lower() if self.conf else None, 'flags': sorted(self.flags),
-                'evidence': list(self.evidence), 'conflict': self.conflict, 'source': 'tags'}
+                'evidence': list(self.evidence), 'conflict': self.conflict, 'source': self.source}
 
 
 @dataclass

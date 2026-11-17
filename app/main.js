@@ -5,7 +5,7 @@
 'use strict';
 
 const {
-  app, BrowserWindow, ipcMain, dialog, shell, nativeImage, protocol, net, safeStorage, session, Menu,
+  app, BrowserWindow, ipcMain, dialog, shell, nativeImage, protocol, net, safeStorage, session, Menu, Notification,
 } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -59,18 +59,18 @@ const DEFAULT_SETTINGS = {
     background: { mode: 'icon', image: '', blur: 4, opacity: 0.9, dim: 0.18 },
   },
   search: {
-    module: 'rx', autocomplete: true, previewOnSearch: true, safePreview: false,
+    module: 'rx', autocomplete: true, previewOnSearch: true, safePreview: false, filtersOpen: true,
     tagLimits: {}, // abbr -> max tags per search of the user's account (0 / missing = module default)
     history: [], // [{module, tags, at}] newest first
     saved: [], // [{name, module, tags, at}]
   },
   download: {
-    path: path.join(os.homedir(), 'Downloads', 'Lustra'), threads: 4, images: true, videos: true, videoFormat: '',
-    gender: { select: [], conf: 'medium', strict: false },
+    path: path.join(os.homedir(), 'Downloads', 'Lustra'), threads: 4, images: true, videos: true, audio: true, videoFormat: '',
+    gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags' }, // op 'exclude': the picked labels are dropped; mode 'model': image model
     lowRes: false, prefix: true, appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false,
     skipKnown: false, // -skip_known: skip posts found in the local download index (core lustra/dlindex.py)
     subfolderPerQuery: false, dumpTags: false, dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run',
-    warnNonEmpty: true, maxConcurrentJobs: 1,
+    warnNonEmpty: true, maxConcurrentJobs: 1, notify: true,
   },
   connection: {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
@@ -78,6 +78,9 @@ const DEFAULT_SETTINGS = {
   tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {} },
   advanced: { pythonPath: '', verbose: false, catalogUrl: '' },
   ai: { model: 'claude-opus-5-5', maxUsd: 2 }, // extension generator (the Claude API key itself is a secret, see AI_SECRET)
+  // gender image model: runs in a model server (python -m lustra.model_server), the app only calls its API (token: MODEL_SECRET).
+  // enabled: the user turned it on (the renderer checks the server's GPU / VRAM first); off: jobs filter by tags only
+  genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
   window: { width: 1360, height: 860 },
 };
 
@@ -117,6 +120,8 @@ const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArr
 const RE_EXT_ID = /^[a-z][a-z0-9_-]{1,31}$/;
 const RE_SHA256 = /^[0-9a-fA-F]{64}$/;
 const AI_SECRET = '@anthropic'; // secrets key of the Claude API key: never an extension abbr (those match RE_ABBR)
+const MODEL_SECRET = '@gendermodel'; // token of the gender model server
+const RE_MODEL_URL = /^https?:\/\/[^\s/?#@]+(\/[^\s?#]*)?$/; // the core checks the rest (plain http only on this computer / LAN)
 const RE_GEN_SESSION = /^\d{8}-\d{6}-[0-9a-f]{6}$/; // extension generator session folder (lustra/aigen/session.py)
 const GEN_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5'];
 const approvedPaths = new Set(); // files picked by the user through native dialogs (renderer cannot invent paths)
@@ -164,7 +169,7 @@ function sanitizeSecrets(obj) {
   const out = {};
   if (!isPlainObject(obj)) return out;
   for (const [k, v] of Object.entries(obj)) {
-    if (!(RE_ABBR.test(k) || k === AI_SECRET) || !isPlainObject(v)) continue;
+    if (!(RE_ABBR.test(k) || k === AI_SECRET || k === MODEL_SECRET) || !isPlainObject(v)) continue;
     if (typeof v.enc === 'string' && v.enc) out[k] = { enc: v.enc };
     else if (k === AI_SECRET) continue; // the Claude API key is only ever stored encrypted
     else if (typeof v.plain === 'string' && v.plain) out[k] = { plain: v.plain };
@@ -246,7 +251,8 @@ function sanitizeQueryList(list, max, named) {
     const item = { module: e.module, tags: e.tags, at: Math.floor(e.at) };
     if (named) {
       if (typeof e.name !== 'string') continue;
-      out.push({ name: e.name.slice(0, SAVED_NAME_MAX), ...item });
+      const auto = sanitizeAuto(e.auto);
+      out.push({ name: e.name.slice(0, SAVED_NAME_MAX), ...item, ...(auto ? { auto } : {}) });
     } else {
       const key = `${e.module}\n${e.tags}`;
       if (seen.has(key)) continue;
@@ -255,6 +261,114 @@ function sanitizeQueryList(list, max, named) {
     }
   }
   return out;
+}
+
+// ---------- saved queries downloaded again on a schedule (only newer posts) ----------
+const AUTO_EVERY_HOURS = [6, 12, 24, 72, 168];
+const AUTO_CHECK_MS = 5 * 60 * 1000;
+const autoKeyOf = (e) => `${e.module}\n${e.tags}`;
+
+function sanitizeAuto(a) {
+  if (!isPlainObject(a) || !AUTO_EVERY_HOURS.includes(a.every)) return null;
+  const num = (v) => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+  return {
+    every: a.every, maxId: num(a.maxId), lastRun: num(a.lastRun), lastCount: num(a.lastCount),
+    lastStatus: ['', 'baseline', 'running', 'done', 'failed', 'cancelled'].includes(a.lastStatus) ? a.lastStatus : '',
+    lastError: typeof a.lastError === 'string' ? a.lastError.slice(0, 200) : '',
+  };
+}
+
+function mergeAutoRuntime(incoming) {
+  // the renderer writes the whole saved list from its copy: main owns the run fields (last run, max id, status)
+  const current = new Map((settings.search.saved || []).map((e) => [autoKeyOf(e), e.auto]));
+  for (const e of incoming) {
+    const cur = current.get(autoKeyOf(e));
+    if (e.auto && cur) Object.assign(e.auto, { maxId: cur.maxId, lastRun: cur.lastRun, lastCount: cur.lastCount, lastStatus: cur.lastStatus, lastError: cur.lastError });
+  }
+}
+
+function coreMaxId(module) {
+  // highest post id of the website right now (lustra -get_maxid): the start point of "only posts newer than today"
+  return new Promise((resolve, reject) => {
+    connectionArgs(module).then((secretArgs) => {
+      const proc = spawnCore('cli', ['-module', module, '-get_maxid'], { LUSTRA_IPC: '1', LUSTRA_SECRET_ARGS: JSON.stringify(secretArgs) });
+      let maxId = 0;
+      let error = '';
+      const timer = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } }, 90000);
+      readline.createInterface({ input: proc.stdout }).on('line', (line) => {
+        if (!line.startsWith(PROGRESS_PREFIX)) return;
+        try {
+          const p = JSON.parse(line.slice(PROGRESS_PREFIX.length));
+          if (p.stateName === 'DONE') { maxId = Number(p.maxId) || 0; error = p.error || ''; }
+        } catch { /* ignore */ }
+      });
+      proc.stdin.end();
+      proc.on('error', (e) => { clearTimeout(timer); reject(e); });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        if (maxId > 0) resolve(maxId);
+        else reject(new Error(error || 'không lấy được id mới nhất của website'));
+      });
+    }, reject);
+  });
+}
+
+async function setSavedAuto(key, every, from) {
+  const e = (settings.search.saved || []).find((x) => autoKeyOf(x) === key);
+  if (!e) throw new Error('không tìm thấy truy vấn đã lưu');
+  if (!every) {
+    delete e.auto;
+  } else {
+    if (!AUTO_EVERY_HOURS.includes(every)) throw new Error('chu kỳ không hợp lệ');
+    if (e.auto) e.auto.every = every; // keeps where it stopped
+    else if (from === 'now') e.auto = sanitizeAuto({ every, maxId: await coreMaxId(e.module), lastRun: Date.now(), lastStatus: 'baseline' });
+    else e.auto = sanitizeAuto({ every, maxId: 0, lastRun: 0 }); // first run: everything that matches (files already downloaded are skipped)
+  }
+  saveSettings();
+  setTimeout(() => runDueSaved().catch(() => {}), 2000);
+  return { settings, appearance: appearanceState(), secrets: secretsStatus() };
+}
+
+let autoRunning = false;
+async function runDueSaved() {
+  if (autoRunning || jobs.closing || process.env.LUSTRA_SELFTEST_DIR) return;
+  autoRunning = true;
+  try {
+    const now = Date.now();
+    let modules = null;
+    for (const e of settings.search.saved || []) {
+      const a = e.auto;
+      if (!a?.every || now - a.lastRun < a.every * 3600e3) continue;
+      if (jobs.active().some((j) => j.autoKey === autoKeyOf(e))) continue;
+      try {
+        modules = modules || await sidecar.call('ext.list', {});
+        const info = modules.find((m) => m.abbr === e.module && m.installed);
+        if (!info) throw new Error(`module ${e.module} chưa được cài`);
+        // only newer posts: 'id:>N' where the site uses ':' metatags, and files already in the download index are skipped anyway
+        const idFilter = a.maxId > 0 && (info.syntax?.idSep || ':') === ':' ? ` id:>${a.maxId}` : '';
+        await jobs.start({ module: e.module, tags: `${e.tags}${idFilter}`, label: `Tự cập nhật: ${e.name}`, path: settings.download.path,
+          options: { skipKnown: true }, autoKey: autoKeyOf(e), allowDuplicate: false });
+        Object.assign(a, { lastRun: now, lastStatus: 'running', lastError: '' });
+      } catch (err) {
+        Object.assign(a, { lastRun: now, lastStatus: 'failed', lastError: String(err.message || err).slice(0, 200) });
+      }
+      saveSettings();
+    }
+  } finally {
+    autoRunning = false;
+  }
+}
+
+function autoJobFinished(job) {
+  const e = (settings.search.saved || []).find((x) => autoKeyOf(x) === job.autoKey);
+  if (!e?.auto) return;
+  const p = job.progress || {};
+  if (job.status === 'done') {
+    Object.assign(e.auto, { lastStatus: 'done', lastCount: Number(p.success) || 0, lastError: '', maxId: Math.max(e.auto.maxId, Number(p.maxId) || 0) });
+  } else {
+    Object.assign(e.auto, { lastStatus: job.status === 'cancelled' ? 'cancelled' : 'failed', lastError: String(job.error || '').slice(0, 200) });
+  }
+  saveSettings();
 }
 
 function sanitizeTagLimits(obj) {
@@ -308,6 +422,17 @@ function sanitizeSettings() {
   settings.connection.cookies = normalizeHttpMap(settings.connection.cookies, 'Cookie', false);
   if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
   settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
+  settings.genderModel.url = sanitizeModelUrl(settings.genderModel.url) ?? DEFAULT_SETTINGS.genderModel.url;
+  settings.genderModel.enabled = settings.genderModel.enabled === true;
+}
+
+// the image model is used only when it is turned on and has an address; otherwise the gender filter goes by tags
+const genderModelOn = () => settings.genderModel.enabled === true && Boolean(settings.genderModel.url);
+
+function sanitizeModelUrl(u) {
+  // '' = no model server: the "tags + model" gender mode is off; null = invalid
+  if (u === '') return '';
+  return typeof u === 'string' && u.length <= 300 && RE_MODEL_URL.test(u.trim()) ? u.trim().replace(/\/+$/, '') : null;
 }
 
 function clampUsd(v, fallback) {
@@ -469,6 +594,36 @@ async function getSecret(module) {
   }
 }
 
+// gender model server token: never sent to the renderer; given to the core as a secret argument (sidecar rpc params, job env)
+function modelTokenStatus() {
+  const s = secrets[MODEL_SECRET];
+  return { set: Boolean(s), encrypted: Boolean(s?.enc), encryption: encryptionAvailable };
+}
+
+async function setModelToken(value) {
+  value = typeof value === 'string' ? value.trim() : '';
+  if (!value) return modelTokenStatus(); // an empty field never deletes the token: clearModelToken does that
+  if (!/^[\x21-\x7e]{8,256}$/.test(value)) throw new Error('token: 8–256 ký tự ASCII, không có dấu cách');
+  if (encryptionAvailable) secrets[MODEL_SECRET] = { enc: (await safeStorage.encryptStringAsync(value)).toString('base64') };
+  else secrets[MODEL_SECRET] = { plain: value }; // no OS keyring: plain text in the 0600 settings file (reported to the UI)
+  saveSettings();
+  return modelTokenStatus();
+}
+
+function clearModelToken() {
+  if (Object.hasOwn(secrets, MODEL_SECRET)) {
+    delete secrets[MODEL_SECRET];
+    saveSettings();
+  }
+  return modelTokenStatus();
+}
+
+async function genderSecretArgs(g) {
+  if (g?.mode !== 'model' || !genderModelOn()) return [];
+  const token = await getSecret(MODEL_SECRET);
+  return token ? ['-gender_model_token', token] : [];
+}
+
 // ---------- extension generator (lustra.aigen worker) ----------
 // A session turns a website link into a draft folder (manifest.json, downloader.py, recorded test fixtures, report.json) under
 // <userData>/extgen/drafts/<session>/. Nothing is installed by a session: "install" is a separate user action that re-checks
@@ -568,15 +723,23 @@ class Generator {
   async start(opts) {
     if (this.proc) throw new Error('một phiên tạo extension đang chạy');
     if (!isPlainObject(opts)) throw new Error('invalid options');
-    const url = String(opts.url || '').trim();
+    let url = String(opts.url || '').trim();
+    let repair = '';
+    if (opts.repair !== undefined) { // fix a draft that did not pass: same site, ai mode, the old session stays untouched
+      const old = await readGenReport(String(opts.repair));
+      if (!old.draftDir || old.status === 'ready') throw new Error('chỉ sửa được bản nháp chưa đạt còn thư mục bản nháp');
+      repair = old.session;
+      url = String(old.url || old.site || '');
+    }
     if (!url || url.length > 2000 || /\s/.test(url)) throw new Error('link website không hợp lệ');
-    const mode = opts.mode === 'template' ? 'template' : 'ai';
+    const mode = repair ? 'ai' : opts.mode === 'template' ? 'template' : 'ai';
     const media = ['image', 'video', 'audio'].filter((m) => Array.isArray(opts.media) && opts.media.includes(m));
     const cfg = {
       cmd: 'start', url, mode, media: media.length ? media : ['image', 'video'],
       query: typeof opts.query === 'string' ? opts.query.trim().slice(0, 200) : '',
       model: GEN_MODELS.includes(opts.model) ? opts.model : settings.ai.model,
       maxUsd: clampUsd(opts.maxUsd, settings.ai.maxUsd),
+      ...(repair ? { repair } : {}),
     };
     let apiKey = '';
     if (mode === 'ai') {
@@ -837,10 +1000,14 @@ async function connectionArgs(module) {
 
 function genderArgs(g) {
   // content filter; enabling it also enables the safety blacklist in the core
-  const sel = (g && Array.isArray(g.select) ? g.select : []).filter((x) => ['only_female', 'only_male', 'both', 'none', 'unknown'].includes(x));
+  const labels = ['only_female', 'only_male', 'both', 'none', 'unknown'];
+  const sel = [...new Set((g && Array.isArray(g.select) ? g.select : []).filter((x) => labels.includes(x)))];
   if (!sel.length) return [];
-  const a = ['-gender', sel.join(',')];
+  const exclude = g.op === 'exclude';
+  if (exclude && sel.length === labels.length) return []; // dropping every label would leave nothing: not a filter
+  const a = exclude ? ['-gender_exclude', sel.join(',')] : ['-gender', sel.join(',')];
   if (['low', 'medium', 'high'].includes(g.conf)) a.push('-gender_conf', g.conf);
+  if (g.mode === 'model' && genderModelOn()) a.push('-gender_mode', 'model', '-gender_model_url', settings.genderModel.url);
   if (g.strict) a.push('-gender_strict');
   return a;
 }
@@ -883,6 +1050,7 @@ function downloadArgs(q) {
   const a = ['-path', dest];
   if (!d.images) a.push('-skip_img');
   if (!d.videos) a.push('-skip_vid');
+  if (d.audio === false) a.push('-skip_aud'); // only modules with audio media produce audio files
   if (d.videoFormat === 'mp4') a.push('-mp4');
   if (d.videoFormat === 'webm') a.push('-webm');
   if (d.lowRes) a.push('-lowres');
@@ -905,6 +1073,22 @@ function downloadArgs(q) {
 
 // ---------- download jobs (separate CLI processes) ----------
 
+function notifyJob(job) {
+  // a job ended while Lustra is not the focused window: system notification (Settings: download.notify)
+  if (!settings.download.notify || job.label === 'selftest' || !['done', 'failed'].includes(job.status)) return;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return;
+  try {
+    if (!Notification.isSupported()) return;
+    const p = job.progress || {};
+    const body = job.status === 'done'
+      ? `${p.success || 0} file đã tải${p.failed ? `, ${p.failed} lỗi` : ''}`
+      : `Lỗi: ${String(job.error || '').slice(0, 120)}`;
+    const n = new Notification({ title: `${job.status === 'done' ? 'Xong' : 'Lỗi'}: ${job.module} · ${job.label || job.tags}`.slice(0, 120), body });
+    n.on('click', () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); send('nav:page', 'downloads'); } });
+    n.show();
+  } catch { /* notifications are optional */ }
+}
+
 class Jobs {
   constructor() {
     this.jobs = new Map();
@@ -912,7 +1096,7 @@ class Jobs {
   }
 
   public(job) {
-    const { proc, logTail, args, secretArgs, testCommand, ...rest } = job;
+    const { proc, logTail, args, secretArgs, testCommand, query, ...rest } = job;
     return { ...rest, logTail: logTail.slice(-40) };
   }
 
@@ -924,17 +1108,30 @@ class Jobs {
     if (this.closing) throw new Error('app is closing');
     if (!q || !q.module || !String(q.tags || '').trim()) throw new Error('module and tags are required');
     asQuery(q);
+    const allowDuplicate = q.allowDuplicate === true;
+    const query = structuredClone({ ...q, allowDuplicate: undefined }); // kept for 'run again' (no secrets: they are added per run)
     const id = `job-${Date.now()}-${++this.seq}`;
     const { args, dest } = downloadArgs(q);
     const job = {
       id, module: q.module, tags: String(q.tags).trim(), dest, status: 'queued', progress: {}, createdAt: Date.now(),
       startedAt: 0, endedAt: 0, exitCode: null, logTail: [], label: q.label || '',
-      secretArgs: await connectionArgs(q.module),
+      secretArgs: [...(await connectionArgs(q.module)), ...(await genderSecretArgs(q.gender))],
       // '--': tags like '-webm' or '-v' are never parsed as options
       args: ['-module', q.module, ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender), ...args, '--',
         ...String(q.tags).trim().split(/\s+/)],
+      query,
+      autoKey: typeof q.autoKey === 'string' ? q.autoKey : '',
     };
+    // the same download twice (double click, a query run again by mistake): the renderer asks, then retries with allowDuplicate
+    const same = this.active().find((j) => j.args.join('\0') === job.args.join('\0'));
+    if (same && !allowDuplicate) throw new Error(`DUPLICATE: một job giống hệt đang ${same.status === 'queued' ? 'chờ' : 'chạy'}`);
     return this._add(job);
+  }
+
+  rerun(id, allowDuplicate = false) {
+    const job = this.jobs.get(id);
+    if (!job?.query) throw new Error('job không còn thông tin để chạy lại');
+    return this.start({ ...job.query, allowDuplicate });
   }
 
   _add(job) {
@@ -1016,6 +1213,8 @@ class Jobs {
       delete job.proc;
       this.emit(job);
       this.pump();
+      notifyJob(job);
+      if (job.autoKey) autoJobFinished(job);
     };
     proc.on('error', (err) => { onLine(`ERROR: ${err.message}`); finish(null, err.message); });
     // 'close' (not 'exit'): stdout is fully read, the final DONE line is already parsed
@@ -1150,12 +1349,36 @@ async function fetchThumb(target, referer) {
   }
 }
 
+async function streamMedia(target, referer, range) {
+  // in-app player (Preview lightbox): one upstream request per range, streamed through, not cached; video / audio only
+  await assertPublicHost(target);
+  const headers = { 'User-Agent': `Lustra/${app.getVersion()}` };
+  if (referer && /^https?:\/\//i.test(referer)) headers.Referer = referer;
+  if (range && /^bytes=\d*-\d*$/.test(range)) headers.Range = range;
+  const res = await net.fetch(target, { headers, redirect: 'error' });
+  const type = (res.headers.get('content-type') || '').toLowerCase();
+  if (!res.ok || !(type.startsWith('video/') || type.startsWith('audio/') || type === 'application/ogg')) {
+    try { await res.body?.cancel(); } catch { /* ignore */ }
+    return new Response(res.ok ? 'not a media file' : `upstream ${res.status}`, { status: res.ok ? 415 : 502 });
+  }
+  const out = { 'content-type': type, 'accept-ranges': res.headers.get('accept-ranges') || 'none' };
+  for (const h of ['content-length', 'content-range']) if (res.headers.get(h)) out[h] = res.headers.get(h);
+  return new Response(res.body, { status: res.status, headers: out });
+}
+
 function registerThumbProtocol() {
   protocol.handle('lustra-thumb', async (request) => {
     const u = new URL(request.url);
     const target = u.searchParams.get('u') || '';
     const referer = u.searchParams.get('r') || '';
     if (!/^https?:\/\//i.test(target)) return new Response('bad url', { status: 400 });
+    if (u.host === 'm') {
+      try {
+        return await streamMedia(target, referer, request.headers.get('range') || '');
+      } catch (err) {
+        return new Response(String(err.message || err), { status: /blocked|scheme/.test(String(err.message)) ? 403 : 502 });
+      }
+    }
     const key = crypto.createHash('sha1').update(target).digest('hex');
     const ext = (path.extname(new URL(target).pathname) || '.img').slice(0, 6).toLowerCase();
     const file = path.join(thumbDir(), `${key}${ext}`);
@@ -1433,7 +1656,8 @@ function registerIpc() {
   handle('search:preview', async (_e, q, page) => {
     const params = {
       module: asQuery(q).module, tags: q.tags, page: page || 0,
-      args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender)],
+      args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender),
+        ...(await genderSecretArgs(q.gender))],
     };
     if (Number.isInteger(q.pageSize) && q.pageSize > 0) params.pageSize = q.pageSize; // the sidecar caps it to the module page size
     return sidecar.call('search.preview', params, 180000);
@@ -1464,7 +1688,10 @@ function registerIpc() {
         if (patch.search[key] === undefined) continue;
         const v = sanitizeQueryList(patch.search[key], max, named);
         if (v === null) delete patch.search[key];
-        else patch.search[key] = v;
+        else {
+          if (named) mergeAutoRuntime(v);
+          patch.search[key] = v;
+        }
       }
       if (patch.search.tagLimits !== undefined) {
         const v = sanitizeTagLimits(patch.search.tagLimits);
@@ -1480,7 +1707,13 @@ function registerIpc() {
         delete patch.connection[key];
       }
     }
+    if (isPlainObject(patch.genderModel) && patch.genderModel.url !== undefined) {
+      const u = sanitizeModelUrl(patch.genderModel.url);
+      if (u === null) throw new Error('Địa chỉ model server phải có dạng http://máy:cổng hoặc https://…');
+      patch.genderModel.url = u;
+    }
     settings = deepMerge(settings, patch);
+    settings.genderModel.enabled = settings.genderModel.enabled === true;
     Object.assign(settings.connection, replaceMaps);
     if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
     settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
@@ -1499,10 +1732,28 @@ function registerIpc() {
   });
   handle('secrets:clear', (_e, module) => { clearSecret(module); return secretsStatus(); });
 
-  handle('jobs:start', (_e, q) => jobs.start(q));
+  handle('jobs:start', (_e, q) => jobs.start(isPlainObject(q) ? { ...q, autoKey: undefined } : q)); // only the scheduler sets autoKey
+  // gender image model: runs in a model server (lustra/model_server.py); the app only calls its API, the token stays in main
+  handle('gmodel:status', async () => {
+    if (!settings.genderModel.url) return { url: '', reachable: false, local: false, error: 'off' };
+    return sidecar.call('gender.modelStatus', { url: settings.genderModel.url, token: await getSecret(MODEL_SECRET) }, 20000);
+  });
+  // turning the model on loads it on the server now (status after: the device it really runs on); off frees its memory
+  handle('gmodel:load', async () => {
+    if (!settings.genderModel.url) throw new Error('Chưa có địa chỉ model server');
+    return sidecar.call('gender.modelLoad', { url: settings.genderModel.url, token: await getSecret(MODEL_SECRET) }, 200000);
+  });
+  handle('gmodel:unload', async () => {
+    if (!settings.genderModel.url) return { url: '', reachable: false, local: false, error: 'off' };
+    return sidecar.call('gender.modelUnload', { url: settings.genderModel.url, token: await getSecret(MODEL_SECRET) }, 20000);
+  });
+  handle('gmodel:setToken', (_e, value) => setModelToken(value));
+  handle('gmodel:clearToken', () => clearModelToken());
+  handle('saved:auto', (_e, key, every, from) => setSavedAuto(String(key || ''), Number(every) || 0, from === 'now' ? 'now' : 'all'));
   handle('jobs:cancel', (_e, id) => jobs.cancel(id));
   handle('jobs:list', () => jobs.list());
   handle('jobs:clear', () => jobs.clearFinished());
+  handle('jobs:rerun', (_e, id, allowDuplicate) => jobs.rerun(String(id || ''), allowDuplicate === true));
 
   handle('dialog:folder', async (_e, current) => {
     const r = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'], defaultPath: current || undefined });
@@ -1584,13 +1835,33 @@ function registerIpc() {
     return shell.openPath(target);
   });
   handle('shell:external', (_e, url) => (/^https?:\/\//.test(url) ? shell.openExternal(url) : false));
+  // library page: a downloaded media file is opened with the default app; anything else (an executable, a .desktop file a
+  // website could have named) is refused. 'reveal' only shows the file in its folder
+  handle('library:open', (_e, p) => {
+    const target = String(p || '');
+    const ext = path.extname(target).slice(1).toLowerCase();
+    if (!path.isAbsolute(target) || !LIBRARY_MEDIA_EXT.has(ext)) return 'chỉ mở được file ảnh / video / âm thanh';
+    try { if (!fs.statSync(target).isFile()) return 'không phải file'; } catch { return 'file không còn trên đĩa'; }
+    return shell.openPath(target);
+  });
+  handle('library:reveal', (_e, p) => {
+    const target = String(p || '');
+    if (!path.isAbsolute(target)) return false;
+    if (fs.existsSync(target)) shell.showItemInFolder(target);
+    else if (fs.existsSync(path.dirname(target)) && fs.statSync(path.dirname(target)).isDirectory()) shell.openPath(path.dirname(target));
+    return true;
+  });
 }
+
+const LIBRARY_MEDIA_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm', 'mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav']);
 
 function secretsStatus() {
   return {
     encryption: encryptionAvailable,
-    modules: Object.fromEntries(Object.entries(secrets).filter(([k]) => k !== AI_SECRET).map(([k, v]) => [k, { set: true, encrypted: Boolean(v.enc) }])),
+    modules: Object.fromEntries(Object.entries(secrets).filter(([k]) => k !== AI_SECRET && k !== MODEL_SECRET)
+      .map(([k, v]) => [k, { set: true, encrypted: Boolean(v.enc) }])),
     ai: aiKeyStatus(),
+    genderModel: modelTokenStatus(),
   };
 }
 
@@ -1907,6 +2178,114 @@ async function selfTestContract(js, quick) {
   const hasSkip = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_known');
   out.skipKnownArgs = { on: hasSkip({ skipKnown: true }), off: hasSkip({ skipKnown: false }), default: hasSkip({}) };
   out.skipKnownArgs.ok = out.skipKnownArgs.on && !out.skipKnownArgs.off && out.skipKnownArgs.default === Boolean(settings.download.skipKnown);
+  // audio: '-skip_aud' only when the audio option is off (default on)
+  const hasSkipAud = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_aud');
+  out.audioArgs = { off: hasSkipAud({ audio: false }), on: hasSkipAud({ audio: true }), default: hasSkipAud({}) };
+  out.audioArgs.ok = out.audioArgs.off && !out.audioArgs.on && !out.audioArgs.default;
+  // gender: 'keep' picks -> -gender, 'exclude' picks -> -gender_exclude, excluding every label is no filter
+  const ga = (g) => genderArgs(g).join(' ');
+  out.genderArgs = {
+    keep: ga({ select: ['only_female', 'both'], op: 'keep' }), exclude: ga({ select: ['only_male'], op: 'exclude', conf: 'high' }),
+    all: ga({ select: ['only_female', 'only_male', 'both', 'none', 'unknown'], op: 'exclude' }),
+  };
+  // the image model only when it is turned on: off, a 'model' query filters by tags
+  const wasOn = settings.genderModel.enabled;
+  settings.genderModel.enabled = true;
+  out.genderArgs.model = ga({ select: ['only_male'], op: 'exclude', mode: 'model' });
+  settings.genderModel.enabled = false;
+  out.genderArgs.modelOff = ga({ select: ['only_male'], op: 'exclude', mode: 'model' });
+  settings.genderModel.enabled = wasOn;
+  out.genderArgs.ok = out.genderArgs.keep === '-gender only_female,both' && out.genderArgs.exclude === '-gender_exclude only_male -gender_conf high'
+    && out.genderArgs.all === '' && out.genderArgs.model === `-gender_exclude only_male -gender_mode model -gender_model_url ${settings.genderModel.url}`
+    && out.genderArgs.modelOff === '-gender_exclude only_male';
+  // gender model server: status through main, the token never reaches the renderer, the core gets it as a secret argument
+  try {
+    const fakeToken = 'selftest-model-token-0123';
+    const st = await js('window.lustra.genderModel.status()');
+    const tok = await js(`window.lustra.genderModel.setToken(${JSON.stringify(fakeToken)})`);
+    const view = JSON.stringify(await js('window.lustra.settings.get()'));
+    const wasOn = settings.genderModel.enabled;
+    settings.genderModel.enabled = false;
+    const secretOff = (await genderSecretArgs({ mode: 'model' })).length === 0; // model off: the token is not handed out
+    settings.genderModel.enabled = true;
+    const secretArgs = (await genderSecretArgs({ mode: 'model' })).join(' ');
+    settings.genderModel.enabled = wasOn;
+    const blocked = async (m) => js(`window.lustra.rpc(${JSON.stringify(m)}, {url: 'http://127.0.0.1:1'}).then(() => 'allowed', (e) => 'blocked')`);
+    const rpcBlocked = [await blocked('gender.modelStatus'), await blocked('gender.modelLoad'), await blocked('gender.modelUnload')];
+    const cleared = await js('window.lustra.genderModel.clearToken()');
+    // unload through main -> sidecar -> server (a no-op when nothing is loaded; load is the same path, not run: ~550 MB)
+    const un = await js('window.lustra.genderModel.unload()');
+    out.genderModel = {
+      url: st.url, reachable: st.reachable, error: st.error, check: st.check?.code, unload: un.reachable ? un.model?.loaded === false : un.error,
+      tokenSet: tok.set, rpcBlocked, cleared: !cleared.set,
+      rendererHasNoToken: !view.includes(fakeToken), secretArgs: secretArgs === `-gender_model_token ${fakeToken}` && secretOff,
+    };
+    // a reachable server reports its hardware: the renderer warns before turning the model on without a GPU
+    out.genderModel.ok = typeof st.reachable === 'boolean' && st.url === settings.genderModel.url && tok.set
+      && rpcBlocked.every((x) => x === 'blocked') && (!st.reachable || (typeof st.check?.code === 'string' && un.model?.loaded === false))
+      && out.genderModel.cleared && out.genderModel.rendererHasNoToken && out.genderModel.secretArgs;
+  } catch (e) {
+    out.genderModel = { ok: false, error: String(e.message || e) };
+  }
+  // library page: the renderer (file:// page) shows a downloaded image from disk; 'open' refuses non media files
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lustra-selftest-lib-'));
+    const img = path.join(dir, 'db_1 test.png');
+    fs.copyFileSync(path.join(__dirname, 'assets', 'icons', 'full-mask-orange-64.png'), img);
+    const launcher = path.join(dir, 'evil.desktop');
+    fs.writeFileSync(launcher, '[Desktop Entry]\n');
+    const loaded = await js(`new Promise((resolve) => { const i = new Image(); i.onload = () => resolve(i.naturalWidth); i.onerror = () => resolve(0);
+      i.src = fileUrl(${JSON.stringify(img)}); })`);
+    const refused = await js(`window.lustra.library.open(${JSON.stringify(launcher)})`);
+    out.libraryFiles = { loaded, refused, ok: loaded === 64 && /chỉ mở được/.test(String(refused)) };
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    out.libraryFiles = { ok: false, error: String(e.message || e) };
+  }
+  // saved query schedule: set from the renderer, run fields owned by main survive a stale whole-list write (no run: self-test)
+  try {
+    const entry = { name: 'selftest-auto', module: 'db', tags: 'selftest_auto', at: Date.now() };
+    const keep = settings.search.saved;
+    settings.search.saved = [entry];
+    const key = `${entry.module}\n${entry.tags}`;
+    let r = await js(`window.lustra.saved.setAuto(${JSON.stringify(key)}, 24, 'all').then((x) => x.settings.search.saved, (e) => 'ERR ' + e.message)`);
+    const on = Array.isArray(r) && r[0]?.auto?.every === 24;
+    settings.search.saved[0].auto.lastRun = 123456;
+    settings.search.saved[0].auto.maxId = 777;
+    r = await js(`window.lustra.settings.set({ search: { saved: [{ name: 'selftest-auto', module: 'db', tags: 'selftest_auto', at: 1, auto: { every: 72 } }] } }).then((x) => x.settings.search.saved)`);
+    const merged = r[0]?.auto?.every === 72 && r[0]?.auto?.lastRun === 123456 && r[0]?.auto?.maxId === 777;
+    r = await js(`window.lustra.saved.setAuto(${JSON.stringify(key)}, 0, 'all').then((x) => x.settings.search.saved)`);
+    const off = !r[0]?.auto;
+    const bad = await js(`window.lustra.saved.setAuto(${JSON.stringify(key)}, 5, 'all').then(() => 'SET', (e) => e.message)`);
+    out.savedAuto = { on, merged, off, bad, ok: on && merged && off && /chu kỳ/.test(bad) };
+    settings.search.saved = keep;
+  } catch (e) {
+    out.savedAuto = { ok: false, error: String(e.message || e) };
+  }
+  // identical active job refused unless asked on purpose, 'run again' reuses the query (nothing is spawned: pump is off)
+  const realPump = jobs.pump;
+  const made = [];
+  try {
+    jobs.pump = () => {};
+    const q = { module: 'db', tags: 'selftest_duplicate', path: path.join(os.tmpdir(), 'lustra-selftest-dup') };
+    const first = await jobs.start(q);
+    made.push(first.id);
+    const dup = await jobs.start(q).then(() => 'ADDED', (e) => e.message);
+    const forced = await jobs.start({ ...q, allowDuplicate: true });
+    made.push(forced.id);
+    const rerunDup = await jobs.rerun(first.id).then(() => 'ADDED', (e) => e.message);
+    made.forEach((id) => jobs.cancel(id));
+    const again = await jobs.rerun(first.id);
+    made.push(again.id);
+    out.duplicateJobs = { dup, forced: forced.status, rerunDup, rerun: again.tags === q.tags && again.status, hidden: !('query' in again) };
+    out.duplicateJobs.ok = /^DUPLICATE/.test(dup) && forced.status === 'queued' && /^DUPLICATE/.test(rerunDup)
+      && again.status === 'queued' && out.duplicateJobs.hidden;
+  } catch (e) {
+    out.duplicateJobs = { ok: false, error: String(e.message || e) };
+  } finally {
+    made.forEach((id) => { jobs.cancel(id); jobs.jobs.delete(id); });
+    jobs.pump = realPump;
+  }
   saveSettings();
   return out;
 }
@@ -2038,6 +2417,10 @@ if (!app.requestSingleInstanceLock()) {
     pruneThumbCache();
     if (process.env.LUSTRA_SELFTEST_DIR) mainWindow.webContents.once('did-finish-load', () => runSelfTest(process.env.LUSTRA_SELFTEST_DIR));
     sidecar.ready.then(() => maybeAutoUpdateTags()).catch(() => {});
+    sidecar.ready.then(() => {
+      setTimeout(() => runDueSaved().catch(() => {}), 60000); // saved queries due while the app was closed
+      setInterval(() => runDueSaved().catch(() => {}), AUTO_CHECK_MS);
+    }).catch(() => {});
   });
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', (e) => {

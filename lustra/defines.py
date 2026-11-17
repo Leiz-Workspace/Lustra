@@ -309,7 +309,20 @@ SUPPORTED_PLATFORMS = {PLATFORM_WINDOWS, PLATFORM_LINUX, PLATFORM_DARWIN}
 
 KNOWN_EXTENSIONS_VID = ('mp4', 'webm')
 KNOWN_EXTENSIONS_IMG = ('swf', 'png', 'jpg', 'jpeg', 'gif', 'webp')
-KNOWN_EXTENSIONS = KNOWN_EXTENSIONS_VID + KNOWN_EXTENSIONS_IMG
+KNOWN_EXTENSIONS_AUD = ('mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav')
+'''audio files: only modules declaring 'audio' media produce them (builtin modules never do)'''
+KNOWN_EXTENSIONS = KNOWN_EXTENSIONS_VID + KNOWN_EXTENSIONS_IMG + KNOWN_EXTENSIONS_AUD
+
+
+class MediaKind:
+    IMAGE = 'image'
+    VIDEO = 'video'
+    AUDIO = 'audio'
+
+
+def media_kind_by_ext(ext: str) -> str:
+    ext = ext.lower().lstrip('.')
+    return MediaKind.VIDEO if ext in KNOWN_EXTENSIONS_VID else MediaKind.AUDIO if ext in KNOWN_EXTENSIONS_AUD else MediaKind.IMAGE
 KNOWN_EXTENSIONS_STR = ' '.join(f'*.{e}' for e in KNOWN_EXTENSIONS)
 
 INT_BOUNDS_DEFAULT = (0, 0)

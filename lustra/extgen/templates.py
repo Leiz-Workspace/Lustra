@@ -52,9 +52,14 @@ SZURUBOORU_SYNTAX = {
     'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'metaCount': ':[a-z\\d\\-_.,]+?', 'sort': 'sort:[a-z\\-_]+',
     'fav': 'fav:[^:]+?', 'pool': 'pool:\\d+?',
 }
+SHIMMIE_SYNTAX = {
+    'concat': ' ', 'idSep': '=', 'maxTagsStringLen': 1000, 'metaCount': '(?:[<>]=?|=)[a-z\\d\\-_]+?',
+    'sort': 'order=(?:id|score)_(?:a|de)sc', 'fav': 'favorited_by=[^:=]+?', 'pool': '',
+}
 SYNTAX_BY_ENGINE = {'gelbooru_dapi': GELBOORU_SYNTAX, 'danbooru_json': DANBOORU_SYNTAX, 'e621_json': E621_SYNTAX,
-                    'moebooru_json': MOEBOORU_SYNTAX, 'philomena_json': PHILOMENA_SYNTAX, 'szurubooru_json': SZURUBOORU_SYNTAX}
-TEMPLATE_ENGINES = ('gelbooru_dapi', 'danbooru_json', 'e621_json', 'moebooru_json', 'philomena_json', 'szurubooru_json')
+                    'moebooru_json': MOEBOORU_SYNTAX, 'philomena_json': PHILOMENA_SYNTAX, 'szurubooru_json': SZURUBOORU_SYNTAX,
+                    'shimmie_api': SHIMMIE_SYNTAX}
+TEMPLATE_ENGINES = ('gelbooru_dapi', 'danbooru_json', 'e621_json', 'moebooru_json', 'philomena_json', 'szurubooru_json', 'shimmie_api')
 
 
 def _taken_abbrs() -> set[str]:
@@ -401,7 +406,95 @@ _JSON_ENGINES = {
             width=p.get('canvasWidth') or 0, height=p.get('canvasHeight') or 0, score=p.get('score') or 0,
             rating=p.get('safety') or '', source=p.get('source') or '')
 '''},
+    'shimmie_api': {
+        'doc': 'Shimmie2 danbooru compatible API (api/danbooru/find_posts, XML)', 'per_page': 100, 'max_pages': 0, 'interval': 1.0,
+        'imports': 'import html\nimport re\n', 'body': '''
+    TAGS_CONCAT = ' '
+    ACCEPT = 'application/xml, text/xml'
+
+    def _search_url(self, tags: str, page: int, limit: int) -> str:
+        return f'{{SITENAME}}api/danbooru/find_posts?tags={{tags}}&limit={{limit}}&page={{page + 1}}'
+
+    def _parse(self, raw: bytes) -> object:
+        text = raw.decode('utf-8', 'replace')
+        if '<posts' not in text:
+            return None
+        count = re.search(r'<posts[^>]*\\scount=["\\'](\\d+)', text)
+        posts = [{{k: html.unescape(v) for k, _, v in re.findall(r'([a-z_]+)=(["\\'])(.*?)\\2', m)}}  # '' or "" quotes
+                 for m in re.findall(r'<post\\s[^>]*>', text)]
+        return {{'count': int(count.group(1)) if count else None, 'posts': posts}}
+
+    def _posts(self, data: object) -> list[dict] | None:
+        return data.get('posts') if isinstance(data, dict) else None
+
+    def _count(self, data: object) -> int | None:
+        return data.get('count') if isinstance(data, dict) else None
+
+    def _post(self, p: dict) -> JsonPost | None:
+        name = p.get('file_name') or ''
+        return JsonPost(
+            id=str(p.get('id', '')), file_url=p.get('file_url') or '', tags=str(p.get('tags') or '').split(),
+            created_at=p.get('date') or '', preview_url=p.get('preview_url') or '', md5=p.get('md5') or '',
+            width=int(p.get('width') or 0), height=int(p.get('height') or 0), score=p.get('score') or 0,
+            rating=p.get('rating') or '', source=p.get('source') or '',
+            ext=name[name.rfind('.') + 1:] if '.' in name else '')  # shimmie file urls may have no extension
+'''},
 }
+
+HTML_EXAMPLE = '''# coding=UTF-8
+\"\"\"
+Example (reference 'template_html', not a ready template): a site whose HTML listing pages carry everything per post
+(file link, tags, date) parsed with BeautifulSoup through DownloaderJsonApi._parse. Adapt the url, the selectors and the
+attribute names to the real pages seen with http_fetch. If the file url or the tags are only on each post page, follow the
+'rule34us' reference instead (a Downloader that fetches item pages).
+\"\"\"
+
+from typing import final
+
+from bs4 import BeautifulSoup
+
+from lustra.defines import ModuleCaps
+from lustra.download_json import DownloaderJsonApi, JsonPost
+
+__all__ = ('DownloaderEx',)
+
+SITENAME = "https://example.com/"
+MODULE_ABBR = "ex"
+
+
+@final
+class DownloaderEx(DownloaderJsonApi):
+    CAPABILITIES = frozenset((ModuleCaps.DATE_FILTER, ModuleCaps.PREVIEW))
+    SITE = SITENAME
+    ABBR = MODULE_ABBR
+    ITEMS_PER_PAGE = 42  # posts on one listing page of the site
+    MAX_PAGES = 0  # 0: the site has no page depth limit
+    ACCEPT = 'text/html'
+
+    def _get_min_request_interval(self) -> float:
+        return 1.0  # html pages: at least 1 second between requests (R4)
+
+    def _search_url(self, tags: str, page: int, limit: int) -> str:
+        return f'{SITENAME}posts?tags={tags}&page={page + 1}'
+
+    def _parse(self, raw: bytes) -> object:
+        return BeautifulSoup(raw, 'html.parser')
+
+    def _posts(self, data: object) -> list[dict] | None:
+        listing = data.find('section', id='posts') if isinstance(data, BeautifulSoup) else None
+        if listing is None:
+            return None  # not a listing page (error page, challenge...)
+        return [dict(a.attrs) for a in listing.find_all('article')]
+
+    def _count(self, data: object) -> int | None:
+        total = data.find(attrs={'data-total': True}) if isinstance(data, BeautifulSoup) else None
+        return int(total['data-total']) if total is not None and str(total['data-total']).isdigit() else None
+
+    def _post(self, p: dict) -> JsonPost | None:
+        return JsonPost(
+            id=str(p.get('data-id', '')), file_url=p.get('data-file-url', ''), tags=str(p.get('data-tags', '')).split(),
+            created_at=p.get('data-created-at', ''), preview_url=p.get('data-preview-url', ''))
+'''
 
 
 def render_downloader(engine: str, *, ext_id: str, abbr: str, site: str, api_key: bool = False, per_page: int = 100,

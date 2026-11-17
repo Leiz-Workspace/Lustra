@@ -110,6 +110,30 @@ def valid_gender_list(val: str) -> list[str]:
         raise ArgumentError
 
 
+def valid_gender_exclude(val: str) -> list[str]:
+    """-gender_exclude: same labels as -gender, but not every label (nothing would be left)"""
+    from .gender import GENDER_LABELS
+    labels = valid_gender_list(val)
+    if set(labels) >= set(GENDER_LABELS):
+        raise ArgumentError
+    return labels
+
+
+def valid_gender_model_url(val: str) -> str:
+    """-gender_model_url: http(s) address of a model server; plain http only to this computer or a local network"""
+    from .gender_model import check_api_url
+    try:
+        return check_api_url(val)
+    except ValueError:
+        raise ArgumentError
+
+
+def valid_gender_model_token(val: str) -> str:
+    if not re.fullmatch(r'[\x21-\x7e]{8,256}', val or ''):
+        raise ArgumentError
+    return val
+
+
 def valid_date(date: str) -> str:
     try:
         _ = datetime.datetime.strptime(date, FMT_DATE)

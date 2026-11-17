@@ -46,7 +46,7 @@ from .defines import (
 from .dlindex import IndexWriter, indexing_enabled, record_for
 from .download_base import DownloaderBase
 from .file_parser import prepare_item_infos_dict
-from .gender import GenderConf
+from .gender import GENDER_LABELS, GenderConf
 from .gui_defines import NEWLINE, OPTION_CMD_APIKEY_CMD, UNDERSCORE
 from .logger import trace
 from .module import ProcModule
@@ -161,10 +161,18 @@ class Downloader(DownloaderBase):
                 self.my_root_thread.killed = True
 
     # threaded
+    def _note_item_id(self, item_id: str) -> None:
+        digits = ''.join(c for c in str(item_id) if c.isdigit())
+        if digits and int(digits) > self.max_item_id:
+            with self.item_lock:
+                self.max_item_id = max(self.max_item_id, int(digits))
+
     def _process_item_safe(self, raw: str) -> None:
         """A failing item is counted as failed, it does not abort the whole run (Ruxx killed every thread)"""
         self._item_tls.active = True
         self._item_tls.raw = raw
+        with contextlib.suppress(Exception):
+            self._note_item_id(self._extract_id(self._local_addr_from_string(str(raw))))
         try:
             self._process_item(raw)
         except DownloadInterruptException:
@@ -1026,6 +1034,7 @@ class Downloader(DownloaderBase):
             self.total_count = 1
             self.items_raw_per_task = [self._form_item_string_manually(count_or_html)]
         trace(f'{self._get_module_abbr().upper()}: {self._extract_id(self.items_raw_per_task[0])}')
+        self._note_item_id(self._extract_id(self.items_raw_per_task[0]))
 
     def _launch(self, args: Namespace, thiscall: Callable[[], None], enable_preprocessing=True) -> None:
         self.current_state = DownloaderStates.LAUNCHING
@@ -1095,6 +1104,7 @@ class Downloader(DownloaderBase):
         self.include_parchi = args.include_parchi or self.include_parchi
         self.skip_images = args.skip_img or self.skip_images
         self.skip_videos = args.skip_vid or self.skip_videos
+        self.skip_audio = getattr(args, 'skip_aud', False) or self.skip_audio
         self.prefer_webm = args.webm or self.prefer_webm
         self.prefer_mp4 = args.mp4 or self.prefer_mp4
         self.low_res = args.lowres or self.low_res
@@ -1104,10 +1114,15 @@ class Downloader(DownloaderBase):
         self.dest_base = args.path or self.dest_base
         self.subfolder_vid = args.vidsub or self.subfolder_vid
         self.subfolder_img = args.imgsub or self.subfolder_img
+        self.subfolder_aud = getattr(args, 'audsub', None) or self.subfolder_aud
         self.warn_nonempty = args.warn_nonempty or self.warn_nonempty
         self.api_key = APIKey(args.api_key) or self.api_key
         self.gender_select = frozenset(getattr(args, 'gender', None) or ()) or self.gender_select
+        if excluded := getattr(args, 'gender_exclude', None):  # every label but these (of -gender if given)
+            self.gender_select = (self.gender_select or frozenset(GENDER_LABELS)) - frozenset(excluded)
         self.gender_mode = getattr(args, 'gender_mode', None) or self.gender_mode
+        self.gender_model_url = getattr(args, 'gender_model_url', None) or self.gender_model_url
+        self.gender_model_token = getattr(args, 'gender_model_token', None) or self.gender_model_token
         self.gender_min_conf = GenderConf.parse(args.gender_conf) if getattr(args, 'gender_conf', None) else self.gender_min_conf
         self.gender_strict = getattr(args, 'gender_strict', False) or self.gender_strict
         self.tags_limit = getattr(args, 'tags_limit', None) or self.tags_limit
@@ -1167,7 +1182,11 @@ class Downloader(DownloaderBase):
             ret = True
         if self.gender_select:
             if self.gender_mode == 'model':
-                thread_exit('Error: \'-gender_mode model\' needs the gender model which is not available yet. Use \'-gender_mode tags\'')
+                from .gender_model import ModelUnavailable, backend
+                try:
+                    backend(self.gender_model_url, self.gender_model_token)
+                except ModelUnavailable as err:
+                    thread_exit(f'Error: \'-gender_mode model\': {err}')
             if not self._has_capability(ModuleCaps.GENDER_TAGS):
                 trace(f'Warning (W2): \'{abbr}\' module has no measured gender tag rules, most posts will be labeled \'unknown\'')
                 ret = True

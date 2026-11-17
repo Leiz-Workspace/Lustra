@@ -55,6 +55,7 @@ def _start_ipc_threads(dwn) -> None:
                 'success': dwn.success_count, 'failed': dwn.fail_count, 'pages': dwn.total_pages if dwn.maxpage else 0,
                 'cfChallenge': dwn.cf_challenge_hit, 'genderFiltered': dwn.gender_filtered_count, 'blocked': dwn.safety_blocked_count,
                 'known': dwn.known_skipped_count, 'streaming': dwn.streaming_active, 'scanning': dwn.stream_scanning,
+                'bytes': dwn.bytes_received,
             }
             line = json.dumps(state, separators=(',', ':'))
             if line != last:
@@ -129,7 +130,8 @@ def run_cmd(args: list[str]) -> int:
                      'cfChallenge': cdwn.cf_challenge_hit, 'genderStats': cdwn.gender_stats, 'genderFiltered': cdwn.gender_filtered_count,
                      'blocked': cdwn.safety_blocked_count, 'known': cdwn.known_skipped_count, 'ok': code in (EXIT_OK, EXIT_PARTIAL),
                      'exitCode': code, 'error': error,
-                     'cancelled': code == EXIT_CANCELLED, 'streaming': cdwn.streaming_active, 'scanning': False}
+                     'cancelled': code == EXIT_CANCELLED, 'streaming': cdwn.streaming_active, 'scanning': False,
+                     'bytes': cdwn.bytes_received, 'maxId': cdwn.max_item_id, 'genderModel': cdwn.gender_model_checked}
             with Logger.print_lock:
                 print(f'{IPC_PROGRESS_PREFIX}{json.dumps(final, separators=(",", ":"))}', flush=True)
         return code

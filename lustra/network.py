@@ -31,6 +31,7 @@ from .defines import (
     CONNECT_RETRIES_PROXY_MULT,
     CONNECT_TIMEOUT_BASE,
     DOWNLOAD_CHUNK_SIZE,
+    KNOWN_EXTENSIONS_AUD,
     KNOWN_EXTENSIONS_VID,
     RETRY_AFTER_MAX_SECONDS,
     DownloadModes,
@@ -233,6 +234,8 @@ class ThreadedHtmlWorker(ThreadedWorker):
         self._backoff_until: dict[str, float] = {'api': 0.0, 'dl': 0.0}
         self._dl_cf_streak: int = 0
         self._next_download_ts: float = 0.0
+        self.bytes_received: int = 0
+        '''file bytes written by this run (all threads, resumed parts excluded): download speed in the app'''
         '''consecutive file downloads answered with a bot challenge'''
         '''429 / 503: every thread waits (Ruxx backed off only the thread that got the response)'''
         self.cf_challenge_hit: bool = False
@@ -374,7 +377,7 @@ class ThreadedHtmlWorker(ThreadedWorker):
         fullname = dest.name
         ext_full = fullname[fullname.rfind('.') + 1:]
         ext_char = ext_full[0]
-        is_video_ext = ext_full in KNOWN_EXTENSIONS_VID
+        is_video_ext = ext_full in KNOWN_EXTENSIONS_VID or ext_full in KNOWN_EXTENSIONS_AUD  # large streamed media (video or audio)
 
         result = FileDownloadResult()
         result.result_str = f'[{current_process().name}]{" <touch>" if mode == DownloadModes.TOUCH else ""} {item_id}({ext_char})... '
@@ -488,6 +491,7 @@ class ThreadedHtmlWorker(ThreadedWorker):
                             if chunk:
                                 outf.write(chunk)
                                 have += len(chunk)
+                                self.bytes_received += len(chunk)  # read by the progress thread only: no lock needed
                 if expected > 0 and have > expected:
                     trace(f'Warning (W3): {item_id} received more data than expected ({have:d} / {expected:d}), restarting', True)
                     have, expected, validator = 0, -1, ''

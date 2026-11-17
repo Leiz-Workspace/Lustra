@@ -21,6 +21,7 @@ from .gui_defines import (
     GENDER_MODES,
     OPTION_CMD_APIKEY_CMD,
     OPTION_CMD_APPEND_SOURCE_AND_TAGS,
+    OPTION_CMD_AUDIO,
     OPTION_CMD_COOKIES_CMD,
     OPTION_CMD_DATEAFTER_CMD,
     OPTION_CMD_DATEBEFORE_CMD,
@@ -30,7 +31,10 @@ from .gui_defines import (
     OPTION_CMD_FNAMEPREFIX,
     OPTION_CMD_GENDER_CMD,
     OPTION_CMD_GENDER_CONF_CMD,
+    OPTION_CMD_GENDER_EXCLUDE_CMD,
     OPTION_CMD_GENDER_MODE_CMD,
+    OPTION_CMD_GENDER_MODEL_TOKEN_CMD,
+    OPTION_CMD_GENDER_MODEL_URL_CMD,
     OPTION_CMD_GENDER_STRICT,
     OPTION_CMD_GET_MAXID_CMD,
     OPTION_CMD_HEADERS_CMD,
@@ -41,6 +45,7 @@ from .gui_defines import (
     OPTION_CMD_MODULE_CMD,
     OPTION_CMD_PARCHI,
     OPTION_CMD_PATH_CMD,
+    OPTION_CMD_PATH_SUB_AUD,
     OPTION_CMD_PATH_SUB_IMG,
     OPTION_CMD_PATH_SUB_VID,
     OPTION_CMD_PRESERVE_DATE,
@@ -75,7 +80,10 @@ from .help import (
     HELP_ARG_DUMP_TAGS,
     HELP_ARG_GENDER,
     HELP_ARG_GENDER_CONF,
+    HELP_ARG_GENDER_EXCLUDE,
     HELP_ARG_GENDER_MODE,
+    HELP_ARG_GENDER_MODEL_TOKEN,
+    HELP_ARG_GENDER_MODEL_URL,
     HELP_ARG_GENDER_STRICT,
     HELP_ARG_GET_MAXID,
     HELP_ARG_HEADER,
@@ -97,9 +105,11 @@ from .help import (
     HELP_ARG_PROXY,
     HELP_ARG_PROXYNODOWN,
     HELP_ARG_REVERSE_DOWNLOAD_ORDER,
+    HELP_ARG_SKIP_AUDIO,
     HELP_ARG_SKIP_IMAGES,
     HELP_ARG_SKIP_KNOWN,
     HELP_ARG_SKIP_VIDEOS,
+    HELP_ARG_SUBFOLDER_AUDIO,
     HELP_ARG_SUBFOLDER_IMAGES,
     HELP_ARG_SUBFOLDER_VIDEOS,
     HELP_ARG_TAGS,
@@ -115,7 +125,10 @@ from .validators import (
     valid_date,
     valid_folder_name,
     valid_folder_path,
+    valid_gender_exclude,
     valid_gender_list,
+    valid_gender_model_token,
+    valid_gender_model_url,
     valid_json,
     valid_kwarg,
     valid_positive_int,
@@ -189,6 +202,8 @@ def _add_common_args(par: ArgumentParser) -> None:
     do.add_argument(OPTION_CMD_VIDEOS[0], action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_VIDEOS)
     do.add_argument(OPTION_CMD_PATH_SUB_VID, metavar='#NAME', help=HELP_ARG_SUBFOLDER_VIDEOS, type=valid_folder_name)
     do.add_argument(OPTION_CMD_PATH_SUB_IMG, metavar='#NAME', help=HELP_ARG_SUBFOLDER_IMAGES, type=valid_folder_name)
+    do.add_argument(OPTION_CMD_AUDIO, action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_AUDIO)
+    do.add_argument(OPTION_CMD_PATH_SUB_AUD, metavar='#NAME', help=HELP_ARG_SUBFOLDER_AUDIO, type=valid_folder_name)
     dom1 = do.add_mutually_exclusive_group(required=False)
     dom1.add_argument(OPTION_CMD_VIDEOS[1], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFER_MP4)
     dom1.add_argument(OPTION_CMD_VIDEOS[2], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFER_WEBM)
@@ -211,7 +226,10 @@ def _add_common_args(par: ArgumentParser) -> None:
     dofi.add_argument(OPTION_CMD_DATEBEFORE_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MAXDATE, type=valid_date)
     dofi.add_argument(OPTION_CMD_TAGS_LIMIT_CMD, metavar='#NUMBER', help=HELP_ARG_TAGS_LIMIT, type=valid_positive_int)
     dofi.add_argument(OPTION_CMD_GENDER_CMD, metavar='#LABEL[,LABEL...]', help=HELP_ARG_GENDER, type=valid_gender_list)
+    dofi.add_argument(OPTION_CMD_GENDER_EXCLUDE_CMD, metavar='#LABEL[,LABEL...]', help=HELP_ARG_GENDER_EXCLUDE, type=valid_gender_exclude)
     dofi.add_argument(OPTION_CMD_GENDER_MODE_CMD, choices=GENDER_MODES, help=HELP_ARG_GENDER_MODE)
+    dofi.add_argument(OPTION_CMD_GENDER_MODEL_URL_CMD, metavar='#URL', help=HELP_ARG_GENDER_MODEL_URL, type=valid_gender_model_url)
+    dofi.add_argument(OPTION_CMD_GENDER_MODEL_TOKEN_CMD, metavar='#TOKEN', help=HELP_ARG_GENDER_MODEL_TOKEN, type=valid_gender_model_token)
     dofi.add_argument(OPTION_CMD_GENDER_CONF_CMD, choices=GENDER_CONFS, help=HELP_ARG_GENDER_CONF)
     dofi.add_argument(OPTION_CMD_GENDER_STRICT[True], action=ACTION_STORE_TRUE, help=HELP_ARG_GENDER_STRICT)
     dofi.add_argument(OPTION_CMD_SKIP_KNOWN[True], action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_KNOWN)
