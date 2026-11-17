@@ -15,6 +15,8 @@ node_modules/
 app/out/
 app/dist/
 .lustra-cache/
+# extension drafts of python -m lustra.extgen / the new-site-extension skill (reviewed and installed by hand)
+.extgen-drafts/
 
 # IDE
 /.idea/*

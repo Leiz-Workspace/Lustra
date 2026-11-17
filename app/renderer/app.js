@@ -1528,6 +1528,7 @@ async function renderExtensions() {
   await loadModules();
   $('#ext-grid').replaceChildren(...S.modules.map((m) => extCard(m, false)));
   $('#catalog-url').value = S.settings.advanced.catalogUrl || '';
+  renderGen();
 }
 function extCard(m, remote) {
   const media = (m.media || []).map((x) => h('span', { class: 'tagpill' }, { image: 'ảnh', video: 'video', audio: 'âm thanh' }[x] || x));
@@ -1581,6 +1582,259 @@ $('#catalog-load').addEventListener('click', async () => {
     $('#remote-grid').replaceChildren(...items.map((m) => extCard({ ...m, media: m.media || [] }, true)));
     if (!items.length) toast('Catalog trống');
   } catch (err) { toast(`Không tải được catalog: ${errMsg(err)}`, 'err'); }
+});
+
+// ---------------- extension generator ----------------
+// A session turns a site link into a draft (manifest.json, downloader.py, test fixtures, report): it never installs.
+// "Cài vào app…" asks main, which re-checks the draft offline, packs it and confirms with a native dialog.
+const GEN_RULES = {
+  R1: 'chỉ truy cập công khai hoặc API chính thức bằng khoá của bạn',
+  R2: 'robots.txt của site không cho phép',
+  R3: 'điều khoản của site cấm tải tự động',
+  R4: 'giới hạn tốc độ / số yêu cầu tới site',
+  R5: 'site có chống bot (Cloudflare…): Lustra không vượt qua',
+  R6: 'không tạo link cho bài bị ẩn / giới hạn',
+  R7: 'không hỗ trợ DRM / luồng mã hoá',
+  R8: 'nội dung bất hợp pháp',
+  R9: 'bộ lọc an toàn của Lustra phải giữ nguyên',
+  R10: 'chỉ https, địa chỉ công khai, đúng site đó; code chỉ dùng thư viện cho phép',
+  'model-refusal': 'model từ chối yêu cầu',
+  budget: 'hết ngân sách chi phí / lượt gọi model',
+};
+const GEN_STATUS = {
+  ready: ['sẵn sàng cài', 'ok'], failed: ['chưa đạt', 'err'], refused: ['bị từ chối', 'warn'], cancelled: ['đã huỷ', ''],
+  error: ['lỗi', 'err'], unknown: ['không rõ', ''],
+};
+const G = { mode: 'ai', running: false, key: null, session: '', restored: false };
+
+function genStatusPill(status) {
+  const [label, kind] = GEN_STATUS[status] || [status, ''];
+  return h('span', { class: `tagpill ${kind}` }, label);
+}
+function setGenMode(mode) {
+  G.mode = mode === 'template' ? 'template' : 'ai';
+  $$('#gen-mode button').forEach((b) => b.classList.toggle('on', b.dataset.mode === G.mode));
+  $('#gen-budget-wrap').hidden = G.mode !== 'ai';
+  $('#gen-hint').textContent = G.mode === 'ai'
+    ? 'Claude khảo sát site, viết / sửa downloader.py khi site không chạy Gelbooru / Danbooru và chạy thử tới khi đạt. Tính phí Claude API theo lượng dùng, dừng khi chạm mức tối đa.'
+    : 'Miễn phí, không cần khoá: chỉ cho site chạy Gelbooru 0.2 (DAPI) hoặc Danbooru, dùng template có sẵn của Lustra.';
+  renderGenNote();
+}
+function renderGenNote() {
+  const note = $('#gen-note');
+  if (G.mode === 'ai' && G.key && !G.key.set) {
+    note.replaceChildren('Chưa có khoá Claude API. ',
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); showPage('settings'); $('#ai-key').focus(); } }, 'Thêm trong Cài đặt → AI tạo extension'),
+      ', hoặc chọn "Không dùng AI" cho site Gelbooru / Danbooru.');
+    note.hidden = false;
+  } else note.hidden = true;
+}
+function genSetRunning(running) {
+  G.running = running;
+  $('#gen-start').disabled = running;
+  $('#gen-cancel').hidden = !running;
+  if (running) $('#gen-dot').className = 'dot busy';
+}
+function genAppend(text, cls = '') {
+  const log = $('#gen-log');
+  const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+  log.append(h('span', { class: cls }, `${text}\n`));
+  while (log.childNodes.length > 400) log.firstChild.remove();
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+function onGenEvent(ev, replay = false) {
+  if (!ev || typeof ev.type !== 'string') return;
+  if (ev.type === 'start') {
+    G.session = ev.session || '';
+    $('#gen-run').hidden = false;
+    if (!replay) $('#gen-log').replaceChildren();
+    $('#gen-phase').textContent = 'Đang bắt đầu…';
+    $('#gen-usage').textContent = '';
+    genAppend(`Phiên ${ev.session} · ${ev.url} · ${ev.mode === 'ai' ? `AI (${ev.model})` : 'không dùng AI'}`);
+  } else if (ev.type === 'phase') {
+    $('#gen-phase').textContent = ev.state === 'writing' ? `Claude đang soạn lệnh: ${ev.label}…` : `${ev.label}…`;
+  } else if (ev.type === 'log') {
+    const model = ev.source === 'model';
+    genAppend(model ? `Claude: ${ev.text}` : `• ${ev.text}`, model ? 'model' : ev.error ? 'err' : '');
+  } else if (ev.type === 'usage') {
+    $('#gen-usage').textContent = `$${Number(ev.usd || 0).toFixed(2)} / $${Number(ev.maxUsd || 0).toFixed(2)} · ${ev.turns} lượt`;
+  } else if (ev.type === 'done') {
+    const [label, kind] = GEN_STATUS[ev.status] || [ev.status, ''];
+    $('#gen-run').hidden = false;
+    $('#gen-phase').textContent = `Kết thúc: ${label}`;
+    $('#gen-dot').className = `dot ${kind === 'ok' ? 'ok' : kind === 'err' ? 'err' : ''}`;
+    if (ev.summary) genAppend(ev.summary, kind === 'err' ? 'err' : '');
+    if (!replay) {
+      toast(ev.status === 'ready' ? 'Đã tạo bản nháp extension: xem lại rồi bấm "Cài vào app…"' : `Tạo extension: ${label}`, ev.status === 'ready' ? 'ok' : 'err');
+      renderGenDrafts();
+    }
+  } else if (ev.type === 'exit') {
+    genSetRunning(false);
+    renderGenDrafts();
+  }
+}
+async function renderGen() {
+  if (!L.gen) { $('#gen-panel').hidden = true; return; }
+  try {
+    const st = await L.gen.status();
+    G.key = st.key;
+    if (!$('#gen-budget').value) $('#gen-budget').value = st.defaults?.maxUsd ?? 2;
+    setGenMode(G.mode);
+    genSetRunning(st.running);
+    if (!G.restored && st.events?.length) { // renderer reloaded: rebuild the log of the last / running session
+      $('#gen-log').replaceChildren();
+      st.events.forEach((e) => onGenEvent(e, true));
+      if (st.running) genSetRunning(true);
+    }
+    G.restored = true;
+  } catch (err) { toast(`Trình tạo extension: ${errMsg(err)}`, 'err'); }
+  renderGenDrafts();
+}
+async function renderGenDrafts() {
+  if (!L.gen) return;
+  let items = [];
+  try { items = await L.gen.list(); } catch (err) { toast(`Không đọc được bản nháp: ${errMsg(err)}`, 'err'); }
+  $('#gen-drafts').replaceChildren(...(items.length ? items.map(genDraftRow) : [h('p', { class: 'muted' }, 'Chưa có bản nháp nào.')]));
+}
+function genDraftRow(d) {
+  const at = d.finishedAt || d.startedAt;
+  const when = at ? new Date(at).toLocaleString('vi-VN') : d.session;
+  const running = G.running && G.session === d.session;
+  const act = (label, fn, cls = 'btn sm ghost') => h('button', { class: cls, onclick: fn }, label);
+  const meta = [d.site || d.url, when, d.mode === 'ai' ? `$${Number(d.usd || 0).toFixed(2)}` : d.mode === 'template' ? 'không AI' : ''];
+  return h('div', { class: 'gen-draft' },
+    h('div', { class: 'gen-draft-head' },
+      d.abbr ? h('span', { class: 'mod-abbr' }, d.abbr) : null,
+      h('b', {}, d.name || d.url || d.session),
+      running ? h('span', { class: 'tagpill acc' }, 'đang chạy') : genStatusPill(d.status),
+      d.engine ? h('span', { class: 'tagpill' }, d.engine) : null,
+      h('span', { class: 'muted' }, meta.filter(Boolean).join(' · '))),
+    d.summary ? h('p', {}, d.summary.length > 400 ? `${d.summary.slice(0, 400)}…` : d.summary) : null,
+    h('div', { class: 'row' },
+      act('Chi tiết', () => showGenDetail(d.session)),
+      d.draftDir ? act('Mở thư mục', () => L.gen.open(d.session)) : null,
+      d.draftDir && !running ? act('Xuất .zip…', () => exportGenDraft(d)) : null,
+      d.status === 'ready' && d.draftDir && !running ? act('Cài vào app…', () => installGenDraft(d), 'btn sm primary') : null,
+      running ? null : act('Xoá', () => removeGenDraft(d), 'btn sm ghost danger')));
+}
+async function exportGenDraft(d) {
+  try {
+    const r = await L.gen.exportZip(d.session);
+    if (!r) return;
+    const copy = () => navigator.clipboard?.writeText(r.sha256).then(() => toast('Đã chép SHA-256', 'ok'), () => {});
+    openModal(h('div', { class: 'gen-detail' },
+      h('h2', { text: 'Đã xuất extension' }),
+      h('p', {}, r.path),
+      h('p', { class: 'muted' }, 'SHA-256 (cần khi cài bằng "Cài từ file .zip…" hoặc chia sẻ cho người khác):'),
+      h('pre', {}, r.sha256),
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn ghost', onclick: copy }, 'Chép SHA-256'),
+        h('button', { class: 'btn primary', onclick: closeModal }, 'Đóng'))));
+  } catch (err) { toast(`Không xuất được: ${errMsg(err)}`, 'err'); }
+}
+async function installGenDraft(d) {
+  try {
+    const r = await L.gen.install(d.session);
+    toast(r?.restartRequired ? `Đã cài ${d.name}. Khởi động lại app để dùng phiên bản mới.` : `Đã cài ${d.name || d.extId}`, 'ok');
+    renderExtensions();
+  } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Cài thất bại: ${errMsg(err)}`, 'err'); }
+}
+async function removeGenDraft(d) {
+  try {
+    if (await L.gen.remove(d.session)) { toast('Đã xoá bản nháp', 'ok'); renderGenDrafts(); }
+  } catch (err) { toast(errMsg(err), 'err'); }
+}
+async function showGenDetail(session) {
+  let d;
+  try { d = await L.gen.get(session); } catch (err) { toast(errMsg(err), 'err'); return; }
+  const mark = (c) => (c.ok ? '✓' : c.severity === 'warning' ? '!' : '✗');
+  const checks = (d.checks || []).map((c) => h('tr', {}, h('td', {}, `${mark(c)} ${c.id}`), h('td', {}, String(c.detail || '').slice(0, 400))));
+  const rules = (d.ruleIds || []).map((r) => `${r}: ${GEN_RULES[r] || ''}`);
+  const u = d.usage || {};
+  const info = [
+    ['Site', d.site || d.url || '—'],
+    ['Extension', d.extId ? `${d.name} (${d.extId} · ${d.abbr}) v${d.version}` : '—'],
+    ['Engine', d.engine || '—'],
+    ['Cách tạo', d.mode === 'ai' ? `AI · ${d.model}` : 'template có sẵn, không AI'],
+    ['Chạy thử', `${d.testRuns || 0} lần · ${d.requests || 0} yêu cầu tới site`],
+    d.mode === 'ai' ? ['Chi phí', `$${Number(d.usd || 0).toFixed(3)} · ${nf.format(u.input || 0)} token vào · ${nf.format(u.output || 0)} token ra · `
+      + `${nf.format(u.cacheRead || 0)} token cache · ${d.turns || 0} lượt`] : null,
+    ['Tệp', (d.files || []).join(', ') || '—'],
+    d.error ? ['Lỗi', d.error] : null,
+  ].filter(Boolean);
+  openModal(h('div', { class: 'gen-detail' },
+    h('h2', {}, `${d.name || d.url || session} `, genStatusPill(d.status)),
+    d.summary ? h('pre', {}, d.summary) : null,
+    rules.length ? h('div', { class: 'notice' }, `Quy tắc: ${rules.join('; ')}`) : null,
+    h('table', { class: 'table' }, info.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))),
+    checks.length ? h('h3', {}, 'Kiểm tra') : null,
+    checks.length ? h('table', { class: 'table' }, checks) : null,
+    h('div', { class: 'modal-actions' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Đóng'))));
+}
+$('#gen-mode').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setGenMode(b.dataset.mode); });
+$('#gen-url').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !G.running) $('#gen-start').click(); });
+$('#gen-start').addEventListener('click', async () => {
+  const url = $('#gen-url').value.trim();
+  if (!url) { toast('Nhập link website', 'err'); $('#gen-url').focus(); return; }
+  const media = ['image', 'video', 'audio'].filter((m) => $(`#gen-m-${m}`).checked);
+  if (!media.length) { toast('Chọn ít nhất một loại media', 'err'); return; }
+  genSetRunning(true);
+  $('#gen-run').hidden = false;
+  $('#gen-log').replaceChildren();
+  $('#gen-usage').textContent = '';
+  $('#gen-phase').textContent = 'Đang khởi động…';
+  try {
+    await L.gen.start({ url, mode: G.mode, media, query: $('#gen-query').value.trim(), maxUsd: Number($('#gen-budget').value) || undefined });
+  } catch (err) {
+    genSetRunning(false);
+    $('#gen-dot').className = 'dot err';
+    $('#gen-phase').textContent = 'Không bắt đầu được';
+    toast(errMsg(err), 'err');
+  }
+});
+$('#gen-cancel').addEventListener('click', async () => {
+  try { if (await L.gen.cancel()) $('#gen-phase').textContent = 'Đang huỷ…'; } catch (err) { toast(errMsg(err), 'err'); }
+});
+
+// Settings → AI tạo extension: the key is write-only (main stores it encrypted, the renderer only learns whether one is set)
+function renderAiSettings() {
+  if (!L.gen) { $('#ai-key').closest('.panel').hidden = true; return; }
+  const st = S.secrets?.ai || { set: false, encryption: false };
+  $('#ai-key-note').textContent = st.encryption
+    ? 'Khoá được mã hoá bằng keyring của hệ điều hành và không hiện lại trên giao diện; chỉ tiến trình tạo extension nhận được khoá.'
+    : 'Không có keyring hệ điều hành: Lustra không lưu khoá Claude API dạng chữ thường. Chế độ "Không dùng AI" vẫn dùng được.';
+  $('#ai-key-state').replaceChildren(st.set ? h('span', { class: 'tagpill ok' }, 'đã lưu (mã hoá)') : '');
+  $('#ai-key').placeholder = st.set ? 'Khoá mới (trống = giữ nguyên)' : 'sk-ant-…';
+  $('#ai-key').disabled = !st.encryption;
+  $('#ai-key-save').disabled = !st.encryption;
+  $('#ai-key-clear').hidden = !st.set;
+  $('#ai-model').value = S.settings.ai?.model || 'claude-opus-5-5';
+  $('#ai-budget').value = S.settings.ai?.maxUsd ?? 2;
+}
+function onAiKeyStatus(st) {
+  S.secrets = { ...S.secrets, ai: st };
+  G.key = st;
+  renderAiSettings();
+  renderGenNote();
+}
+$('#ai-key-save').addEventListener('click', async () => {
+  const v = $('#ai-key').value.trim();
+  if (!v) { toast(S.secrets?.ai?.set ? 'Ô trống: khoá đã lưu được giữ nguyên.' : 'Nhập khoá trước khi lưu.', S.secrets?.ai?.set ? '' : 'err'); return; }
+  try {
+    onAiKeyStatus(await L.gen.setKey(v));
+    $('#ai-key').value = '';
+    toast('Đã lưu khoá Claude API (mã hoá)', 'ok');
+  } catch (err) { toast(`Không lưu được khoá: ${errMsg(err)}`, 'err'); }
+});
+$('#ai-key').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#ai-key-save').click(); });
+$('#ai-key-clear').addEventListener('click', async () => {
+  if (!window.confirm('Xoá khoá Claude API khỏi máy? Khoá không khôi phục được.')) return;
+  try { onAiKeyStatus(await L.gen.clearKey()); toast('Đã xoá khoá Claude API', 'ok'); } catch (err) { toast(errMsg(err), 'err'); }
+});
+$('#ai-model').addEventListener('change', (e) => saveSettings({ ai: { model: e.target.value } }));
+$('#ai-budget').addEventListener('change', async (e) => {
+  await saveSettings({ ai: { maxUsd: Number(e.target.value) || 2 } });
+  $('#ai-budget').value = S.settings.ai.maxUsd;
+  $('#gen-budget').value = S.settings.ai.maxUsd;
 });
 
 // ---------------- settings ----------------
@@ -1879,6 +2133,7 @@ function listen() {
     }
   });
   L.on('appearance:changed', (a) => applyAppearance(a));
+  if (L.gen) L.on('gen:event', (ev) => onGenEvent(ev));
 }
 
 // files or links dropped on the window must not navigate the app away
@@ -1892,6 +2147,7 @@ async function boot() {
   S.module = r.settings.search.module || 'rx';
   applyAppearance(r.appearance);
   renderSettings();
+  renderAiSettings();
   renderModuleButton();
   $('#btn-related').hidden = !relatedSupported();
   await loadModules();

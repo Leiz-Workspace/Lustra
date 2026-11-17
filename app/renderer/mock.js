@@ -22,9 +22,49 @@
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },
     tags: { autoUpdate: false, autoUpdateDays: 7 },
     advanced: { pythonPath: '', verbose: false, catalogUrl: '' },
+    ai: { model: 'claude-opus-5-5', maxUsd: 2 },
   };
   const secrets = {}; // abbr -> true (the real app never sends key values to the renderer either)
-  const secretsStatus = () => ({ encryption: true, modules: Object.fromEntries(Object.keys(secrets).map((k) => [k, { set: true, encrypted: true }])) });
+  let aiKey = false;
+  const aiStatus = () => ({ set: aiKey, encryption: true });
+  const secretsStatus = () => ({ encryption: true, modules: Object.fromEntries(Object.keys(secrets).map((k) => [k, { set: true, encrypted: true }])), ai: aiStatus() });
+  // extension generator: a scripted session (template path) producing an in-memory draft
+  const drafts = [];
+  const gen = { running: false, session: '', events: [] };
+  const genEmit = (ev) => { gen.events.push(ev); emit('gen:event', ev); };
+  const genRun = async (opts) => {
+    const host = String(opts.url).replace(/^https?:\/\//, '').split('/')[0] || 'example.com';
+    const id = host.split('.').filter((x) => x !== 'www')[0].replace(/[^a-z0-9]/g, '') || 'site';
+    const session = `20261117-1200${String(drafts.length).padStart(2, '0')}-abc${String(drafts.length).padStart(3, '0')}`;
+    Object.assign(gen, { running: true, session, events: [] });
+    const ai = opts.mode === 'ai';
+    genEmit({ type: 'start', session, url: opts.url, mode: opts.mode, model: ai ? settings.ai.model : '' });
+    const steps = [['survey_site', 'Đọc robots.txt và nhận diện engine của site', 'engine gelbooru_dapi (high), robots.txt: found'],
+      ['create_draft', 'Tạo thư mục bản nháp', `${id}: downloader.py, manifest.json, specs.md`], ['static_check', 'Kiểm tra tĩnh downloader.py', 'đạt'],
+      ['test_run', 'Chạy thử trong sandbox', 'đạt'], ['finish', 'Kết thúc phiên', 'session finished']];
+    let usd = 0;
+    for (const [tool, label, result] of steps) {
+      await delay(500);
+      if (!gen.running) break;
+      if (ai) genEmit({ type: 'log', source: 'model', text: `Gọi ${tool}.` });
+      genEmit({ type: 'phase', tool, label, state: 'running' });
+      genEmit({ type: 'log', tool, text: `${label}: ${result}` });
+      if (ai) { usd += 0.04; genEmit({ type: 'usage', usd, maxUsd: opts.maxUsd || settings.ai.maxUsd, turns: steps.indexOf(steps.find((x) => x[0] === tool)) + 1 }); }
+    }
+    const status = gen.running ? 'ready' : 'cancelled';
+    const report = { session, url: opts.url, site: `https://${host}/`, mode: opts.mode, model: ai ? settings.ai.model : '', status,
+      summary: status === 'ready' ? `Site chạy engine gelbooru_dapi: bản nháp dùng template có sẵn. Chạy thử với tag "scenery": 46 bài, lấy được 3 link tệp.` : 'Đã huỷ.',
+      ruleIds: [], extId: id, abbr: id.slice(0, 2), name: id[0].toUpperCase() + id.slice(1), version: '1.0.0', engine: 'gelbooru_dapi',
+      draftDir: `/mock/extgen/drafts/${session}/${id}`, files: ['downloader.py', 'manifest.json', 'specs.md', 'tests/expected.json', 'tests/fixtures/001.xml', 'tests/fixtures/index.json'],
+      checks: [{ id: 'manifest', ok: true, severity: 'error', detail: `${id} 1.0.0` }, { id: 'count', ok: true, severity: 'error', detail: "46 post(s) for 'scenery'" },
+        { id: 'download', ok: true, severity: 'error', detail: '3 / 3 file link(s)' }, { id: 'preview', ok: true, severity: 'warning', detail: 'preview urls ok' }],
+      testRuns: 1, requests: 5, usage: { input: 42000, output: 3100, cacheRead: 30000, cacheWrite: 9000, requests: 5 }, usd, turns: 5,
+      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+    drafts.unshift(report);
+    genEmit({ type: 'done', session, status, summary: report.summary, ruleIds: [], draftDir: report.draftDir, extId: id, usd, report });
+    gen.running = false;
+    emit('gen:event', { type: 'exit', session });
+  };
   const iconUrl = (id) => `../assets/icons/${id}.png`;
   const appearance = () => ({
     ...settings.appearance, iconUrl: iconUrl(settings.appearance.icon),
@@ -222,6 +262,29 @@
       installZip: async () => { throw new Error('mock'); },
       installCatalog: async (id) => { const m = modules.find((x) => x.id === id); if (m) m.installed = true; return { ...m, restartRequired: false }; },
       installRemote: async () => { throw new Error('mock'); },
+    },
+    gen: {
+      status: async () => ({ running: gen.running, session: gen.session, events: gen.events.slice(-300), key: aiStatus(), models: ['claude-opus-5-5', 'claude-sonnet-5-5'], defaults: { ...settings.ai } }),
+      start: async (opts) => {
+        if (gen.running) throw new Error('một phiên tạo extension đang chạy');
+        if (opts.mode === 'ai' && !aiKey) throw new Error('Chưa có khoá Claude API: thêm trong Cài đặt → AI tạo extension, hoặc dùng chế độ không AI.');
+        genRun(opts);
+        return { started: true };
+      },
+      cancel: async () => { const was = gen.running; gen.running = false; return was; },
+      list: async () => drafts.map((d) => ({ ...d })),
+      get: async (session) => ({ ...drafts.find((d) => d.session === session) }),
+      open: async () => '',
+      exportZip: async (session) => ({ path: `/home/user/Downloads/${drafts.find((d) => d.session === session)?.extId}-1.0.0.zip`, sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }),
+      install: async (session) => {
+        if (!window.confirm('(mock) Cài extension vào Lustra?')) throw new Error('cancelled');
+        const d = drafts.find((x) => x.session === session);
+        modules.push({ id: d.extId, name: d.name, abbr: d.abbr, version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: d.site, description: 'Generated draft', auth: {}, syntax: { maxTags: 0 } });
+        return { restartRequired: false };
+      },
+      remove: async (session) => { if (!window.confirm('(mock) Xoá bản nháp?')) return false; const i = drafts.findIndex((d) => d.session === session); if (i >= 0) drafts.splice(i, 1); return true; },
+      setKey: async (value) => { if (String(value || '').trim()) aiKey = true; return aiStatus(); },
+      clearKey: async () => { aiKey = false; return aiStatus(); },
     },
     appearance: { setBackgroundImage: async () => appearance() },
     app: {

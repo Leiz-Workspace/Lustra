@@ -13,7 +13,7 @@ const fsp = fs.promises;
 const os = require('node:os');
 const crypto = require('node:crypto');
 const readline = require('node:readline');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const netlib = require('node:net');
 const dnsp = require('node:dns').promises;
@@ -76,6 +76,7 @@ const DEFAULT_SETTINGS = {
   },
   tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {} },
   advanced: { pythonPath: '', verbose: false, catalogUrl: '' },
+  ai: { model: 'claude-opus-5-5', maxUsd: 2 }, // extension generator (the Claude API key itself is a secret, see AI_SECRET)
   window: { width: 1360, height: 860 },
 };
 
@@ -114,6 +115,9 @@ const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArr
 
 const RE_EXT_ID = /^[a-z][a-z0-9_-]{1,31}$/;
 const RE_SHA256 = /^[0-9a-fA-F]{64}$/;
+const AI_SECRET = '@anthropic'; // secrets key of the Claude API key: never an extension abbr (those match RE_ABBR)
+const RE_GEN_SESSION = /^\d{8}-\d{6}-[0-9a-f]{6}$/; // extension generator session folder (lustra/aigen/session.py)
+const GEN_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5'];
 const approvedPaths = new Set(); // files picked by the user through native dialogs (renderer cannot invent paths)
 
 function redact(text) {
@@ -159,8 +163,9 @@ function sanitizeSecrets(obj) {
   const out = {};
   if (!isPlainObject(obj)) return out;
   for (const [k, v] of Object.entries(obj)) {
-    if (!RE_ABBR.test(k) || !isPlainObject(v)) continue;
+    if (!(RE_ABBR.test(k) || k === AI_SECRET) || !isPlainObject(v)) continue;
     if (typeof v.enc === 'string' && v.enc) out[k] = { enc: v.enc };
+    else if (k === AI_SECRET) continue; // the Claude API key is only ever stored encrypted
     else if (typeof v.plain === 'string' && v.plain) out[k] = { plain: v.plain };
   }
   return out;
@@ -300,6 +305,13 @@ function sanitizeSettings() {
   s.tagLimits = sanitizeTagLimits(s.tagLimits) || {};
   settings.connection.headers = normalizeHttpMap(settings.connection.headers, 'Header', false);
   settings.connection.cookies = normalizeHttpMap(settings.connection.cookies, 'Cookie', false);
+  if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
+  settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
+}
+
+function clampUsd(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.round(n * 100) / 100, 0.1), 20) : fallback;
 }
 
 function migrateSettings(from) {
@@ -387,8 +399,11 @@ function coreCommand(kind, args = []) {
   // kind: 'server' (JSON-RPC sidecar) | 'cli' (download job). Packaged app: the bundled core (the Python path setting is
   // only a fallback when it is missing: the app's sources are not on disk); development: python -m lustra[.server]
   const core = bundledCore();
+  // 'aigen' (extension generator worker) and 'extgen' (draft tools: check / pack) are commands of the same core
   if (core) return { cmd: core, args: [kind, ...args], cwd: userData(), frozen: true };
-  return { cmd: resolvePython(), args: ['-m', kind === 'server' ? 'lustra.server' : 'lustra', ...args], cwd: REPO_ROOT, frozen: false };
+  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen' }[kind];
+  if (!mod) throw new Error(`unknown core command ${kind}`);
+  return { cmd: resolvePython(), args: ['-m', mod, ...args], cwd: REPO_ROOT, frozen: false };
 }
 
 function pythonEnv(extra = {}, frozen = false) {
@@ -452,6 +467,231 @@ async function getSecret(module) {
     return '';
   }
 }
+
+// ---------- extension generator (lustra.aigen worker) ----------
+// A session turns a website link into a draft folder (manifest.json, downloader.py, recorded test fixtures, report.json) under
+// <userData>/extgen/drafts/<session>/. Nothing is installed by a session: "install" is a separate user action that re-checks
+// the draft, packs it and asks for a native confirmation. The Claude API key never reaches the renderer: main decrypts it and
+// writes it to the worker's stdin only.
+
+function aiKeyStatus() {
+  return { set: Boolean(secrets[AI_SECRET]?.enc), encryption: encryptionAvailable };
+}
+
+async function setAiKey(value) {
+  value = typeof value === 'string' ? value.trim() : '';
+  if (!value) return aiKeyStatus(); // an empty field never deletes the key: clearAiKey does that
+  if (!/^[\x21-\x7e]{20,400}$/.test(value)) throw new Error('khoá Claude API không hợp lệ');
+  if (!encryptionAvailable) {
+    throw new Error('Hệ điều hành không có kho khoá mã hoá (Linux: gnome-keyring / KWallet): Lustra không lưu khoá Claude API dạng chữ thường.');
+  }
+  secrets[AI_SECRET] = { enc: (await safeStorage.encryptStringAsync(value)).toString('base64') };
+  saveSettings();
+  return aiKeyStatus();
+}
+
+function clearAiKey() {
+  if (Object.hasOwn(secrets, AI_SECRET)) {
+    delete secrets[AI_SECRET];
+    saveSettings();
+  }
+  return aiKeyStatus();
+}
+
+const draftsRoot = () => path.join(userData(), 'extgen', 'drafts');
+
+function genSessionDir(session) {
+  if (!RE_GEN_SESSION.test(String(session))) throw new Error('invalid draft session');
+  return path.join(draftsRoot(), String(session));
+}
+
+async function readGenReport(session) {
+  const dir = genSessionDir(session);
+  let rep;
+  try { rep = JSON.parse(await fsp.readFile(path.join(dir, 'report.json'), 'utf8')); } catch { rep = { status: 'unknown' }; }
+  if (!isPlainObject(rep)) rep = { status: 'unknown' };
+  // the draft folder comes from the session and the extension id, never from a path written in the file
+  const extId = RE_EXT_ID.test(String(rep.extId || '')) ? rep.extId : '';
+  const draft = extId ? path.join(dir, extId) : '';
+  return { ...rep, session, extId, draftDir: draft && fs.existsSync(path.join(draft, 'manifest.json')) ? draft : '' };
+}
+
+async function listGenDrafts() {
+  let names = [];
+  try { names = (await fsp.readdir(draftsRoot())).filter((n) => RE_GEN_SESSION.test(n)).sort().reverse().slice(0, 100); } catch { /* none yet */ }
+  const out = [];
+  for (const n of names) {
+    const { log, ...rep } = await readGenReport(n);
+    out.push(rep);
+  }
+  return out;
+}
+
+function runExtgen(args, timeoutMs = 180000) {
+  // python -m lustra.extgen <args> (JSON on stdout): check / pack of a draft, no network
+  return new Promise((resolve, reject) => {
+    const proc = spawnCore('extgen', args);
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } }, timeoutMs);
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { err = (err + d).slice(-4000); });
+    proc.on('error', (e) => { clearTimeout(timer); reject(e); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      let data = null;
+      try { data = JSON.parse(out); } catch { /* not json */ }
+      if (!data) return reject(new Error(`extgen ${args[0]}: exit ${code} ${redact(err).split('\n').slice(-3).join(' ')}`));
+      resolve({ code, data });
+    });
+    proc.stdin.end();
+  });
+}
+
+class Generator {
+  constructor() {
+    this.proc = null;
+    this.session = '';
+    this.events = [];
+    this.done = null;
+    this.stderr = [];
+    this.killTimer = null;
+    this.confirm = confirmMain; // native confirmation (replaced by the self-test)
+  }
+
+  status() {
+    return { running: Boolean(this.proc), session: this.session, events: this.events.slice(-300), key: aiKeyStatus(), models: GEN_MODELS,
+      defaults: { model: settings.ai.model, maxUsd: settings.ai.maxUsd } };
+  }
+
+  async start(opts) {
+    if (this.proc) throw new Error('một phiên tạo extension đang chạy');
+    if (!isPlainObject(opts)) throw new Error('invalid options');
+    const url = String(opts.url || '').trim();
+    if (!url || url.length > 2000 || /\s/.test(url)) throw new Error('link website không hợp lệ');
+    const mode = opts.mode === 'template' ? 'template' : 'ai';
+    const media = ['image', 'video', 'audio'].filter((m) => Array.isArray(opts.media) && opts.media.includes(m));
+    const cfg = {
+      cmd: 'start', url, mode, media: media.length ? media : ['image', 'video'],
+      query: typeof opts.query === 'string' ? opts.query.trim().slice(0, 200) : '',
+      model: GEN_MODELS.includes(opts.model) ? opts.model : settings.ai.model,
+      maxUsd: clampUsd(opts.maxUsd, settings.ai.maxUsd),
+    };
+    let apiKey = '';
+    if (mode === 'ai') {
+      apiKey = await getSecret(AI_SECRET);
+      if (!apiKey) throw new Error('Chưa có khoá Claude API: thêm trong Cài đặt → AI tạo extension, hoặc dùng chế độ không AI.');
+    }
+    this.events = [];
+    this.done = null;
+    this.stderr = [];
+    this.session = '';
+    const proc = spawnCore('aigen', []);
+    this.proc = proc;
+    readline.createInterface({ input: proc.stdout }).on('line', (line) => this._line(line));
+    readline.createInterface({ input: proc.stderr }).on('line', (line) => {
+      this.stderr.push(redact(line).slice(0, 500));
+      if (this.stderr.length > 40) this.stderr.shift();
+    });
+    proc.on('error', (e) => this._exit(null, e));
+    proc.on('exit', (code) => this._exit(code));
+    proc.stdin.on('error', () => { /* worker gone */ });
+    proc.stdin.write(`${JSON.stringify({ ...cfg, apiKey })}\n`); // the key goes through stdin only: not argv, env or files
+    apiKey = '';
+    return { started: true, mode, model: mode === 'ai' ? cfg.model : '' };
+  }
+
+  cancel() {
+    if (!this.proc) return false;
+    try { this.proc.stdin.write('{"cmd":"cancel"}\n'); } catch { /* gone */ }
+    clearTimeout(this.killTimer);
+    this.killTimer = setTimeout(() => this.kill(), 15000); // a request to the model can take a while to stop
+    return true;
+  }
+
+  kill() {
+    try { this.proc?.kill(); } catch { /* gone */ }
+  }
+
+  _line(line) {
+    if (!line.startsWith('@@GEN ')) return;
+    let ev;
+    try { ev = JSON.parse(line.slice(6)); } catch { return; }
+    if (!isPlainObject(ev) || typeof ev.type !== 'string') return;
+    if (ev.type === 'start' && RE_GEN_SESSION.test(String(ev.session))) this.session = ev.session;
+    if (ev.type === 'done') {
+      this.done = ev;
+      if (isPlainObject(ev.report)) delete ev.report.log; // the full log stays in report.json
+    }
+    this._event(ev);
+  }
+
+  _event(ev) {
+    this.events.push(ev);
+    if (this.events.length > 500) this.events.shift();
+    send('gen:event', ev);
+  }
+
+  _exit(code, error) {
+    if (!this.proc) return;
+    this.proc = null;
+    clearTimeout(this.killTimer);
+    if (!this.done) {
+      const why = error ? error.message : `mã thoát ${code}`;
+      this._event({ type: 'done', status: 'error', session: this.session, summary: `Tiến trình tạo extension dừng bất thường (${why}). ${this.stderr.slice(-3).join(' ')}`.trim() });
+    }
+    send('gen:event', { type: 'exit', session: this.session });
+  }
+
+  async exportZip(session) {
+    const rep = await readGenReport(session);
+    if (!rep.draftDir) throw new Error('bản nháp không có manifest.json');
+    const r = await dialog.showSaveDialog(mainWindow, {
+      title: 'Xuất extension ra file .zip',
+      defaultPath: path.join(app.getPath('downloads'), `${rep.extId}-${rep.version || '1.0.0'}.zip`),
+      filters: [{ name: 'Lustra extension', extensions: ['zip'] }],
+    });
+    if (r.canceled || !r.filePath) return null;
+    const { code, data } = await runExtgen(['pack', rep.draftDir, '--out', r.filePath]);
+    if (code !== 0 || !data.sha256) throw new Error(data.error || 'không đóng gói được bản nháp');
+    return { path: data.path, sha256: data.sha256 };
+  }
+
+  async install(session) {
+    // explicit user action only: offline re-check (the files may have been edited since), pack, native confirmation, install
+    const rep = await readGenReport(session);
+    if (this.proc && this.session === session) throw new Error('phiên này vẫn đang chạy');
+    if (rep.status !== 'ready' || !rep.draftDir) throw new Error('chỉ cài được bản nháp đã chạy thử đạt (hoặc xuất zip rồi tự cài)');
+    const check = await runExtgen(['check', rep.draftDir]);
+    if (check.code !== 0) {
+      const failed = (check.data.checks || []).filter((c) => !c.ok && c.severity === 'error').map((c) => c.id);
+      throw new Error(`bản nháp không còn qua kiểm tra: ${failed.join(', ') || check.data.error || 'lỗi'}`);
+    }
+    const zip = path.join(genSessionDir(session), `${rep.extId}.zip`);
+    const { code, data } = await runExtgen(['pack', rep.draftDir, '--out', zip]);
+    if (code !== 0 || !RE_SHA256.test(String(data.sha256 || ''))) throw new Error(data.error || 'không đóng gói được bản nháp');
+    const origin = rep.mode === 'ai' ? `AI (${rep.model || 'Claude'})` : 'template có sẵn của Lustra';
+    const ok = await this.confirm(`Cài extension "${rep.name || rep.extId}" (${rep.abbr || '?'}) vào Lustra?`,
+      `Site: ${rep.site || rep.url}\nTạo bởi: ${origin}. Chạy thử và kiểm tra lại: đạt.\nsha256: ${data.sha256}\n\n`
+      + 'Extension là code Python chạy trên máy bạn với quyền của bạn. Hãy xem downloader.py trước khi cài (nút "Mở thư mục").',
+      ['Huỷ', 'Cài']);
+    if (!ok) throw new Error('cancelled');
+    return sidecar.call('ext.install', { archivePath: zip, sha256: data.sha256 });
+  }
+
+  async remove(session) {
+    const dir = genSessionDir(session);
+    if (this.proc && this.session === session) throw new Error('phiên này vẫn đang chạy');
+    const rep = await readGenReport(session);
+    const ok = await this.confirm(`Xoá bản nháp "${rep.name || rep.extId || session}"?`,
+      'Thư mục bản nháp (manifest.json, downloader.py, dữ liệu chạy thử) sẽ bị xoá. Extension đã cài (nếu có) không bị ảnh hưởng.', ['Huỷ', 'Xoá']);
+    if (!ok) return false;
+    await fsp.rm(dir, { recursive: true, force: true });
+    return true;
+  }
+}
+
+const generator = new Generator();
 
 // ---------- sidecar (JSON-RPC) ----------
 
@@ -1240,6 +1480,8 @@ function registerIpc() {
     }
     settings = deepMerge(settings, patch);
     Object.assign(settings.connection, replaceMaps);
+    if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
+    settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
     saveSettings();
     if (patch?.connection) await applyProxyToSession();
     let iconSync;
@@ -1287,6 +1529,22 @@ function registerIpc() {
     return sidecar.call('ext.install', { archivePath: file, sha256: String(sha256).trim() });
   });
 
+  // extension generator: drafts only; installing one is its own confirmed action (Generator.install)
+  handle('gen:status', () => generator.status());
+  handle('gen:start', (_e, opts) => generator.start(opts));
+  handle('gen:cancel', () => generator.cancel());
+  handle('gen:list', () => listGenDrafts());
+  handle('gen:get', (_e, session) => readGenReport(session));
+  handle('gen:open', async (_e, session) => {
+    const rep = await readGenReport(session);
+    return shell.openPath(rep.draftDir || genSessionDir(session));
+  });
+  handle('gen:export', (_e, session) => generator.exportZip(session));
+  handle('gen:install', (_e, session) => generator.install(session));
+  handle('gen:remove', (_e, session) => generator.remove(session));
+  handle('gen:setKey', (_e, value) => setAiKey(value));
+  handle('gen:clearKey', () => clearAiKey());
+
   handle('appearance:setBackgroundImage', async (_e, file) => {
     if (!file) {
       settings.appearance.background.mode = 'icon';
@@ -1329,7 +1587,8 @@ function registerIpc() {
 function secretsStatus() {
   return {
     encryption: encryptionAvailable,
-    modules: Object.fromEntries(Object.entries(secrets).map(([k, v]) => [k, { set: true, encrypted: Boolean(v.enc) }])),
+    modules: Object.fromEntries(Object.entries(secrets).filter(([k]) => k !== AI_SECRET).map(([k, v]) => [k, { set: true, encrypted: Boolean(v.enc) }])),
+    ai: aiKeyStatus(),
   };
 }
 
@@ -1554,6 +1813,7 @@ async function runSelfTest(dir) {
       report.security.stillHasBridge = await js('typeof window.lustra === "object"');
     }
     report.quitGuard = await selfTestQuitGuard(dir);
+    report.generator = await selfTestGenerator(js);
     if (process.env.LUSTRA_SELFTEST_ICONS) {
       // writes ~/.local/share/applications/lustra.desktop: run it with a scratch HOME only
       const read = () => fs.readFileSync(desktopEntryPath(), 'utf8');
@@ -1643,6 +1903,70 @@ async function selfTestContract(js, quick) {
   return out;
 }
 
+async function selfTestGenerator(js) {
+  // extension generator: write-only key, a refused session (no network), no install without a ready draft and a confirmation
+  const out = {};
+  const realConfirm = generator.confirm;
+  const waitIdle = async () => { for (let i = 0; i < 100 && generator.proc; i++) await new Promise((r) => setTimeout(r, 100)); };
+  try {
+    const fake = `sk-ant-selftest-${'k'.repeat(32)}`;
+    out.setKey = await js(`window.lustra.gen.setKey(${JSON.stringify(fake)}).then((s) => s, (e) => 'rejected: ' + e.message)`);
+    out.keyStored = encryptionAvailable ? Boolean(secrets[AI_SECRET]?.enc) : !secrets[AI_SECRET];
+    out.keyNotPlain = !fs.readFileSync(settingsFile(), 'utf8').includes(fake);
+    const status = JSON.stringify(await js('window.lustra.gen.status()')) + JSON.stringify(await js('window.lustra.settings.get()'));
+    out.rendererHasNoKey = !status.includes(fake) && !(secrets[AI_SECRET]?.enc && status.includes(secrets[AI_SECRET].enc));
+    out.refused = await js(`(async () => {
+      const done = new Promise((resolve) => { const off = window.lustra.on('gen:event', (ev) => { if (ev.type === 'done') { off(); resolve(ev); } }); });
+      await window.lustra.gen.start({ url: 'http://example.com/', mode: 'template', media: ['image'] });
+      const ev = await Promise.race([done, new Promise((r) => setTimeout(() => r({ status: 'timeout' }), 60000))]);
+      return { status: ev.status, ruleIds: ev.ruleIds, session: ev.session };
+    })()`);
+    await waitIdle();
+    const refusedSession = out.refused.session;
+    out.listed = (await listGenDrafts()).some((d) => d.session === refusedSession && d.status === 'refused');
+    out.installNotReady = await js(`window.lustra.gen.install(${JSON.stringify(refusedSession)}).then(() => 'INSTALLED', (e) => e.message)`);
+    out.badSession = await js('window.lustra.gen.get("../../etc").then(() => "READ", (e) => e.message)');
+    await js('window.lustra.gen.clearKey()');
+    out.aiWithoutKey = await js(`window.lustra.gen.start({ url: 'https://example.com/', mode: 'ai' }).then(() => 'STARTED', (e) => e.message)`);
+    if (!bundledCore()) {
+      // a ready draft of the offline fake site of lustra/tests/test_extgen.py, then the confirmed install path of main
+      const py = 'import pathlib, sys\nfrom lustra.tests.test_extgen import SITE, GenRequest, GenSession, fake_fetcher\n'
+        + "r = GenSession(GenRequest(url=SITE, mode='template'), drafts_root=pathlib.Path(sys.argv[1]), fetcher=fake_fetcher()).run()\n"
+        + "print('@@' + r['session'] + ' ' + r['status'] + ' ' + r['extId'])";
+      const res = spawnSync(resolvePython(), ['-c', py, draftsRoot()], { cwd: REPO_ROOT, env: pythonEnv(), encoding: 'utf8', timeout: 180000 });
+      const m = /@@(\S+) (\S+) (\S+)/.exec(res.stdout || '');
+      out.readyDraft = m ? m[2] : `failed: ${redact(res.stderr || '').slice(-300)}`;
+      if (m && m[2] === 'ready') {
+        const [, session, , extId] = m;
+        const asked = [];
+        generator.confirm = async (msg) => { asked.push(msg); return false; };
+        out.installDeclined = await js(`window.lustra.gen.install('${session}').then(() => 'INSTALLED', (e) => e.message)`);
+        const before = await sidecar.call('ext.list', {});
+        out.notInstalledYet = !before.some((x) => x.id === extId && x.installed && x.source !== 'catalog');
+        generator.confirm = async (msg) => { asked.push(msg); return true; };
+        out.installed = await js(`window.lustra.gen.install('${session}').then((r) => r && r.id, (e) => 'error: ' + e.message)`);
+        out.asked = asked.length;
+        out.inList = (await sidecar.call('ext.list', {})).some((x) => x.id === extId && x.installed);
+        await sidecar.call('ext.uninstall', { id: extId }).catch(() => {});
+        out.removed = await js(`window.lustra.gen.remove('${session}')`);
+        out.removedGone = !fs.existsSync(genSessionDir(session));
+      }
+    }
+    generator.confirm = async () => true;
+    await js(`window.lustra.gen.remove(${JSON.stringify(refusedSession)})`);
+    out.ok = out.keyNotPlain && out.rendererHasNoKey && out.keyStored && out.refused.status === 'refused'
+      && (out.refused.ruleIds || []).includes('R10') && out.listed && /chỉ cài được/.test(out.installNotReady)
+      && /invalid draft session/.test(out.badSession) && /Chưa có khoá/.test(out.aiWithoutKey)
+      && (bundledCore() ? true : out.readyDraft === 'ready' && /cancelled$/.test(out.installDeclined) && out.notInstalledYet
+        && out.installed === 'fakebooru' && out.asked === 2 && out.inList && out.removed === true && out.removedGone);
+  } catch (err) {
+    out.error = String(err && err.stack || err);
+  } finally {
+    generator.confirm = realConfirm;
+  }
+  return out;
+}
+
 async function selfTestQuitGuard(dir) {
   // quit / relaunch with jobs: stand-in processes (Electron as node) for a job that honours 'cancel' and one that ignores it
   const graceful = "process.stdin.on('data', (d) => { if (String(d).includes('cancel')) process.exit(130); }); setInterval(() => {}, 1000);";
@@ -1717,6 +2041,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     quitApproved = true;
     jobs.killAll();
+    generator.kill(); // an unfinished generation leaves its draft folder and report behind
     sidecar.stop();
   });
 }

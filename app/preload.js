@@ -40,6 +40,20 @@ contextBridge.exposeInMainWorld('lustra', {
     installCatalog: (id) => invoke('ext:installCatalog', id),
     installRemote: (item) => invoke('ext:installRemote', item),
   },
+  gen: {
+    // extension generator: creates drafts; install is a separate call that main confirms natively. The API key is write-only
+    status: () => invoke('gen:status'),
+    start: (opts) => invoke('gen:start', opts),
+    cancel: () => invoke('gen:cancel'),
+    list: () => invoke('gen:list'),
+    get: (session) => invoke('gen:get', session),
+    open: (session) => invoke('gen:open', session),
+    exportZip: (session) => invoke('gen:export', session),
+    install: (session) => invoke('gen:install', session),
+    remove: (session) => invoke('gen:remove', session),
+    setKey: (value) => invoke('gen:setKey', value),
+    clearKey: () => invoke('gen:clearKey'),
+  },
   appearance: {
     setBackgroundImage: (file) => invoke('appearance:setBackgroundImage', file),
   },
@@ -52,7 +66,7 @@ contextBridge.exposeInMainWorld('lustra', {
   },
   thumbUrl: (url, referer) => `lustra-thumb://t/?u=${encodeURIComponent(url)}&r=${encodeURIComponent(referer || '')}`,
   on: (channel, cb) => {
-    const allowed = ['log', 'sidecar:status', 'sidecar:notify', 'jobs:update', 'jobs:log', 'appearance:changed'];
+    const allowed = ['log', 'sidecar:status', 'sidecar:notify', 'jobs:update', 'jobs:log', 'appearance:changed', 'gen:event'];
     if (!allowed.includes(channel)) throw new Error(`channel not allowed: ${channel}`);
     const handler = (_event, data) => cb(data);
     ipcRenderer.on(channel, handler);

@@ -3,6 +3,9 @@
 Entry point of the frozen core shipped with the desktop app (PyInstaller one-dir build, see tools/build_core.py):
   lustra-core server        JSON-RPC sidecar over stdio (lustra.server)
   lustra-core cli ARGS...   command line downloader (lustra CLI; exit codes of lustra_cmd.run_cmd)
+  lustra-core aigen         extension generator session worker (lustra.aigen.worker, stdin / stdout protocol)
+  lustra-core extgen ARGS   extension generator tools (python -m lustra.extgen: survey / new / record / check / pack)
+  lustra-core sandbox       test run of an extension draft (lustra.extgen.sandbox_boot, started by lustra.extgen.sandbox)
 The legacy Tk GUI is not bundled.
 """
 #########################################
@@ -14,7 +17,7 @@ import sys
 
 __all__ = ('main',)
 
-USAGE = 'usage: lustra-core server | lustra-core cli ARGS...'
+USAGE = 'usage: lustra-core server | lustra-core cli ARGS... | lustra-core aigen | lustra-core extgen ARGS... | lustra-core sandbox'
 
 
 def _setup_streams() -> None:
@@ -41,6 +44,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         from lustra.lustra import lustra_main
         return lustra_main(rest)
+    if command == 'aigen':
+        from lustra.aigen.worker import main as worker_main
+        return worker_main()
+    if command == 'extgen':
+        from lustra.extgen.__main__ import main as extgen_main
+        return extgen_main(rest)
+    if command == 'sandbox':
+        import runpy
+        runpy.run_module('lustra.extgen.sandbox_boot', run_name='__main__')
+        return 0
     print(f'unknown command \'{command}\'\n{USAGE}', file=sys.stderr)
     return 2
 
