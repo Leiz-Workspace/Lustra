@@ -18,15 +18,20 @@ client: the server only tags pictures, it never sees the query, the site or the 
 
 API v1 (JSON answers):
   GET  /v1/status   {"id", "repo", "revision", "license", "inputSize", "deviceSetting", "server", "workers", "loaded", "device",
-                     "idleUnload",
+                     "idleUnload", "media": {"video", "animated"},
                      "hardware": {"gpus": [{vendor, name, vramMiB, vramFreeMiB, shared}], "providers", "runtime", "ramMiB",
                      "ramFreeMiB", "cpus", "os"}}
   POST /v1/tag      body: the picture (jpeg / png / webp / gif, <= 12 MB) -> {"id", "tags": {tag: probability >= 0.05}, "ms"}
+  POST /v1/frames   body: a video (mp4 / webm / mkv / mov / avi) or an animated picture (gif / apng / webp), <= 200 MB ->
+                    {"id", "kind": "video" | "animated", "decoder", "length", "frames": [{"at", "tags"}], "ms"}: up to 8 frames
+                    evenly spaced, the first and last 5 % left out (lustra/media_frames.py, -gender_verify_media)
   POST /v1/load     no body: load the model now -> the status; 503 when it cannot be loaded (with the reason)
   POST /v1/unload   no body: free the model memory -> the status (the next picture loads it again)
-  errors: 400 not a picture, 401 token, 404, 405, 411 no Content-Length, 413 too large, 500 model error, 503 busy (retry later)
-  or the model cannot be loaded
-Pictures are decoded in memory and never stored or logged.
+  errors: 400 not a picture / an unreadable video, 401 token, 404, 405, 411 no Content-Length, 413 too large, 415 no decoder
+  for this media here (/v1/status "media": {"video": "ffmpeg ..." | "pyav ..." | "", "animated": "pillow ..." | ""}),
+  500 model error, 503 busy (retry later) or the model cannot be loaded
+Pictures are decoded in memory and never stored or logged. A video goes to a private temporary folder (mode 0700) for ffmpeg
+and is deleted as soon as its frames are read.
 """
 #########################################
 #
@@ -40,8 +45,11 @@ import hmac
 import itertools
 import json
 import os
+import pathlib
+import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -67,6 +75,7 @@ from .gender_model import (
     model_dir,
     model_status,
 )
+from .media_frames import MEDIA_MAX_BYTES, Frames, MediaError, decoders, extract_frames
 from .model_hw import detect_hardware, hardware_check
 
 __all__ = ('main', 'make_server')
@@ -247,12 +256,17 @@ class ModelServer(ThreadingHTTPServer):
     request_queue_size = 64
 
     def __init__(self, addr: tuple[str, int], loader: Callable[[], object], token: str, workers: int, info: dict, *,
-                 quiet: bool = False, idle_unload: int = 0, tagger=None, hardware: Callable[[], dict] = detect_hardware) -> None:
+                 quiet: bool = False, idle_unload: int = 0, tagger=None, hardware: Callable[[], dict] = detect_hardware,
+                 media: Callable[[], dict] = decoders, extract: Callable[[pathlib.Path], Frames] = extract_frames) -> None:
         super().__init__(addr, _Handler)
         self.loader = loader
         self.tagger = tagger
         self.device = str(getattr(tagger, 'device', 'cpu')) if tagger is not None else ''
         self.hardware = hardware
+        self.media = media
+        '''decoders of /v1/frames: {'video': 'ffmpeg ...' | 'pyav ...' | '', 'animated': 'pillow ...' | ''}'''
+        self.extract = extract
+        '''frames of a video / animated picture file (lustra/media_frames.py extract_frames; tests: a stub)'''
         self.load_lock = threading.Lock()
         self.last_used = time.monotonic()
         self.idle_unload = max(0, int(idle_unload))
@@ -317,8 +331,12 @@ class ModelServer(ThreadingHTTPServer):
             hw = self.hardware()
         except Exception:  # hardware probing must never break the status
             hw = None
+        try:
+            media = self.media()
+        except Exception:
+            media = {'video': '', 'animated': ''}
         return {**self.info, 'loaded': self.tagger is not None, 'device': self.device, 'idleUnload': self.idle_unload,
-                'hardware': hw}
+                'hardware': hw, 'media': media}
 
     def server_close(self) -> None:
         self._closing.set()
@@ -383,22 +401,50 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(503, f'the model failed to load ({type(err).__name__})')
         self._send(200, self.server.status())
 
-    def do_POST(self) -> None:
-        path = self.path.split('?', 1)[0]
-        if path not in (f'/{API_VERSION}/tag', f'/{API_VERSION}/load', f'/{API_VERSION}/unload'):
-            return self._error(404, 'not found', close=True)
-        if not self._authorized():
-            return self._error(401, 'token', close=True)
-        if path != f'/{API_VERSION}/tag':
-            return self._control(path.rsplit('/', 1)[1])
+    def _body_length(self, limit: int, what: str) -> int:
+        """Content-Length of a body to read (> 0), or -1 once an error was answered"""
         try:
             length = int(self.headers.get('Content-Length', ''))
         except ValueError:
-            return self._error(411, 'Content-Length is required', close=True)
+            self._error(411, 'Content-Length is required', close=True)
+            return -1
         if length <= 0:
-            return self._error(400, 'empty body')
-        if length > IMAGE_MAX_BYTES:
-            return self._error(413, f'picture larger than {IMAGE_MAX_BYTES} bytes', close=True)
+            self._error(400, 'empty body')
+            return -1
+        if length > limit:
+            self._error(413, f'{what} larger than {limit} bytes', close=True)
+            return -1
+        return length
+
+    def _predict(self, image: bytes) -> dict[str, float]:
+        """tags of one picture; a model process that died (killed, crashed) is started again once"""
+        for attempt in (1, 2):
+            tagger = self.server.model()
+            try:
+                return tagger.predict(image)
+            except ModelUnavailable:
+                if attempt == 2 or getattr(tagger, 'alive', True):
+                    raise
+        raise ModelUnavailable('the model process is gone')
+
+    def _model_error(self, err: Exception) -> None:
+        """the runtime itself (GPU out of memory...): every picture would fail, the client stops"""
+        kind = getattr(err, 'kind', type(err).__name__)
+        self.server.log(f'model error: {kind}: {str(err)[:300]}')
+        self._error(500, f'model error ({kind})')
+
+    def do_POST(self) -> None:
+        path = self.path.split('?', 1)[0]
+        if path not in (f'/{API_VERSION}/tag', f'/{API_VERSION}/frames', f'/{API_VERSION}/load', f'/{API_VERSION}/unload'):
+            return self._error(404, 'not found', close=True)
+        if not self._authorized():
+            return self._error(401, 'token', close=True)
+        if path == f'/{API_VERSION}/frames':
+            return self._frames()
+        if path != f'/{API_VERSION}/tag':
+            return self._control(path.rsplit('/', 1)[1])
+        if (length := self._body_length(IMAGE_MAX_BYTES, 'picture')) < 0:
+            return None
         image = self.rfile.read(length)
         if len(image) != length:
             return self._error(400, 'truncated body', close=True)
@@ -406,27 +452,71 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(503, 'busy')
         t0 = time.monotonic()
         try:
-            for attempt in (1, 2):  # a model process that died (killed, crashed) is started again once
-                tagger = self.server.model()
-                try:
-                    tags = tagger.predict(image)
-                    break
-                except ModelUnavailable:
-                    if attempt == 2 or getattr(tagger, 'alive', True):
-                        raise
+            tags = self._predict(image)
         except ModelUnavailable as err:
             return self._error(503, str(err))
         except (BadImage, OSError):  # not a picture, or one Pillow cannot decode
             return self._error(400, 'not a picture')
-        except Exception as err:  # the runtime itself (GPU out of memory...): every picture would fail, the client stops
-            kind = getattr(err, 'kind', type(err).__name__)
-            self.server.log(f'model error: {kind}: {str(err)[:300]}')
-            return self._error(500, f'model error ({kind})')
+        except Exception as err:
+            return self._model_error(err)
         finally:
             self.server.last_used = time.monotonic()
             self.server.slots.release()
         self._send(200, {'id': self.server.info['id'], 'tags': {t: round(p, 4) for t, p in tags.items()},
                          'ms': int((time.monotonic() - t0) * 1000)})
+
+    def _frames(self) -> None:
+        """/v1/frames: the body goes to a private temporary folder (ffmpeg reads files), its frames are read and tagged, the
+        folder is deleted before the answer. One worker slot covers reading the frames and tagging them"""
+        if (length := self._body_length(MEDIA_MAX_BYTES, 'media')) < 0:
+            return None
+        folder = tempfile.mkdtemp(prefix='lustra-frames-')  # mode 0700
+        try:
+            answer = self._frames_of(pathlib.Path(folder, 'media'), length)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        if isinstance(answer, dict):
+            return self._send(200, answer)
+        if answer[0] == 500:
+            return self._model_error(answer[1])
+        return self._error(answer[0], str(answer[1])[:200], close=answer[2])
+
+    def _frames_of(self, media: pathlib.Path, length: int) -> dict | tuple[int, object, bool]:
+        """the answer of /v1/frames, or (error code, message / exception, close the connection): sent once the media is deleted"""
+        left = length
+        try:
+            with open(media, 'wb') as f:
+                while left > 0 and (chunk := self.rfile.read(min(left, 1 << 20))):
+                    f.write(chunk)
+                    left -= len(chunk)
+        except OSError as err:  # disk full, client gone (socket timeout)
+            return 503, f'cannot store the media here ({err.strerror or type(err).__name__})', True
+        if left:
+            return 400, 'truncated body', True
+        if not self.server.slots.acquire(timeout=BUSY_WAIT):
+            return 503, 'busy', False
+        t0 = time.monotonic()
+        try:
+            clip = self.server.extract(media)
+            media.unlink(missing_ok=True)  # the frames are in memory now
+            frames = []
+            for at, image in clip.frames:
+                try:
+                    tags = self._predict(image)
+                except (BadImage, OSError):  # a frame the model cannot decode: left out
+                    continue
+                frames.append({'at': at, 'tags': {t: round(p, 4) for t, p in tags.items()}})
+        except MediaError as err:
+            return 415 if err.unsupported else 400, str(err), False
+        except ModelUnavailable as err:
+            return 503, str(err), False
+        except Exception as err:
+            return 500, err, False
+        finally:
+            self.server.last_used = time.monotonic()
+            self.server.slots.release()
+        return {'id': self.server.info['id'], 'kind': clip.kind, 'decoder': clip.decoder, 'length': clip.length, 'frames': frames,
+                'ms': int((time.monotonic() - t0) * 1000)}
 
     def do_PUT(self) -> None:
         self._error(405, 'method not allowed', close=True)
@@ -440,16 +530,18 @@ class _Handler(BaseHTTPRequestHandler):
 
 def make_server(host: str, port: int, tagger=None, *, loader: Callable[[], object] | None = None, token: str = '',
                 workers: int = DEFAULT_WORKERS, quiet: bool = False, idle_unload: int = 0, device: str = 'auto',
-                hardware: Callable[[], dict] = detect_hardware) -> ModelServer:
+                hardware: Callable[[], dict] = detect_hardware, media: Callable[[], dict] = decoders,
+                extract: Callable[[pathlib.Path], Frames] = extract_frames) -> ModelServer:
     """The model is loaded by loader on first use, default: a ModelProcess on device (unloading ends it). Tests: a tagger
-    (any object with predict(bytes) -> {tag: probability}) starts loaded and comes back after an unload"""
+    (any object with predict(bytes) -> {tag: probability}) starts loaded and comes back after an unload; media / extract:
+    the decoders and the frame reader of /v1/frames"""
     own = loader is None and tagger is None  # the model of this server: its --device is reported
     if loader is None:
         loader = (lambda: tagger) if tagger is not None else (lambda: ModelProcess(device, workers))
     info = {'id': getattr(tagger, 'model_id', MODEL_ID), 'repo': MODEL_REPO, 'revision': MODEL_REVISION, 'license': MODEL_LICENSE,
             'inputSize': INPUT_SIZE, 'deviceSetting': device if own else ''}
     return ModelServer((host, port), loader, token, workers, info, quiet=quiet, idle_unload=idle_unload, tagger=tagger,
-                       hardware=hardware)
+                       hardware=hardware, media=media, extract=extract)
 
 
 def describe_hardware(hw: dict) -> str:
@@ -519,6 +611,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     hw = detect_hardware()
     print(f'hardware: {describe_hardware(hw)}', file=sys.stderr, flush=True)
+    media = decoders()
+    print(f'media (/v1/frames): videos {media["video"] or "no (install ffmpeg on PATH, or PyAV)"}, '
+          f'animated pictures {media["animated"] or "no (pillow)"}', file=sys.stderr, flush=True)
     if args.preload:
         try:
             srv.model()

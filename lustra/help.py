@@ -49,6 +49,10 @@ HELP_ARG_GENDER_MODEL_URL = ('Address of the gender model server (python -m lust
 HELP_ARG_GENDER_MODEL_TOKEN = 'Token of the gender model server (default: environment variable LUSTRA_GENDER_MODEL_TOKEN)'
 HELP_ARG_GENDER_CONF = 'Minimal label confidence, lower confidence labels count as \'unknown\'. Default is \'medium\''
 HELP_ARG_GENDER_STRICT = 'Posts with futanari, trap or ambiguous characters never count as only_female / only_male'
+HELP_ARG_GENDER_VERIFY_MEDIA = ('With -gender_mode model: each downloaded video / animated picture whose tags were not conclusive '
+                                'is checked again on up to 8 of its frames (model server: POST /v1/frames, ffmpeg or PyAV for '
+                                'videos). A file that does not match the gender filter is moved into the \'_gender_mismatch\' '
+                                'subfolder of the destination, never deleted')
 HELP_ARG_SKIP_KNOWN = ('Skip posts already in the local download index (same md5, or same module and id) whose file is still on disk. '
                        'Default is \'off\'')
 HELP_ARG_MINDATE = 'Skip everything posted before this date, default is \'01-01-1970\''
