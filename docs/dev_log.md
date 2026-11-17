@@ -641,11 +641,22 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Nội dung:** sửa index khi nhiều tiến trình cùng mở file mới (7ag); hộp "Giới thiệu", `help.py` và thông tin gói ghi công tác giả bản gốc (7af); thêm khoá công khai `keys/` (7ag).
 - **Phát hành:** version 2.0.3 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r3`), ghi chú `docs/releases/v2.0.3.md`; `develop` → `staging` (rc) → `production` qua PR. Đây cũng là lần đầu tag của GitHub kích hoạt `forgejo-release.yml` trên Forgejo: package generic và Debian, Release, image ký cosign.
 - **CI trên Forgejo sau khi merge PR #6** (run 3, push lên `develop`): 333 test offline đạt, kể cả test index nhiều tiến trình. Bước test cũ (`lustra/tests/tests.py`) lỗi `No module named 'tkinter'`: các test này import giao diện Tk, mà image Debian không có `python3-tk`, và `ci.yml` còn bỏ `tkinterdnd2` khỏi danh sách cài. Ở run 1 bước này chưa chạy tới vì job đã dừng ở test index. Sửa: cài `python3-tk` và đủ `requirements.txt` như workflow của GitHub. Đã chạy nguyên văn các bước của `ci.yml` trong container `node:22-bookworm`: ruff, 333 test offline, 54 test cũ và test icon đều đạt.
+- **Kết quả:**
+  - Run 4 trên Forgejo (`ci.yml` sau PR #7) đạt.
+  - PR #8 lên `staging` tạo `v2.0.3-rc.30`: đạt cả 6 nền tảng, 17 file.
+  - PR #9 lên `production` đăng `v2.0.3` (Latest) bằng file của rc.30, `SHA256SUMS.txt` giống hệt. Image ghcr `2.0.3` và `latest` cùng digest (amd64 + arm64), kéo được không cần đăng nhập.
+  - Trên Forgejo, `forgejo-release.yml` chạy trọn lần đầu với hai tag này (run 6, 8). Đã kiểm bằng `keys/`:
+    - Release và package generic `lustra/<version>` có đủ file;
+    - `SHA256SUMS-linux.minisig` hợp lệ với `keys/minisign.pub`, trusted comment ghi đúng tag và commit;
+    - `.deb`, AppImage và model server khớp checksum;
+    - gói Debian `lustra-desktop` `2.0.3~rc.30` (component `rc`) và `2.0.3` (`main`);
+    - image `lustra-model-server` có chữ ký cosign và attestation CycloneDX hợp lệ với `keys/cosign.pub`.
+  - Máy macOS arm64 của GitHub thiếu: 4 lần job macOS không có runner nhận ("not acquired") và phải chạy lại.
 
 ### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ah)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
-- Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
+- Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
 - Cần người:
   - gán tập vàng của model giới tính (≥ 3.000 post, hai người, κ ≥ 0,8; lệnh ở [operations.md](operations.md) mục 3g), rồi đo precision tầng 0 / tầng 1 (AC-G07, AC-G09, AC-G10) và đánh giá 300 clip (AC-G17);
   - tạo khoá ký catalog thật (`tools/sign_catalog.py genkey`, giữ khoá bí mật ngoài repo), đưa khoá công khai vào `lustra/safety_data/catalog_keys.json` và ký catalog từ xa: tới lúc đó mọi catalog từ xa bị từ chối;
@@ -656,4 +667,4 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
-  - Forgejo: lần phát hành tiếp theo (cần nâng phiên bản, ví dụ 2.0.3, vì `develop` đã đổi file được phát hành) là lần đầu chạy trọn đường đăng package, Release và image ký cosign; kiểm `SHA256SUMS-linux` bằng `keys/minisign.pub` và image bằng `keys/cosign.pub` (7ag).
+  - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
