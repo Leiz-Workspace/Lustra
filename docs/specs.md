@@ -27,6 +27,7 @@ Ngoài phạm vi:
 | F-11 | Extensions: liệt kê; cài từ catalog cục bộ, từ file zip (bắt buộc SHA-256) hoặc từ catalog từ xa (URL + SHA-256); gỡ; không cho thay hay gỡ extension builtin |
 | F-12 | Cập nhật danh sách tag: thủ công trong app, tự động theo chu kỳ khi mở app, và qua cronjob/systemd timer |
 | F-13 | Giao diện: 4 theme (Ember, Graphite, Paper, OLED); 4 icon; nền là icon làm mờ (mặc định), ảnh tuỳ chọn không làm mờ, hoặc không có nền; chỉnh độ mờ, độ hiện, lớp phủ; làm mờ thumbnail (riêng tư) |
+| F-13b | Đổi icon áp dụng cả ngoài app, không cần khởi động lại trừ dock trên Wayland:<br>• Icon cửa sổ/taskbar (Windows, X11) và dock macOS đổi ngay; dock macOS được đặt lại mỗi khi app mở.<br>• Linux: launcher `~/.local/share/applications/lustra.desktop` do Lustra tạo (có dòng `X-Lustra-Launcher=true`) được ghi lại, với file icon tên mới mỗi lần (`<data>/icons/lustra-icon-<id>.png`); launcher do công cụ khác tạo thì không sửa. Dock trên Wayland chỉ đọc launcher khi app mở, nên cần khởi động lại.<br>• Windows (bản cài đặt): shortcut ở Start menu, Desktop và taskbar đã ghim trỏ tới exe của Lustra được đổi sang `<data>/icons/lustra-icon-<id>.ico`.<br>• Icon của chính file app (AppImage, `.exe`, gói `.app`) cố định lúc build.<br>`settings:set` trả về `iconSync = {launcher: updated\|unchanged\|missing\|foreign\|unsupported, shortcuts, restartForDock}` |
 | F-14 | Giới hạn 2 tag của Danbooru: metatag miễn phí (`rating:`, `id:`, `date:`, `score:`, `status:`, `parent:`) không bị tính. Tag dương vượt giới hạn được kiểm tra cục bộ (tag hiếm nhất theo danh sách tag được gửi lên server); tag phủ định vượt giới hạn chuyển thành nhóm loại trừ cục bộ |
 | F-15 | Nhận diện trang bot challenge (`cf-mitigated: challenge`): dừng ngay, không retry, báo hướng dẫn |
 | F-16 | Lọc theo giới tính nhân vật, tầng 0 (chỉ dựa vào tag): `-gender only_female,only_male,both,none,unknown`, `-gender_conf low\|medium\|high` (mặc định medium), `-gender_strict` (futa/trap/mơ hồ không tính là only_*). `-gender_mode model` chưa có (P3). Bộ luật theo site nằm ở `lustra/gender_rules/*.json`; extension có thể tự mang bộ luật riêng |
@@ -67,19 +68,34 @@ Khởi động bằng `python -m lustra.server` với các biến môi trường
 | `tags.browse` | `{module, prefix ('a'..'z' \| '#'), offset, limit, minPosts, types[], sort: 'posts'\|'az'}` | `{total, items:[{tag, posts, type}]}` |
 | `tags.validate` | `{module, tags}` | `{valid, tags[]}` |
 | `tags.status` | — | `[{module, path, size, mtime, loaded}]` |
-| `tags.update` | `{module, apiKey?, outDir?, delay?}` | `{job, outDir}`; sau đó gửi notification `tags.updateProgress`, `tags.updateDone` |
-| `search.count` | `{module, tags, args[]}` | `{count, requiredTags[], cfChallenge}` |
-| `search.preview` | `{module, tags, page, args[]}`: `args` có thể chứa `-gender …` | `{page, pageSize, items:[{id, preview, sample, isVideo, tags[], score, width, height, ext, date, rating, excluded, excludedBy[], gender?}], tasks[], requiredTags[], site, genderEnabled, genderStats{}, blockedCount}`. `excludedBy` ⊂ `required, neg, gender`; `gender = {label, conf, flags[], evidence[], conflict, source, effective}`; post bị chặn bị bỏ khỏi `items` |
+| `tags.update` | `{module, apiKey?, outDir?, delay?}` | `{job, outDir}`; sau đó gửi notification `tags.updateProgress`, `tags.updateDone {ok, written, count, previous, message}`. Mỗi module chỉ một lượt cùng lúc (`-32004`) |
+| `search.count` | `{module, tags, args[]}` | `{count, taskCounts[], approximate, requiredTags[], cfChallenge}`. `count` là tổng các task (nhóm OR bị tách); `approximate` = true khi có nhiều task (post có thể trùng) hoặc còn tag lọc cục bộ. Lỗi website trả `-32002` kèm thông điệp |
+| `search.preview` | `{module, tags, page, pageSize?, args[]}`: `args` có thể chứa `-gender …`; `pageSize` mặc định min(cỡ trang module, 200). Truy vấn nhiều task: trang N của mỗi task được gộp, bỏ trùng, sắp theo id giảm dần; kết quả có thêm `hasMore` | `{page, pageSize, items:[{id, preview, sample, isVideo, tags[], score, width, height, ext, date, rating, excluded, excludedBy[], gender?}], tasks[], requiredTags[], site, genderEnabled, genderStats{}, blockedCount}`. `excludedBy` ⊂ `required, neg, gender`; `gender = {label, conf, flags[], evidence[], conflict, source, effective}`; post bị chặn bị bỏ khỏi `items` |
+| `tags.resolve` | `{module, tags[]}` (tối đa 64) | `{items:[{tag, canonical, alias, posts, type, known}], hasList}`. Metatag: `type:'meta'`, `known:true`. Tag chứa `*`/`?`: `type:'wildcard'`, `known` = có tag khớp. `alias` chỉ true khi tag không có trong danh sách mà tag đích thì có |
+| `tags.fuzzy` | `{module, text, limit=8 (≤ 50)}` | `[{tag, posts, type, distance}]`. Sai tối đa 1 ký tự (3–5 ký tự) hoặc 2 ký tự (từ 6 ký tự); thiếu/thừa `_` không tính; dưới 3 ký tự trả `[]` |
+| `search.related` | `{module, tags, args[], limit=30 (≤ 200)}` | `{items:[{tag, count, posts, type}], sample}`: tag xuất hiện cùng trong trang 0 (200 post, đã qua bộ lọc cục bộ), trừ tag của truy vấn và metatag |
 | `files.nonEmpty` | `{path}` | `{exists, nonEmpty}` |
+| `files.identify` | `{names[] (≤ 500), module}`: tên file, đường dẫn, link post hoặc link ảnh | `{items:[{name, module, kind:'id'\|'md5'\|'', value, note}], queries:[{module, tags, count, dropped}], max}`. Nhận ra: tên Lustra đặt (`db_12345…`, `12345…` = module đang chọn), md5 32 ký tự (`<md5>.jpg`, `sample_<md5>`, `__tags__<md5>` của Danbooru), link post/ảnh của các site đã biết (so theo host và tên miền gốc trong `site` của manifest). Mỗi module một truy vấn: Danbooru dùng danh sách `id:1,2,3` / `md5:a,b` (100 mục mỗi danh sách); site khác dùng nhóm OR `(id:1~id:2)`, tối đa 64 mục |
 | `app.shutdown` | — | (notification) thoát |
 
-Notification từ sidecar: `ready` (giống `app.info`), `log {text, scope?}`, `tags.updateProgress`, `tags.updateDone`. Mã lỗi: `-32601` không có method, `-32602` tham số sai, `-32001` module chưa cài, `-32002` thao tác thất bại (kèm `data.log`), `-32003` không lấy được trang, `-32000` lỗi khác.
+Notification từ sidecar: `ready` (giống `app.info`), `log {text, scope?}`, `tags.updateProgress`, `tags.updateDone`. Mã lỗi: `-32601` không có method, `-32602` tham số sai, `-32001` module chưa cài, `-32002` thao tác thất bại (kèm `data.log`), `-32003` không lấy được trang, `-32004` đang cập nhật danh sách tag của module đó, `-32000` lỗi khác. Đường dẫn trong `files.nonEmpty` hiểu `~` và đường dẫn tương đối theo thư mục home (giống job tải).
 
 ## 5. Giao thức job tải (CLI IPC)
-- Lệnh: `LUSTRA_IPC=1 python -m lustra -module <abbr> [connection args] [date args] [download args] <tags...>`
-- stdout: log thường, cùng các dòng `@@LUSTRA_PROGRESS {"state","stateName","task","tasks","total","totalAll","processed","success","failed","pages","cfChallenge","genderFiltered","blocked"}`. Dòng cuối cùng có `stateName: "DONE"` kèm `failedItems[]` và `genderStats{}`.
+- Lệnh: `LUSTRA_IPC=1 LUSTRA_CATALOG_AUTOLOAD=0 python -m lustra -module <abbr> [connection args] [date args] [download args] -- <tags...>`. Tag luôn đứng sau `--`, nên tag loại trừ trùng tên tuỳ chọn (`-webm`, `-v`) vẫn là tag.
+- stdout: log thường, cùng các dòng `@@LUSTRA_PROGRESS {"state","stateName","task","tasks","total","totalAll","processed","success","failed","pages","cfChallenge","genderFiltered","blocked","streaming","scanning"}`. `streaming` = true khi file được tải trong lúc vẫn quét trang (truy vấn 1 task), khi đó `totalAll` còn tăng cho tới khi `scanning` = false. Dòng cuối cùng có `stateName: "DONE"` kèm `failedItems[]`, `genderStats{}`, `ok`, `exitCode`, `error`, `cancelled`.
+- Exit code: `0` thành công (kể cả không tìm thấy gì), `1` lỗi (lỗi nặng, bot challenge mà không tải được file nào, hoặc mọi file đều lỗi), `2` sai tham số (argparse), `3` xong nhưng một số file lỗi, `130` bị huỷ. App coi `0` và `3` là "Xong".
 - stdin: gửi `cancel\n` để huỷ có kiểm soát (đặt cờ `killed` cho thread gốc). Nếu sau 15 s tiến trình chưa thoát, main sẽ kill.
-- Trạng thái (`DownloaderStates`): LAUNCHING → SEARCHING → SCANNING_PAGES1/2 → FILTERING_ITEMS1..4 → DOWNLOADING → DONE.
+- Trạng thái (`DownloaderStates`): LAUNCHING → SEARCHING → SCANNING_PAGES1/2 → FILTERING_ITEMS1..4 → DOWNLOADING → DONE. Ở chế độ streaming, các trạng thái quét/lọc và DOWNLOADING xen kẽ theo từng lô trang.
+- Pipeline:
+  - Truy vấn 1 task (không parent/favorites/pool) dùng **streaming**: quét trang theo thứ tự tải, lọc từng lô, tải ngay, `-dlimit` dừng quét sớm. Kết quả giống pipeline cũ; tắt bằng `LUSTRA_STREAMING=0`.
+  - Danbooru với sort mặc định phân trang bằng cursor id (`page=a<id>`/`b<id>`), không giới hạn số trang.
+- Tuỳ chọn `-tags_limit N`: giới hạn số tag mỗi lượt tìm của tài khoản (Danbooru: 2 thường, 6 Gold, 12 Platinum), thay giới hạn mặc định của module. Nhóm OR bị tách thành nhiều lượt tìm tối đa 64 lượt.
+- Header/cookie: app truyền từng cặp `-header name=value` / `-cookie name=value`. `-headers`/`-cookies` nhận object JSON gồm các chuỗi (giữ đúng `"`, `\`, `\uXXXX`). Header người dùng thắng header mặc định của module.
+- Giới hạn tốc độ API của module (`_get_min_request_interval`) dùng chung giữa mọi tiến trình qua file khoá `<data>/ratelimit/`.
+- Tải file:
+  - Một GET dạng stream mỗi lần thử, không HEAD; ghi vào `<tên>.part`, xong mới đổi tên.
+  - Resume bằng Range/If-Range; 400/401/403/404/405/410/451 không retry; 429/503 theo `Retry-After`, mọi thread cùng chờ.
+  - Sau 3 lần bot challenge liên tiếp thì không tải tiếp các file còn lại.
 
 ## 6. Manifest extension
 Schema: [`schemas/extension-manifest.schema.json`](schemas/extension-manifest.schema.json). Ràng buộc chính:

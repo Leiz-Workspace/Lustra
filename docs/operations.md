@@ -24,9 +24,14 @@ Biến môi trường:
 - `LUSTRA_TAGS_DIR`: thư mục tag list ưu tiên;
 - `LUSTRA_CATALOG_DIR`, `LUSTRA_CATALOG_URL`: catalog extension;
 - `LUSTRA_IPC=1`: CLI chạy ở chế độ báo tiến độ;
+- `LUSTRA_CATALOG_AUTOLOAD=0`: chỉ dùng extension builtin và đã cài (app đặt cho sidecar và job). Mặc định CLI và GUI Tk vẫn nạp extension trong catalog khi cần;
+- `LUSTRA_CORE`: đường dẫn lõi đóng băng (`lustra-core`) cho app dev;
+- `LUSTRA_STREAMING=0`: tắt pipeline streaming (quay lại kiểu quét hết rồi mới tải, dùng để so sánh / gỡ lỗi);
 - `LUSTRA_SECRET_ARGS`: danh sách JSON các tham số bí mật (`["-api_key", "KEY,USER"]`) do app truyền cho CLI; CLI đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
 - `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron.
+
+Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một số file lỗi, `130` bị huỷ. Script hoặc cron có thể dựa vào mã này.
 
 ## 3. Cronjob cập nhật danh sách tag
 ```bash
@@ -59,7 +64,12 @@ LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -
 
 ## 5. Build
 - CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.
-- App desktop: chưa cấu hình electron-builder. Hướng đề xuất: đóng gói `app/` cùng sidecar build bằng PyInstaller (`lustra.server` + `lustra` CLI), rồi đặt `LUSTRA_PYTHON` trỏ tới binary đó.
+- App desktop:
+  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB. Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm.
+  2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
+  - App đã đóng gói dùng `<resources>/core/lustra-core`. Biến `LUSTRA_CORE` trỏ app dev sang một lõi đóng băng.
+  - Self-test chạy được trên file đã đóng gói với cùng các biến `LUSTRA_SELFTEST_*`; thêm `LUSTRA_SELFTEST_QUICK=1` để bỏ các bước cần mạng. `LUSTRA_SELFTEST_ICONS=1` kiểm việc đồng bộ launcher khi đổi icon; nó **ghi vào `~/.local/share/applications`**, nên chỉ chạy kèm `HOME=<thư mục tạm>`.
+  - CI: job `desktop` trong `.github/workflows/build.yml`.
 
 ## 6. Nhánh git
-`main` (ổn định) ← `staging` (kiểm thử) ← `develop` (phát triển). Làm tính năng trên `develop`, merge lên `staging` để kiểm thử, rồi lên `main` để phát hành.
+`production` (nhánh mặc định, phát hành) ← `staging` (kiểm thử) ← `develop` (phát triển). Làm tính năng trên `develop`, merge lên `staging` để kiểm thử, rồi lên `production` để phát hành. Khi đẩy lên GitHub, đặt default branch = `production`.

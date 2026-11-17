@@ -11,7 +11,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - Đổi tên package `ruxx` → `lustra`, launcher `lustra.sh`/`lustra.cmd`, `__RUXX_DEBUG__` → `__LUSTRA_DEBUG__`, phiên bản `2.0 r1`.
 - Giữ dòng bản quyền MIT gốc trong `LICENSE`, thêm dòng cho Lustra; README ghi rõ là bản phái sinh.
 - `.gitignore`: trước đây bỏ qua mọi `*.json` (sẽ làm mất `2tags/` và manifest), nay chỉ bỏ qua file autoconfig ở thư mục gốc (`/*.json`, `/*.cfg`).
-- `git init`, commit đầu trên `main`, tạo nhánh `staging` và `develop`; công việc mới nằm trên `develop`.
+- `git init`, commit đầu, tạo nhánh `staging` và `develop`; công việc mới nằm trên `develop`. *(Sửa sau: nhánh đầu tiên được đặt nhầm là `main`, đã đổi thành `production` theo quy ước develop / staging / production, trong đó production là nhánh mặc định.)*
 
 ### 2. Sửa lỗi lõi (đã phát hiện khi review)
 | Lỗi | Sửa | Test |
@@ -131,6 +131,116 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - 18 test bảo mật mới, tổng 82 test pass, lint sạch;
   - E2E bảo mật: điều hướng, IP nội bộ, zip không qua dialog, `openPath` file đều bị chặn; preview và tải thật vẫn chạy.
 - **Còn lại:** đợt B (kết quả sai, treo), C (hiệu năng tải), D (UX, search giai đoạn 2, đóng gói).
+
+### 7g. Sửa đợt B (kết quả sai, treo, job) + quy ước nhánh
+- **Nhánh git:** đổi `main` thành `production` (nhánh mặc định), giữ `develop` / `staging`; CI chạy khi push lên cả 3 nhánh.
+- **Đợt B đã sửa:** B1–B15, chi tiết từng mục trong [báo cáo](reports/audit-2026-11-16.md). Điểm chính:
+  - tìm trang/lọc item theo ngày bằng binary search chuẩn;
+  - không còn retry vô hạn, một item lỗi không huỷ cả lượt;
+  - CLI trả exit code thật, app hiện lý do lỗi và hàng đợi không bị kẹt;
+  - `search.count` báo lỗi và cộng theo task;
+  - escape URL, metatag, `--` trước tag;
+  - updater danh sách tag an toàn hơn.
+- **Thay đổi giao tiếp:**
+  - dòng DONE thêm `ok`, `exitCode`, `error`, `cancelled`;
+  - `search.count` trả thêm `taskCounts`, `approximate`;
+  - `tags.updateDone` thêm `ok`; mã lỗi mới `-32004`;
+  - IPC mới `sidecar:getStatus`; biến môi trường `LUSTRA_CATALOG_AUTOLOAD`.
+- **Kiểm chứng:**
+  - `test_batch_b.py`: 24 test (gồm 3000 ca ngẫu nhiên cho trang biên và 3000 ca cho lọc item, so với brute force);
+  - tổng 127 test offline pass, lint sạch;
+  - E2E Electron: autocomplete, preview/count (`≤ 27.517`), tải `id:5000..5030 -animated` xong với exit 0 và 2 file, job module chưa cài báo "Lỗi" kèm lý do và hàng đợi chạy tiếp, kiểm tra bảo mật vẫn chặn.
+- **Quan sát cho đợt C:** `-dlimit 2` với `scenery -animated` vẫn quét khoảng 14.000 post trước khi tải (C1: chưa có producer/consumer).
+
+### 7h. Sửa đợt C (hiệu năng tải, đa luồng, sidecar, renderer)
+- **Cách làm:** 3 nhánh việc độc lập sửa song song trên các file không chồng nhau:
+  - lõi tải (C1–C7) do phiên chính làm;
+  - sidecar và danh sách tag (C8) do một agent;
+  - renderer Electron (C9) do một agent.
+  Sau đó phiên chính review diff và chạy kiểm chứng chung.
+- **Đã sửa:** C1–C9, chi tiết và số đo trong [báo cáo](reports/audit-2026-11-16.md). Điểm chính:
+  - streaming cho truy vấn 1 task, `-dlimit` dừng quét sớm;
+  - cursor id cho Danbooru, không còn giới hạn 1000 trang;
+  - tải file: keep-alive, không HEAD, ghi stream, resume, fail nhanh, backoff dùng chung, dừng khi bị bot challenge liên tiếp;
+  - executor bền, huỷ tức thì;
+  - danh sách tag gọn hơn khoảng 7 lần, nạp từ cache trong khoảng 10 ms, autocomplete không bị preview chặn;
+  - UI job, lưới preview và log cập nhật theo node.
+- **Thay đổi giao tiếp:**
+  - progress IPC thêm `streaming`, `scanning`;
+  - biến môi trường `LUSTRA_STREAMING`;
+  - API `TagsDB` bỏ `DB`/`DBKeys`, thêm accessor (`is_loaded`, `count`, `as_dict`, `load_from_dict`…);
+  - hook module mới: `_supports_id_cursor`, `_form_cursor_page_address`, `_get_query_size_or_none`, `_page_error`.
+- **Kiểm chứng:**
+  - `test_batch_c.py`: 15 test, gồm ma trận 44 tổ hợp so sánh hai pipeline trên website giả db/rx, và server HTTP thật cục bộ cho resume, Range, 404, 429, bot challenge, huỷ.
+  - `test_batch_c_tags.py`: 16 test.
+  - Tổng 158 test offline pass, lint sạch.
+  - E2E Electron đạt: job tải chạy streaming và xong với exit 0.
+- **Tải thật:**
+  - Danbooru `scenery -animated -dlimit 5`: 3,4 s, so với HEAD quét 286 s rồi crash.
+  - Rule34 lúc thử trả 429 cho API key mặc định dùng chung (giới hạn phía site).
+  - CDN Danbooru bật bot challenge sau khoảng 180 file tải liên tục.
+
+### 7i. Đợt C, phần làm tiếp (2026-11-17)
+- **Cursor Gelbooru:**
+  - `id:>N sort:id:asc` / `id:<N`, đã kiểm trên Xbooru thật; dùng cho rx/xb/bb khi kết quả vượt giới hạn tìm kiếm.
+  - Có kiểm trang đầu và lùi về phân trang offset; cursor không tiến thì báo lỗi.
+- **Xbooru thật**, chế độ touch, so với pipeline cũ:
+  - `scenery -dlimit 3` cả 2 chiều: cùng 3 file;
+  - `sky -1girl`: cùng 2201 post. Streaming mất 5,3–5,4 s, bản cũ 5,0 s; ở chế độ touch chỉ đo phần quét.
+- **Hiệu năng streaming:**
+  - giữ tối đa 2 lô trong hàng chờ tải;
+  - đếm file đang chạy theo O(1);
+  - prefetch trang cursor kế tiếp.
+- **Giãn nhịp tải:** thêm hook `_get_min_download_interval`. Danbooru thật với nhịp 0,2 s vẫn bị challenge sau 191 file, nên không đặt giá trị cho Danbooru.
+- **Log lỗi tải:** ghi lý do cụ thể (`HTTP 404, not retried`, `bot challenge`, `not requested…`).
+- **Rule34:** API key mặc định dùng chung trả 429 (Cloudflare), không có key thì báo "Missing authentication". Muốn kiểm Rule34 thật cần API key riêng.
+- **Kiểm chứng:** `test_batch_c.py` có 17 test (thêm cursor Gelbooru, lùi về offset, giãn nhịp); tổng 160 test offline pass, lint sạch.
+
+### 7j. Sửa đợt D (UX, search giai đoạn 2, đóng gói, GUI Tk, chính sách mạng) — 2026-11-17
+- **Cách làm:** có "hợp đồng" giao diện chung (tên RPC/IPC, khoá settings, file mỗi bên sở hữu). Agent A làm sidecar, B làm renderer, C làm Electron main và đóng gói, phiên chính làm lõi. Phiên chính chuyển những điểm A làm khác hợp đồng sang B khi B còn đang chạy, rồi review và kiểm chứng chung.
+- **Đã sửa:** D1–D8, chi tiết trong [báo cáo](reports/audit-2026-11-16.md).
+- **Phần ghép do phiên chính làm:**
+  - `valid_json` (C phát hiện): xoá dấu `\` làm hỏng header có `"`, `\` hoặc unicode.
+  - `.gitignore`: cho phép `app/build/`, bỏ qua `app/build/core/`.
+  - Toast cho `app.notice`.
+  - Thêm test mới vào CI.
+- **Lỗi hồi quy của đợt C, phát hiện khi viết test D8:** `-dump_comments` / source / md5 khi streaming gây `KeyError`; sửa bằng `_item_info_for`.
+- **Kiểm chứng:**
+  - 197 test offline pass (143 + 54 legacy); ruff và `node --check` sạch.
+  - E2E Electron dev: autocomplete, preview 192 card, job tải streaming xong (exit 0); `contract` đạt hết (resolve, fuzzy, related, pageSize, secrets, settings, header có `"`/`\`, `-tags_limit`, `lang: vi`); `quitGuard` đạt; bảo mật đạt.
+  - C đã chạy self-test đạt trên AppImage (lõi đóng băng, sandbox bật).
+  - GUI Tk chạy dưới xvfb (sau khi vô hiệu kéo-thả): key theo module, menu theo capability, không có lỗi.
+- **Còn lại:** build Windows/macOS; kiểm Rule34 thật cần API key riêng.
+
+### 7k. Tìm theo tên file / link — 2026-11-17
+- **Yêu cầu:** tìm đúng post từ tên file đã tải hoặc link.
+- **Kiểm site thật trước khi làm:**
+  - Danbooru nhận `id:5000,5001,5002` và `md5:a,b,c`.
+  - Xbooru (Gelbooru 0.2) nhận `id:N` và `md5:<hash>`.
+- **Sidecar (`files.identify`):** nhận dạng tên Lustra đặt, md5 (tên gốc, `sample_`, kiểu tải từ Danbooru `__…__md5`), đường dẫn Linux/Windows, link post của db/rx/e621/paheal/rule34us… và link CDN (khớp theo tên miền gốc: `cdn.donmai.us` → db). Tạo một truy vấn cho mỗi module.
+- **Giao diện:**
+  - Nút "Theo tên file" mở hộp thoại: ô dán, nút "Chọn file…" (chỉ lấy tên), danh sách kết quả nhận dạng, nút "Tìm N mục trên <site>" (module đang chọn đứng đầu).
+  - Dán file/link vào ô tag, hoặc kéo-thả file/link lên thanh tìm kiếm, cũng mở hộp thoại này.
+  - Mock hỗ trợ `files.identify`.
+- **Kiểm chứng:**
+  - 2 test mới (15 dạng tên/link, dựng truy vấn, giới hạn 64/100, `tags.validate`); tổng 199 test pass.
+  - Self-test Electron có bước mới: hộp thoại nhận ra 2/3 mục, truy vấn `id:5000,5001`, preview 2 post; ảnh `03a-files-dialog`, `03b-files-search`.
+  - Danbooru thật: `(id:5000,5001~md5:…)` → 5002, 5001, 5000.
+
+### 7l. Icon ngoài app đổi theo Cài đặt — 2026-11-17
+- **Trước đây:**
+  - Icon cửa sổ/taskbar (Windows, X11) và dock macOS đổi ngay, nhưng mở lại app thì dock macOS quay về icon gốc.
+  - Trên Wayland phải tự bấm "Cập nhật launcher".
+  - Shortcut Windows không đổi.
+- **Giờ (`syncIcon` trong `main.js`, chạy khi đổi icon và khi app khởi động):**
+  - **Linux:** launcher do Lustra tạo được ghi lại nguyên file (atomic), dùng file icon tên mới mỗi lần để shell không giữ icon cũ trong cache, rồi xoá icon cũ; launcher do công cụ khác tạo thì không sửa. Chưa có launcher thì Cài đặt có nút "Tạo launcher".
+  - **macOS:** dock được đặt lại icon đã chọn mỗi khi app mở.
+  - **Windows:** đổi icon cho shortcut trỏ tới exe của Lustra; `.ico` tạo từ PNG ở các cỡ 256/48/32/16 (`app/icon-utils.js`).
+  - **Cài đặt:** thông báo theo kết quả: toast khi đổi được ngay; trên Wayland thì "Tạo launcher" hoặc "Khởi động lại ngay".
+- **Kiểm chứng:**
+  - `node app/test/icon-utils.test.js` (đọc lại file ICO), đã thêm vào CI.
+  - Self-test Electron `LUSTRA_SELFTEST_ICONS=1` với HOME tạm: chưa có launcher → `missing`; tạo → đổi icon → `updated` (icon cũ bị xoá, có marker và `StartupWMClass=lustra`); chọn lại icon cũ → `unchanged`; launcher lạ → `foreign`, không bị sửa. HOME thật không bị ghi gì.
+- **Chưa kiểm:** shortcut trên Windows thật, dock trên macOS thật, dock GNOME Wayland thật (cần mở lại app).
 
 ### 8. Việc tiếp theo
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
