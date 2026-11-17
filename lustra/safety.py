@@ -21,7 +21,7 @@ BLOCKED_TOKENS: frozenset[str] = frozenset((
     'loli', 'lolis', 'lolicon', 'shota', 'shotas', 'shotacon', 'toddler', 'toddlers', 'toddlercon', 'child', 'children', 'childs',
     'kid', 'kids', 'infant', 'infants', 'baby', 'babies', 'newborn', 'preteen', 'preteens', 'underage', 'underaged', 'minor', 'minors',
     'cub', 'cubs', 'young', 'younger', 'youngest', 'juvenile', 'tween', 'tweens', 'kindergarten', 'elementary', 'teen', 'teens',
-    'teenager', 'teenagers', 'jailbait', 'pedophilia', 'kodomo',
+    'teenager', 'teenagers', 'teenage', 'teenaged', 'jailbait', 'pedophilia', 'kodomo',
 ))
 '''a tag is blocked if any of its tokens (split by _ - / ( ) and spaces) is listed. False positives (ex. kid_icarus) are accepted'''
 
@@ -35,6 +35,12 @@ BLOCKED_TAGS: frozenset[str] = frozenset((
     'child_on_child', 'young_(lore)',
 ))
 '''exact tags not caught by tokens'''
+
+_ADULT_EXCEPTIONS: frozenset[str] = frozenset((
+    'child_bearing_hips', 'childbearing_hips', 'young_adult',
+))
+'''hard-coded, not an API: exact tags with a blocked token that describe adults (body type, explicit adult age). Minimal on purpose:
+series names with teenage characters (teen_titans, kid_icarus...) stay blocked'''
 
 re_token_split = re.compile(r'[_\-/() ]+')
 
@@ -56,6 +62,8 @@ def blocked_tag(tags: Iterable[str]) -> str:
             continue
         if tag in BLOCKED_TAGS or tag in _extra_tags:
             return tag
+        if tag in _ADULT_EXCEPTIONS:
+            continue
         if any(tok in BLOCKED_TOKENS for tok in re_token_split.split(tag) if tok):
             return tag
     return ''

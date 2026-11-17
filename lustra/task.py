@@ -8,6 +8,7 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 
 import re
 from collections.abc import Iterable
+from urllib import parse as url_parse
 
 from .defines import (
     TAGS_STRING_LENGTH_MAX_BB,
@@ -65,7 +66,25 @@ LOCAL_POSITIVE_OVERFLOW: dict[int, bool] = {
     ProcModule.DB: True,
 }
 re_negative_and_group = re.compile(r'^-\(([^,]+(?:,[^,]+)+)\)$')
-re_plain_positive_tag = re.compile(r'^[^-(~*?:=<>][^(~*?:=<>]*$')
+KNOWN_META_NAMES = frozenset((
+    'id', 'score', 'rating', 'user', 'md5', 'width', 'height', 'parent', 'source', 'updated', 'sort', 'order', 'date', 'status',
+    'fav', 'favorited_by', 'favoritedby', 'ordfav', 'pool', 'ordpool', 'set', 'poster', 'filetype', 'filesize', 'limit', 'age', 'mpixels',
+    'ratio', 'favcount', 'tagcount', 'gentags', 'arttags', 'chartags', 'copytags', 'metatags', 'commenter', 'comm', 'noter', 'approver',
+    'is', 'has', 'pixiv', 'pixiv_id', 'search', 'upvote', 'downvote', 'random', 'duration', 'child', 'appealer', 'flagger', 'disapproved',
+    'unaliased', 'exif', 'ai', 'embedded', 'commentary', 'note', 'notes', 'comments', 'description', 'type', 'delreason', 'deletedby',
+))
+'''metatag names: a tag like 'honkai:_star_rail' or 'saber_(fate)' is a plain tag, 'id:>5' or '-user:bob' is a metatag'''
+re_meta_name = re.compile(r'^([a-z_]+)(?::|=|[<>])')
+
+
+def _is_meta(tag: str) -> bool:
+    m = re_meta_name.match(tag.lstrip('-'))
+    return bool(m and m.group(1) in KNOWN_META_NAMES)
+
+
+def _is_plain_positive(tag: str) -> bool:
+    """Positive tags that can be checked locally against post tags: no groups, wildcards or metatags"""
+    return bool(tag) and not tag.startswith(('-', '(')) and '*' not in tag and not _is_meta(tag)
 
 
 def register_module_limits(proc_id: int, max_string_len: int, max_tags: int, max_tags_separate: bool, max_wildcards: int,
@@ -94,26 +113,31 @@ def _count_tags(tags: Iterable[str]) -> int:
 def _pick_local_required_tags(tags_list: list[str], limit: int, required_out: list[str]) -> None:
     """Keeps the rarest positive plain tags for server-side search, moves the rest to local 'required tags' filter"""
     from .tagsdb import TagsDB  # local import: tagsdb is optional and heavy
-    positives = [t for t in tags_list if _is_counted_tag(t) and re_plain_positive_tag.fullmatch(t)]
-    # negative tags are not counted here: they will be moved into local negative group if there is no room left for them
-    others_count = sum(1 for t in tags_list if _is_counted_tag(t) and t not in positives and not t.startswith('-'))
+    positives = [t for t in tags_list if _is_counted_tag(t) and _is_plain_positive(t)]
+    # plain negative tags are not counted here: they will be moved into local negative group if there is no room left for them.
+    # negative metatags ('-user:bob') must stay in the website query, they take a slot like any other non-plain tag
+    others_count = sum(1 for t in tags_list if _is_counted_tag(t) and t not in positives and (not t.startswith('-') or _is_meta(t)))
     keep_count = max(0, limit - others_count)
-    if keep_count == 0 or len(positives) <= keep_count:
+    if len(positives) <= keep_count:
         return
 
     def popularity(tag: str) -> int:
         try:
-            info = TagsDB.get_tag_info(ProcModule.name(), tag) if not TagsDB.is_empty() else None
+            info = TagsDB.get_tag_info(ProcModule.name(), url_parse.unquote(tag)) if not TagsDB.is_empty() else None
         except Exception:
             info = None
-        return info.posts_count if info else 0
+        return info.posts_count if info else 0  # unknown tags are treated as the rarest
 
     by_rarity = sorted(positives, key=popularity)
     for tag in by_rarity[keep_count:]:
         tags_list.remove(tag)
-        required_out.append(tag)
+        required_out.append(url_parse.unquote(tag))
     trace(f'Info: {ProcModule.name().upper()} tag limit is {limit:d}, searching by \'{" ".join(by_rarity[:keep_count])}\', '
           f'{len(required_out):d} tag(s) will be checked locally: \'{" ".join(required_out)}\'')
+
+
+MAX_SPLIT_TASKS = 64
+'''OR groups split into separate searches multiply: (a~b) (c~d) (e~f) = 8 searches. Ruxx had no cap (12 groups of 2 = 4096 searches)'''
 
 
 def split_tags_into_tasks(tag_groups_arr: Iterable[str], cc: str, sc: str, split_always: bool) -> list[str]:
@@ -149,6 +173,12 @@ def split_tags_into_tasks(tag_groups_arr: Iterable[str], cc: str, sc: str, split
     if len(or_tags_to_append) > 0:
         if has_negative and len(new_tags_str_arr) == 0:
             thread_exit('Error: -tag in \'or\' group found, but no +tags! Cannot search by only -tags', -701)
+        combinations = 1
+        for or_tags_list in or_tags_to_append:
+            combinations *= len(or_tags_list)
+        if combinations > MAX_SPLIT_TASKS:
+            thread_exit(f'Error: {len(or_tags_to_append):d} \'or\' group(s) would be split into {combinations:d} separate searches '
+                        f'(limit {MAX_SPLIT_TASKS:d}). Use fewer or smaller \'or\' groups', -702)
         tags_multi_list = [f'{cc.join(new_tags_str_arr)}' if len(new_tags_str_arr) > 0 else '']
         for or_tags_list in reversed(or_tags_to_append):
             toapp: list[str] = []
@@ -163,14 +193,15 @@ def split_tags_into_tasks(tag_groups_arr: Iterable[str], cc: str, sc: str, split
     return [cc.join(tag_groups_arr)]
 
 
-def extract_neg_and_groups(tags_str: str, split_always: bool,
-                           required_out: list[str] | None = None) -> tuple[list[str], list[list[re.Pattern[str]]]]:
+def extract_neg_and_groups(tags_str: str, split_always: bool, required_out: list[str] | None = None,
+                           tags_limit: int = 0) -> tuple[list[str], list[list[re.Pattern[str]]]]:
     """
     Separates tags string into fully formed tags and negative tag patterns\n
     Ex. 'a b (+c+~+d+) -(ff,gg)' => (['a', 'b' , '(+c+~+d+)'], [[re.compile(r'^ff$'), re.compile(r'^gg$')]])\n
     :param tags_str: provided string of tags separated by space
     :param split_always: unconditionally separate all 'or' groups
     :param required_out: if provided, receives positive tags that exceed module's tags limit and must be checked locally
+    :param tags_limit: account tags limit (-tags_limit) replacing the module default, 0: module default
     :return: 1) list of fully-formed tags without negative groups, 2) list of zero or more tag pattern lists
     """
     def form_plist(neg_tags_group: str) -> list[re.Pattern] | None:
@@ -179,7 +210,7 @@ def extract_neg_and_groups(tags_str: str, split_always: bool,
                 s = s.replace(c, f'\\{c}')
             return s.replace('?', '.').replace('*', '.*')
         ngr = re_negative_and_group.fullmatch(neg_tags_group)
-        return [re.compile(rf'^{esc(s)}$') for s in ngr.group(1).split(',')] if ngr else None
+        return [re.compile(rf'^{esc(url_parse.unquote(s))}$') for s in ngr.group(1).split(',')] if ngr else None
 
     parsed: list[list[re.Pattern]] = []
     tags_list = tags_str.split(' ')
@@ -197,6 +228,8 @@ def extract_neg_and_groups(tags_str: str, split_always: bool,
         total_len += max(len(ogt) for ogt in t.split('+~+')) if split_always and t.startswith('(+') else len(t)
 
     max_tags_all, max_is_separate = MAX_NEGATIVE_TAGS[ProcModule.value()]
+    if tags_limit > 0 and max_tags_all > 0:
+        max_tags_all = tags_limit  # -tags_limit: the account allows more (or fewer) tags than the module default
     max_wtags_all = MAX_WILDCARDS[ProcModule.value()]
     max_string_len = MAX_STRING_LENGTHS[ProcModule.value()]
     neg_tags_list_all = list(filter(lambda x: x.startswith('-') and _is_counted_tag(x), tags_list))
@@ -229,14 +262,17 @@ def extract_neg_and_groups(tags_str: str, split_always: bool,
                 ntag = neg_tags_list_all[ti]
                 if wildcardpass is True and ntag.rfind('*') == -1:
                     continue
-                neg_tags_list.append(ntag[1:])
+                if _is_meta(ntag):
+                    continue  # '-user:bob' cannot be checked against post tags: it must stay in the website query
+                neg_tags_list.append(url_parse.unquote(ntag[1:]))
                 total_len -= len(ntag) + 1
                 del neg_tags_list_all[ti]
                 del tags_list[tags_list.index(ntag)]
                 if wildcardpass is True and ntag in w_tags_list_all:
                     del w_tags_list_all[w_tags_list_all.index(ntag)]
         if not tags_fixed():
-            thread_exit('Fatal: extracting negative tags doesn\'t reduce total tags length enough! Aborting...', -609)
+            thread_exit(f'Fatal: too many tags for {ProcModule.name().upper()} even after moving -tags to local filters '
+                        f'(negative metatags like -user:x cannot be checked locally). Remove some tags. Aborting...', -609)
         assert len(neg_tags_list) > 0, 'No negative tags extracted!'
         extracted_neg_group_str = f'-(*,{"|".join(reversed(neg_tags_list))})'
         trace(f'Info: extracted negative group: {extracted_neg_group_str}')
@@ -245,7 +281,7 @@ def extract_neg_and_groups(tags_str: str, split_always: bool,
         parsed.append(plist)
     if 0 < max_tags_all < _count_tags(tags_list) - (len(neg_tags_list_all) if max_is_separate else 0):
         thread_exit(f'Fatal: max tags exceeded for {ProcModule.name().upper()} '
-                    f'({len(tags_list):d} > {max_tags_all:d}), final tags: \'{" ".join(tags_list)}\'')
+                    f'({_count_tags(tags_list):d} > {max_tags_all:d}), final tags: \'{" ".join(tags_list)}\'')
 
     if __LUSTRA_DEBUG__ and len(neg_tags_list) > 0:
         trace(f'Resulting args: {" ".join(tags_list)}')

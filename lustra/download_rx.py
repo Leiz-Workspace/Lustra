@@ -115,7 +115,7 @@ class DownloaderRx(DownloaderGelbooru):
             for comment_div in comment_divs:
                 author = comment_div.get('creator')
                 body = comment_div.get('body')
-                self.item_info_dict_per_task[full_item_id].comments.append(Comment(author, body))
+                self._item_info_for(full_item_id).comments.append(Comment(author, body))
         else:
             trace(f'Warning (W3): ProcItem: unable to retreive comments for {item_id}!', True)
 

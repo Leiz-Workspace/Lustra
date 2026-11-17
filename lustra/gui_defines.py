@@ -93,6 +93,7 @@ OPTION_CMD_PATH_SUB_VID = '-vidsub'
 OPTION_CMD_PATH_SUB_IMG = '-imgsub'
 OPTION_CMD_MODULE_CMD = '-module'
 OPTION_CMD_GENDER_CMD = '-gender'
+OPTION_CMD_TAGS_LIMIT_CMD = '-tags_limit'
 OPTION_CMD_GENDER_MODE_CMD = '-gender_mode'
 OPTION_CMD_GENDER_CONF_CMD = '-gender_conf'
 OPTION_CMD_GENDER_STRICT = ('', '-gender_strict')

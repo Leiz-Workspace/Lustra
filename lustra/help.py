@@ -23,6 +23,8 @@ HELP_ARG_VERSION = 'Show program version string and exit'
 HELP_ARG_MODULE = 'Download module to use, default is \'rx\''
 HELP_ARG_DOWNLOAD_MODE = '[Debug] Download mode, default is \'full\''
 HELP_ARG_DOWNLOAD_LIMIT = 'Maximum number of posts to download, default is \'0\' (disabled)'
+HELP_ARG_TAGS_LIMIT = ('Maximum tags per search allowed by your account, overrides the module default '
+                       '(ex. danbooru: 2 for free accounts, 6 Gold, 12 Platinum)')
 HELP_ARG_REVERSE_DOWNLOAD_ORDER = 'Download in reverse order (highest id to lowest, unless changed by sort:X type tags)'
 HELP_ARG_SKIP_IMAGES = 'Skip all images'
 HELP_ARG_SKIP_VIDEOS = 'Skip all videos'

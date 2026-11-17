@@ -38,6 +38,7 @@ __all__ = ('ExtensionError', 'Extensions', 'data_dir')
 ENV_DATA_DIR = 'LUSTRA_DATA_DIR'
 ENV_CATALOG_DIR = 'LUSTRA_CATALOG_DIR'
 ENV_CATALOG_URL = 'LUSTRA_CATALOG_URL'
+ENV_CATALOG_AUTOLOAD = 'LUSTRA_CATALOG_AUTOLOAD'
 ARCHIVE_SIZE_MAX = 10 * 1024 * 1024
 ARCHIVE_UNPACKED_MAX = 50 * 1024 * 1024
 ARCHIVE_ENTRIES_MAX = 2000
@@ -203,6 +204,11 @@ class Extensions:
             if include_catalog and not Extensions._catalog_loaded:
                 Extensions._catalog_loaded = True
                 Extensions._load_many(Extensions._scan(Extensions.catalog_dir(), SOURCE_CATALOG))
+
+    @staticmethod
+    def catalog_autoload() -> bool:
+        """CLI / legacy GUI load not installed catalog extensions on demand. The desktop app (sidecar, jobs) only uses installed ones"""
+        return os.environ.get(ENV_CATALOG_AUTOLOAD, '1') != '0'
 
     @staticmethod
     def get_by_abbr(abbr: str) -> ExtensionManifest | None:
