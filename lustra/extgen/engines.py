@@ -20,10 +20,10 @@ __all__ = ('ENGINES', 'EngineGuess', 'detect_engine')
 ENGINES: dict[str, dict] = {
     'gelbooru_dapi': {'template': True, 'description': 'Gelbooru 0.2 DAPI (XML): index.php?page=dapi&s=post&q=index'},
     'danbooru_json': {'template': True, 'description': 'Danbooru JSON API: posts.json + counts/posts.json'},
-    'e621_json': {'template': False, 'description': 'e621/e926 JSON API: posts.json -> {"posts": [...]}', 'reference': 'e621'},
-    'moebooru_json': {'template': False, 'description': 'Moebooru JSON API: post.json', 'reference': 'danbooru'},
-    'philomena_json': {'template': False, 'description': 'Philomena API: api/v1/json/search/images', 'reference': 'e621'},
-    'szurubooru_json': {'template': False, 'description': 'Szurubooru API: api/posts/', 'reference': 'e621'},
+    'e621_json': {'template': True, 'description': 'e621/e926 JSON API: posts.json -> {"posts": [...]}', 'reference': 'e621'},
+    'moebooru_json': {'template': True, 'description': 'Moebooru JSON API: post.json', 'reference': 'danbooru'},
+    'philomena_json': {'template': True, 'description': 'Philomena API: api/v1/json/search/images', 'reference': 'e621'},
+    'szurubooru_json': {'template': True, 'description': 'Szurubooru API: api/posts/', 'reference': 'e621'},
     'shimmie': {'template': False, 'description': 'Shimmie2 (HTML listing or api/danbooru/find_posts)', 'reference': 'paheal'},
     'custom': {'template': False, 'description': 'unknown engine: custom HTML / JSON parsing', 'reference': 'rule34us'},
 }

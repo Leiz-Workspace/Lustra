@@ -29,7 +29,7 @@ import zipfile
 from lustra.modspec import ExtensionManifest
 
 from .fetch import FetchPolicyError, SafeFetcher, host_of, redact_url
-from .policy import check_source
+from .policy import check_manifest, check_source
 
 __all__ = ('check_draft', 'pack', 'record', 'run_sandbox')
 
@@ -127,7 +127,8 @@ def run_sandbox(draft: pathlib.Path, *, query: list[str], limit: int = 3, fetche
                         reply({'id': req['id'], 'error': 'not recorded: the downloader requested a url that is not in the fixtures'})
                     continue
                 try:
-                    res = fetcher.fetch(url, method='HEAD' if req.get('method') == 'HEAD' else 'GET')
+                    res = fetcher.fetch(url, method='HEAD' if req.get('method') == 'HEAD' else 'GET',
+                                        accept=str(req.get('accept') or '')[:100])
                 except FetchPolicyError as err:
                     served.append({'url': redact_url(url), 'status': 0, 'error': err.message, 'rule': err.rule})
                     reply({'id': req['id'], 'error': err.message, 'rule': err.rule})
@@ -191,6 +192,9 @@ def _manifest_checks(draft: pathlib.Path) -> tuple[list[dict], ExtensionManifest
         checks.append({'id': 'manifest', 'ok': True, 'severity': 'error', 'detail': f'{m.id} ({m.abbr}) {m.version}'})
         if m.id != draft.name:
             checks.append({'id': 'folder', 'ok': False, 'severity': 'error', 'detail': f'folder name must be the id \'{m.id}\''})
+        raw = json.loads((draft / 'manifest.json').read_text(encoding='utf-8'))
+        checks += [{'id': f'manifest:{v.rule}', 'ok': v.severity != 'error', 'severity': v.severity, 'detail': v.message}
+                   for v in check_manifest(raw)]
         return checks, m
     except Exception as err:
         checks.append({'id': 'manifest', 'ok': False, 'severity': 'error', 'detail': str(err)})

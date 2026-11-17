@@ -22,11 +22,32 @@ from ..extgen.templates import TEMPLATE_ENGINES
 
 __all__ = ('TemplateClient',)
 
-SAMPLE_URLS = {
-    'gelbooru_dapi': 'index.php?page=dapi&s=post&q=index&limit=40',
-    'danbooru_json': 'posts.json?limit=40',
+SAMPLE_URLS = {  # recent posts, to pick a tag that surely has results
+    'gelbooru_dapi': ('index.php?page=dapi&s=post&q=index&limit=40', ''),
+    'danbooru_json': ('posts.json?limit=40', 'application/json'),
+    'e621_json': ('posts.json?limit=40', 'application/json'),
+    'moebooru_json': ('post.json?limit=40', 'application/json'),
+    'philomena_json': ('api/v1/json/search/images?q=*&per_page=40', 'application/json'),
+    'szurubooru_json': ('api/posts/?limit=40', 'application/json'),
 }
+ENGINE_NAMES = 'Gelbooru 0.2 (DAPI), Danbooru, e621, Moebooru, Philomena và Szurubooru'
 RE_TAG_OK = re.compile(r'[a-z\d][a-z\d_()\-]{1,40}')
+
+
+TAG_FIELDS = {  # regexes, not json.loads: the sample reaches the agent truncated (http_fetch returns 20000 characters)
+    'danbooru_json': (r'"tag_string_general"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"|"tag_string"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"', 'words'),
+    'moebooru_json': (r'"tags"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"', 'words'),
+    'e621_json': (r'"general"\s*:\s*\[([^\]]*)\]', 'list'),
+    'philomena_json': (r'"tags"\s*:\s*\[([^\]]*)\]', 'list'),
+    'szurubooru_json': (r'"names"\s*:\s*\[([^\]]*)\]', 'first'),
+}
+
+
+def _unescape(s: str) -> str:
+    try:
+        return json.loads(f'"{s}"')
+    except ValueError:
+        return s
 
 
 def pick_tag(body: str, engine: str) -> str:
@@ -35,14 +56,19 @@ def pick_tag(body: str, engine: str) -> str:
     if engine == 'gelbooru_dapi':
         for tags in re.findall(r'\btags="([^"]*)"', body):
             counts.update(t for t in tags.split() if t)
-    else:
-        try:
-            posts = json.loads(body)
-        except ValueError:
-            posts = []
-        for p in posts if isinstance(posts, list) else []:
-            if isinstance(p, dict):
-                counts.update(str(p.get('tag_string_general') or p.get('tag_string') or '').split())
+        return _most_common(counts)
+    pattern, kind = TAG_FIELDS.get(engine, TAG_FIELDS['danbooru_json'])
+    for m in re.finditer(pattern, body):
+        value = next((g for g in m.groups() if g is not None), '')
+        if kind == 'words':
+            counts.update(_unescape(value).split())
+        else:
+            items = [_unescape(x).replace(' ', '_') for x in re.findall(r'"((?:[^"\\\\]|\\\\.)*)"', value)]
+            counts.update(items[:1] if kind == 'first' else items)
+    return _most_common(counts)
+
+
+def _most_common(counts: Counter) -> str:
     for tag, n in counts.most_common(50):
         if n >= 2 and RE_TAG_OK.fullmatch(tag) and ':' not in tag:
             return tag
@@ -108,7 +134,7 @@ class TemplateClient:
             if self.site == '':
                 m = re.search(r'Website: (\S+)', last)
                 self.site = m.group(1) if m else ''
-                return self._call('survey_site', {}, 'Chế độ không dùng AI: dùng template có sẵn nếu site là Gelbooru / Danbooru.')
+                return self._call('survey_site', {}, f'Chế độ không dùng AI: dùng template có sẵn nếu site chạy {ENGINE_NAMES}.')
             return self._finish('failed', 'Kế hoạch template bị gián đoạn.')
         res = last[0] if last else {}
         text, err = str(res.get('content', '')), bool(res.get('is_error'))
@@ -123,7 +149,7 @@ class TemplateClient:
             self.engine = eng.get('engine', '')
             if self.engine not in TEMPLATE_ENGINES:
                 return self._finish('failed', f'Site dùng engine "{self.engine}" (độ tin cậy {eng.get("confidence")}): chế độ không AI '
-                                              'chỉ hỗ trợ Gelbooru (DAPI) và Danbooru. Hãy dùng chế độ AI cho site này.')
+                                              f'chỉ hỗ trợ {ENGINE_NAMES}. Hãy dùng chế độ AI cho site này.')
             names = data.get('names', {})
             if not names.get('abbr'):
                 return self._finish('failed', 'Không tìm được tên viết tắt (abbr) còn trống cho site này.')
@@ -136,7 +162,8 @@ class TemplateClient:
                 return self._finish('failed', f'Template không qua kiểm tra tĩnh: {text[:500]}')
             if self.query:
                 return self._call('test_run', {'query': self.query, 'limit': 3})
-            return self._call('http_fetch', {'url': self.site + SAMPLE_URLS[self.engine], 'accept': ''})
+            path, accept = SAMPLE_URLS[self.engine]
+            return self._call('http_fetch', {'url': self.site + path, 'accept': accept})
         if step == 'http_fetch':
             body = text.split(UNTRUSTED, 1)[-1] if not err else ''
             self.query = pick_tag(body, self.engine)

@@ -35,7 +35,26 @@ DANBOORU_SYNTAX = {
     'freeMetaPrefixes': ['rating:', 'id:', 'date:', 'score:', 'status:', 'parent:'], 'localPositiveOverflow': True,
     'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.,]+?', 'sort': 'order:[a-z_]+', 'fav': 'favorited_by:[^:]+?', 'pool': 'pool:[^:]+?',
 }
-TEMPLATE_ENGINES = ('gelbooru_dapi', 'danbooru_json')
+E621_SYNTAX = {
+    'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'maxTags': 40, 'maxWildcards': 1,
+    'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.]+?', 'sort': 'order:[^:]+(?:_(?:a|de)sc)?', 'fav': 'favorited_by:[^:]+?',
+    'pool': '(?:pool|set):[^:]+?',
+}
+MOEBOORU_SYNTAX = {
+    'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'maxTags': 6, 'localPositiveOverflow': True,
+    'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.,]+?', 'sort': 'order:[a-z_]+', 'fav': 'vote:3:[^:]+?', 'pool': 'pool:[^:]+?',
+}
+PHILOMENA_SYNTAX = {  # tags joined with ',' and '_' sent as ' ' by the downloader (_query_tags)
+    'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'metaCount': '(?:\\.(?:gt|gte|lt|lte))?:[a-z\\d\\-_.]+?',
+    'sort': '', 'fav': 'faved_by:[^:]+?', 'pool': '',
+}
+SZURUBOORU_SYNTAX = {
+    'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'metaCount': ':[a-z\\d\\-_.,]+?', 'sort': 'sort:[a-z\\-_]+',
+    'fav': 'fav:[^:]+?', 'pool': 'pool:\\d+?',
+}
+SYNTAX_BY_ENGINE = {'gelbooru_dapi': GELBOORU_SYNTAX, 'danbooru_json': DANBOORU_SYNTAX, 'e621_json': E621_SYNTAX,
+                    'moebooru_json': MOEBOORU_SYNTAX, 'philomena_json': PHILOMENA_SYNTAX, 'szurubooru_json': SZURUBOORU_SYNTAX}
+TEMPLATE_ENGINES = ('gelbooru_dapi', 'danbooru_json', 'e621_json', 'moebooru_json', 'philomena_json', 'szurubooru_json')
 
 
 def _taken_abbrs() -> set[str]:
@@ -109,7 +128,7 @@ def make_manifest(*, ext_id: str, abbr: str, name: str, site: str, engine: str, 
         'id': ext_id, 'name': name, 'abbr': abbr, 'version': '1.0.0', 'apiVersion': 1, 'kind': 'downloader', 'default': False,
         'site': site, 'media': [x for x in media if x in ('image', 'video', 'audio')] or ['image', 'video'],
         'entry': f'downloader.py:{class_name(abbr)}', 'description': description[:300],
-        'syntax': syntax if syntax is not None else (GELBOORU_SYNTAX if engine == 'gelbooru_dapi' else DANBOORU_SYNTAX),
+        'syntax': syntax if syntax is not None else SYNTAX_BY_ENGINE.get(engine, DANBOORU_SYNTAX),
         '$generator': {'tool': 'lustra.extgen', 'toolVersion': APP_VERSION, 'engine': engine, 'sourceUrl': site,
                        'createdAt': datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'), **(generator or {})},
     }
@@ -241,6 +260,150 @@ class {cls}(DownloaderDb):
 '''
 
 
+_JSON = _HEADER + '''
+{imports}from typing import final
+
+from lustra.defines import ModuleCaps
+from lustra.download_json import DownloaderJsonApi, JsonPost
+
+__all__ = ('{cls}',)
+
+SITENAME = {site_lit}
+MODULE_ABBR = {abbr_lit}
+
+
+@final
+class {cls}(DownloaderJsonApi):
+    \"\"\"{doc}: the shared JSON API downloader (lustra/download_json.py) with the endpoints and fields of this engine\"\"\"
+    CAPABILITIES = frozenset((ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.PREVIEW))
+    SITE = SITENAME
+    ABBR = MODULE_ABBR
+    ITEMS_PER_PAGE = {per_page}
+    MAX_PAGES = {max_pages}
+
+    def _get_min_request_interval(self) -> float:
+        return {interval}  # polite floor for a site without a published rate limit
+{body}
+#
+#
+#########################################
+'''
+
+_JSON_ENGINES = {
+    'e621_json': {
+        'doc': 'e621 / e926 compatible API (posts.json -> {{"posts": [...]}})', 'per_page': 320, 'max_pages': 750, 'interval': 1.0,
+        'imports': '', 'body': '''
+    def _search_url(self, tags: str, page: int, limit: int) -> str:
+        return f'{{SITENAME}}posts.json?tags={{tags}}&limit={{limit}}&page={{page + 1}}'
+
+    def _cursor_url(self, tags: str, cursor: int | None, ascending: bool, limit: int) -> str:
+        extra = ('+order:id' if ascending else '') + ('' if cursor is None else f'+id:{{">" if ascending else "<"}}{{cursor}}')
+        return self._search_url(f'{{tags}}{{extra}}', 0, limit)
+
+    def _posts(self, data: object) -> list[dict] | None:
+        posts = data.get('posts') if isinstance(data, dict) else None
+        return posts if isinstance(posts, list) else None
+
+    def _post(self, p: dict) -> JsonPost | None:
+        file = p.get('file') or {{}}
+        groups = p.get('tags') or {{}}
+        rel = p.get('relationships') or {{}}
+        score = p.get('score')
+        return JsonPost(
+            id=str(p.get('id', '')),
+            file_url=file.get('url') or '',  # null: hidden by the site for this user, never rebuilt (R6)
+            tags=[t for g in groups.values() if isinstance(g, list) for t in g],
+            created_at=p.get('created_at') or '', sample_url=(p.get('sample') or {{}}).get('url') or '',
+            preview_url=(p.get('preview') or {{}}).get('url') or '', md5=file.get('md5') or '',
+            width=file.get('width') or 0, height=file.get('height') or 0,
+            score=score.get('total', 0) if isinstance(score, dict) else score or 0, rating=p.get('rating') or '',
+            source=' '.join(p.get('sources') or []), parent_id=str(rel.get('parent_id') or ''),
+            has_children=bool(rel.get('has_children')))
+'''},
+    'moebooru_json': {
+        'doc': 'Moebooru API (post.json, count from post.xml)', 'per_page': 100, 'max_pages': 1000, 'interval': 1.0,
+        'imports': 'import re\n', 'body': '''
+    def _search_url(self, tags: str, page: int, limit: int) -> str:
+        return f'{{SITENAME}}post.json?tags={{tags}}&limit={{limit}}&page={{page + 1}}'
+
+    def _count_url(self, tags: str) -> str:
+        return f'{{SITENAME}}post.xml?tags={{tags}}&limit=1'
+
+    def _cursor_url(self, tags: str, cursor: int | None, ascending: bool, limit: int) -> str:
+        extra = f'+order:{{"id" if ascending else "id_desc"}}' + ('' if cursor is None else f'+id:{{">" if ascending else "<"}}{{cursor}}')
+        return self._search_url(f'{{tags}}{{extra}}', 0, limit)
+
+    def _count_from(self, raw: bytes) -> int | None:
+        m = re.search(rb'<posts[^>]*\\scount="(\\d+)"', raw)
+        return int(m.group(1)) if m else None
+
+    def _posts(self, data: object) -> list[dict] | None:
+        return data if isinstance(data, list) else None
+
+    def _post(self, p: dict) -> JsonPost | None:
+        return JsonPost(
+            id=str(p.get('id', '')), file_url=p.get('file_url') or '', tags=str(p.get('tags') or '').split(),
+            created_at=p.get('created_at') or '', sample_url=p.get('sample_url') or p.get('jpeg_url') or '',
+            preview_url=p.get('preview_url') or '', md5=p.get('md5') or '', width=p.get('width') or 0,
+            height=p.get('height') or 0, score=p.get('score') or 0, rating=p.get('rating') or '', source=p.get('source') or '',
+            parent_id=str(p.get('parent_id') or ''), has_children=bool(p.get('has_children')))
+'''},
+    'philomena_json': {
+        'doc': 'Philomena API (api/v1/json/search/images)', 'per_page': 50, 'max_pages': 1000, 'interval': 1.0,
+        'imports': '', 'body': '''
+    def _query_tags(self, tags: str) -> str:
+        return tags.replace('+', ',').replace('_', ' ')  # philomena: tags joined with commas, spaces in tag names
+
+    def _search_url(self, tags: str, page: int, limit: int) -> str:
+        return f'{{SITENAME}}api/v1/json/search/images?q={{tags or "*"}}&per_page={{limit}}&page={{page + 1}}'
+
+    def _cursor_url(self, tags: str, cursor: int | None, ascending: bool, limit: int) -> str:
+        q = ','.join(x for x in (tags, '' if cursor is None else f'id.{{"gt" if ascending else "lt"}}:{{cursor}}') if x) or '*'
+        return f'{{SITENAME}}api/v1/json/search/images?q={{q}}&sf=id&sd={{"asc" if ascending else "desc"}}&per_page={{limit}}&page=1'
+
+    def _posts(self, data: object) -> list[dict] | None:
+        images = data.get('images') if isinstance(data, dict) else None
+        return images if isinstance(images, list) else None
+
+    def _count(self, data: object) -> int | None:
+        total = data.get('total') if isinstance(data, dict) else None
+        return total if isinstance(total, int) else None
+
+    def _post(self, p: dict) -> JsonPost | None:
+        reps = p.get('representations') or {{}}
+        hidden = p.get('hidden_from_users') or p.get('deletion_reason')
+        return JsonPost(
+            id=str(p.get('id', '')), file_url='' if hidden else (p.get('view_url') or reps.get('full') or ''),
+            tags=[str(t) for t in p.get('tags') or []], created_at=p.get('created_at') or p.get('first_seen_at') or '',
+            sample_url=reps.get('large') or reps.get('medium') or '', preview_url=reps.get('thumb') or reps.get('small') or '',
+            width=p.get('width') or 0, height=p.get('height') or 0, score=p.get('score') or 0,
+            source=' '.join(p.get('source_urls') or []) or p.get('source_url') or '')
+'''},
+    'szurubooru_json': {
+        'doc': 'Szurubooru API (api/posts/, Accept: application/json)', 'per_page': 100, 'max_pages': 1000, 'interval': 1.0,
+        'imports': '', 'body': '''
+    def _search_url(self, tags: str, page: int, limit: int) -> str:
+        return f'{{SITENAME}}api/posts/?query={{tags}}&offset={{page * limit}}&limit={{limit}}'
+
+    def _posts(self, data: object) -> list[dict] | None:
+        results = data.get('results') if isinstance(data, dict) else None
+        return results if isinstance(results, list) else None
+
+    def _count(self, data: object) -> int | None:
+        total = data.get('total') if isinstance(data, dict) else None
+        return total if isinstance(total, int) else None
+
+    def _post(self, p: dict) -> JsonPost | None:
+        names = [(t.get('names') or [''])[0] for t in p.get('tags') or [] if isinstance(t, dict)]
+        return JsonPost(
+            id=str(p.get('id', '')), file_url=p.get('contentUrl') or '', tags=[n for n in names if n],
+            created_at=p.get('creationTime') or '', preview_url=p.get('thumbnailUrl') or '', md5=p.get('checksumMD5') or '',
+            width=p.get('canvasWidth') or 0, height=p.get('canvasHeight') or 0, score=p.get('score') or 0,
+            rating=p.get('safety') or '', source=p.get('source') or '')
+'''},
+}
+
+
 def render_downloader(engine: str, *, ext_id: str, abbr: str, site: str, api_key: bool = False, per_page: int = 100,
                       interval: float = 0.5) -> str:
     if engine not in TEMPLATE_ENGINES:
@@ -254,6 +417,11 @@ def render_downloader(engine: str, *, ext_id: str, abbr: str, site: str, api_key
         'per_page': int(max(10, min(per_page, 1000))), 'interval': float(max(0.5, interval)),
         'api_caps': ', ModuleCaps.API_KEY' if api_key else '', 'api_key_method': _GELBOORU_API_KEY if api_key else '',
     }
+    if engine in _JSON_ENGINES:
+        e = _JSON_ENGINES[engine]
+        values.update(doc=e['doc'], per_page=e['per_page'], max_pages=e['max_pages'], interval=float(max(e['interval'], interval)),
+                      imports=e['imports'], body=e['body'].format(**values))
+        return _JSON.format(**values)
     return (_GELBOORU if engine == 'gelbooru_dapi' else _DANBOORU).format(**values)
 
 #

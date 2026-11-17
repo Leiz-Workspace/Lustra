@@ -1616,8 +1616,8 @@ function setGenMode(mode) {
   $$('#gen-mode button').forEach((b) => b.classList.toggle('on', b.dataset.mode === G.mode));
   $('#gen-budget-wrap').hidden = G.mode !== 'ai';
   $('#gen-hint').textContent = G.mode === 'ai'
-    ? 'Claude khảo sát site, viết / sửa downloader.py khi site không chạy Gelbooru / Danbooru và chạy thử tới khi đạt. Tính phí Claude API theo lượng dùng, dừng khi chạm mức tối đa.'
-    : 'Miễn phí, không cần khoá: chỉ cho site chạy Gelbooru 0.2 (DAPI) hoặc Danbooru, dùng template có sẵn của Lustra.';
+    ? 'Claude khảo sát site, viết / sửa downloader.py khi site không có template sẵn và chạy thử tới khi đạt. Tính phí Claude API theo lượng dùng, dừng khi chạm mức tối đa.'
+    : 'Miễn phí, không cần khoá: cho site chạy Gelbooru 0.2 (DAPI), Danbooru, e621, Moebooru, Philomena hoặc Szurubooru, dùng template có sẵn của Lustra.';
   renderGenNote();
 }
 function renderGenNote() {
@@ -1625,7 +1625,7 @@ function renderGenNote() {
   if (G.mode === 'ai' && G.key && !G.key.set) {
     note.replaceChildren('Chưa có khoá Claude API. ',
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); showPage('settings'); $('#ai-key').focus(); } }, 'Thêm trong Cài đặt → AI tạo extension'),
-      ', hoặc chọn "Không dùng AI" cho site Gelbooru / Danbooru.');
+      ', hoặc chọn "Không dùng AI" cho site Gelbooru, Danbooru, e621, Moebooru, Philomena, Szurubooru.');
     note.hidden = false;
   } else note.hidden = true;
 }

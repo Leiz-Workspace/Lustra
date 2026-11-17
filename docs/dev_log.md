@@ -270,6 +270,33 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - UI mock: wizard, tiến độ, chi phí, chi tiết, khoá trong Cài đặt; không có lỗi console.
 - **Chưa kiểm:** gọi Claude thật (máy dev không có `ANTHROPIC_API_KEY`); site cần viết code tay (không phải Gelbooru / Danbooru) ở chế độ AI; Windows / macOS thật.
 
+### 7n. Template engine JSON + test red-team — 2026-11-17
+- **Lớp nền `lustra/download_json.py`** (`DownloaderJsonApi`, `JsonPost`). Lớp con khai báo site, URL tìm kiếm, cách đọc post, cách đếm và con trỏ id. Lớp nền xử lý:
+  - đếm từ trang, endpoint riêng hoặc tìm nhị phân trang cuối;
+  - URL tương đối, ngày ISO / unix;
+  - post site không cho file thì bỏ qua (R6);
+  - quét theo con trỏ id khi vượt độ sâu trang.
+- **Template mới:** `e621_json`, `moebooru_json` (đếm qua `post.xml`), `philomena_json` (tag nối bằng dấu phẩy, `_` → dấu cách), `szurubooru_json` (URL tương đối, `Accept: application/json`).
+  - Có cú pháp manifest riêng cho từng engine.
+  - Chế độ không AI chọn tag chạy thử theo từng engine bằng regex, chịu được mẫu bị cắt ở 20.000 ký tự.
+  - AI có thêm tài liệu tham khảo `json_base` và 4 template; skill được cập nhật.
+- **Siết an toàn:**
+  - Sandbox chặn đọc / liệt kê file ngoài thư viện Python, mã Lustra, bản nháp và tmp; proxy chuyển header `Accept`.
+  - Manifest khai báo cookie đăng nhập / challenge bị từ chối (R1), cả lúc AI ghi lẫn khi kiểm tra offline.
+  - AI không được đổi `site` của manifest.
+  - `survey` từ chối R2 khi robots.txt trả 5xx hoặc cấm mọi probe.
+- **Test:** `test_extgen` lên 30 test.
+  - Site giả cho 4 engine JSON chạy trọn phiên qua sandbox (Szurubooru từ chối request thiếu `Accept`).
+  - Con trỏ id khi tổng số bài là 10 triệu.
+  - 8 test red-team: model bị trang chiếm quyền (nội dung trang được đánh dấu là dữ liệu, script bị bỏ, host lạ bị R10, code xấu không chạy, ghi ngoài bản nháp bị chặn, "ready" bị từ chối); SSRF 127.0.0.1 / 10.x / 169.254.169.254 / ::1 không gửi request nào; robots cấm / 5xx → R2; Cloudflare → R5; link `.m3u8` → `links` không đạt; đọc `settings.json` từ sandbox bị chặn; cookie `cf_clearance` / `PHPSESSID`, đổi site; hết ngân sách request → R4.
+  - Bộ kiểm tra tĩnh chặn đủ 24 mẹo thử (globals, vars, `__builtins__`, compile, type 3 tham số, format `{0.__class__}`, session của lõi, `download_file`, pathlib, io…).
+- **Chạy thật chế độ không AI:**
+  - konachan.net (Moebooru): đạt, 8 request.
+  - derpibooru.org (Philomena): lần đầu không đạt vì tag "female" có 1.641.449 bài, vượt độ sâu trang. Sau khi thêm con trỏ id thì đạt 14/14, 10 request.
+  - e926.net: Cloudflare challenge → từ chối R5, đúng thiết kế.
+  - Szurubooru: chưa thử thật (không có instance công khai chắc chắn).
+- **Toàn bộ suite:** 175 test + `tests.py` đạt; ruff sạch; self-test Electron bước `generator` đạt.
+
 ### 8. Việc tiếp theo
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đóng gói app (electron-builder + Python embed hoặc PyInstaller sidecar).

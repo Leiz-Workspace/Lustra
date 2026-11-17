@@ -10,13 +10,13 @@ Yêu cầu đã chốt với người dùng: đưa link một site → AI phân 
 
 | Hạng mục | Đã làm | Khác với plan |
 |---|---|---|
-| `lustra/extgen` (QĐ1) | `fetch` (SafeFetcher), `engines` (8 engine nhận diện bằng probe), `templates` (2 template: `gelbooru_dapi`, `danbooru_json`), `policy` (AST), `sandbox` + `sandbox_boot` (audit hook, rlimit, proxy request), `scaffold`, CLI `survey / fetch / new / record / check / pack` | Contract test là bộ kiểm tra trong sandbox (load, rate, count, run, items, download, links, tags, dates, preview) cùng phép chạy lại offline so với `expected.json`, không phải `test_contract.py` viết tay. Chưa có template `shimmie_*` / `custom_html`; chưa có `lustra.sdk` |
+| `lustra/extgen` (QĐ1) | `fetch` (SafeFetcher), `engines` (8 engine nhận diện bằng probe), `templates` (6 template: `gelbooru_dapi`, `danbooru_json`, `e621_json`, `moebooru_json`, `philomena_json`, `szurubooru_json`; 4 engine JSON dựa trên lớp nền `lustra/download_json.py`), `policy` (AST), `sandbox` + `sandbox_boot` (audit hook, rlimit, proxy request), `scaffold`, CLI `survey / fetch / new / record / check / pack` | Contract test là bộ kiểm tra trong sandbox (load, rate, count, run, items, download, links, tags, dates, preview) cùng phép chạy lại offline so với `expected.json`, không phải `test_contract.py` viết tay. `DownloaderJsonApi` đóng vai `DeclarativeDownloader` của M2 ở dạng code (chưa có profile JSON khai báo). Chưa có template `shimmie_*` / `custom_html`; chưa có `lustra.sdk` |
 | Skill A (`.claude/skills/new-site-extension`) | `SKILL.md` + `reference/` (safety-rules, engines, review-checklist), dùng CLI trên | Bản nháp nằm ở `.extgen-drafts/<id>/` (git bỏ qua), không ở `extensions/` vì CLI / GUI cũ tự nạp catalog |
 | AI trong app (Phần B) | `lustra/aigen` (worker, session, 9 tool, prompt, chế độ không AI), Electron: wizard ở trang Extensions, khoá Claude trong Cài đặt, danh sách bản nháp, chi tiết, xuất zip, "Cài vào app…" (kiểm tra lại + xác nhận) | Không có bước sàng lọc bằng Haiku và `ask_user`: ToS chưa rõ thì ghi vào bản tóm tắt để người dùng xem trước khi cài. Không có trạng thái `pending` sau khi cài, vì cài đã cần xác nhận riêng (R11). Chưa có ký số catalog (B.8) |
-| Rule (Phần C) | R1, R2, R4, R5, R10, R11, R12, R13 thực thi bằng code; R3, R6, R7, R8 qua prompt + review; R9 do lõi (`safety.py`) và kiểm `tags` | Chưa có denylist domain (`denied_domains.txt`) |
+| Rule (Phần C) | R1, R2, R4, R5, R10, R11, R12, R13 thực thi bằng code; R3, R6, R7, R8 qua prompt + review; R9 do lõi (`safety.py`) và kiểm `tags`. Bộ test red-team offline (`RedTeamTests`): prompt injection với model "nghe lời" trang, SSRF địa chỉ nội bộ, robots cấm / 5xx, Cloudflare challenge, link HLS, đọc file người dùng từ sandbox, cookie đăng nhập trong manifest, đổi site, ngân sách request | Chưa có denylist domain (`denied_domains.txt`); chưa có bộ eval với model thật |
 | Đóng gói | `lustra-core aigen / extgen / sandbox`, mã tham khảo kèm ở `aigen_refs/`, `anthropic` kèm khi có | — |
 
-Kiểm chứng: xem [dev_log 7m](../dev_log.md).
+Kiểm chứng: xem [dev_log 7m, 7n](../dev_log.md).
 
 ## Mục lục
 
