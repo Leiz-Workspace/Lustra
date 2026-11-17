@@ -186,7 +186,7 @@ const POST_URL = {
 const STATE_VI = {
   IDLE: 'Chờ', LAUNCHING: 'Khởi động', SEARCHING: 'Đang tìm', SCANNING_PAGES1: 'Quét trang (1/2)', SCANNING_PAGES2: 'Quét trang (2/2)',
   FILTERING_ITEMS1: 'Lọc (1/4)', FILTERING_ITEMS2: 'Lọc (2/4)', FILTERING_ITEMS3: 'Lọc (3/4)', FILTERING_ITEMS4: 'Lọc (4/4)',
-  DOWNLOADING: 'Đang tải', DONE: 'Hoàn tất',
+  DOWNLOADING: 'Đang tải', DONE: 'Hoàn tất', IMPORT_SCAN: 'Quét thư mục', IMPORT_FETCH: 'Lấy metadata từ website',
 };
 const GENDER_VI = { only_female: 'Nữ', only_male: 'Nam', both: 'Nam+Nữ', none: 'Không có', unknown: '?' };
 const CONF_VI = { high: 'cao', medium: 'vừa', low: 'thấp' };
@@ -269,6 +269,7 @@ function renderModuleButton() {
   $('#f-audio-wrap').hidden = !(moduleInfo(S.module)?.media || []).includes('audio');
   $('#f-parchi-wrap').hidden = !hasCap(S.module, 'parchi');
   renderGenderFilter();
+  renderMultiSites();
 }
 
 // ---------------- gender filter (tier 0: tags) ----------------
@@ -876,6 +877,7 @@ function filtersSummary() {
     g.select.length && g.mode === 'model' && g.verifyMedia && gmOn() ? 'xem lại video sau khi tải' : '',
     o.skipKnown ? 'bỏ file đã tải' : '',
     o.lowRes ? 'ảnh nhẹ' : '',
+    multi.size ? `+${multi.size} site` : '',
   ].filter(Boolean);
   $('#filters-sum').textContent = `· ${parts.join(' · ')}`;
 }
@@ -1211,25 +1213,27 @@ async function startDownload(override = null) {
       if (r.nonEmpty && !S.settings.download.subfolderPerQuery
         && !window.confirm(`Thư mục “${path}” không trống, kết quả có thể lẫn với lượt tải khác. Vẫn tiếp tục?`)) return;
     }
-    const job = await addJob((allowDuplicate) => L.jobs.start({ ...q, path, options: downloadOptions(), allowDuplicate }));
-    if (job) toast(`Đã thêm job: ${q.label || q.tags}`, 'ok');
+    // "download selected" builds an id: query of this site: never sent to the other sites
+    const sites = !override && multi.size && multiAvailable() ? [...multi] : null;
+    const job = await addJob((allowDuplicate) => (sites
+      ? L.jobs.startMulti({ ...q, path, options: downloadOptions(), allowDuplicate }, sites)
+      : L.jobs.start({ ...q, path, options: downloadOptions(), allowDuplicate })));
+    if (Array.isArray(job)) toast(`Đã thêm ${job.length} job, chạy lần lượt: ${job.map((j) => j.module).join(' → ')}`, 'ok');
+    else if (job) toast(`Đã thêm job: ${q.label || q.tags}`, 'ok');
   } catch (err) {
     toast(`Không tạo được job: ${errMsg(err)}`, 'err');
   }
 }
 // main refuses an identical active job ('DUPLICATE: …'): ask, then retry on purpose
 async function addJob(call) {
+  const add = (r) => { (Array.isArray(r) ? r : [r]).forEach(upsertJob); return r; }; // a multi-site download returns its jobs
   try {
-    const job = await call(false);
-    upsertJob(job);
-    return job;
+    return add(await call(false));
   } catch (err) {
     const m = /DUPLICATE: (.*)$/.exec(errMsg(err));
     if (!m) throw err;
     if (!window.confirm(`${m[1][0].toUpperCase()}${m[1].slice(1)}. Vẫn thêm job này?`)) return null;
-    const job = await call(true);
-    upsertJob(job);
-    return job;
+    return add(await call(true));
   }
 }
 async function rerunJob(id) {
@@ -1257,6 +1261,7 @@ function upsertJob(job) {
     S.jobs.set(job.id, { ...rest, showLog: false, log: (logTail || []).slice(-JOB_LOG_MAX) });
     jobsResort = true;
   }
+  if (job.kind === 'import') onImportJob(job);
   dirtyJobs.add(job.id);
   onFrame(flushJobs);
 }
@@ -1268,7 +1273,7 @@ function renderJobs() {
 function jobProgress(j) {
   const p = j.progress || {};
   // streaming: files download while search pages are still being scanned, so totalAll can keep growing
-  const downloading = (p.stateName === 'DOWNLOADING' || !!p.streaming) && p.totalAll > 0;
+  const downloading = (p.stateName === 'DOWNLOADING' || p.stateName === 'IMPORT_FETCH' || !!p.streaming) && p.totalAll > 0;
   const pct = j.status === 'done' ? 100 : downloading ? Math.min(100, (100 * (p.processed || 0)) / p.totalAll) : 0;
   return { p, pct, indet: j.status === 'running' && !downloading };
 }
@@ -1278,7 +1283,7 @@ function createJobView(id) {
     module: h('span'), state: h('span'), task: h('span'), files: h('span'),
     scan: h('span', { class: 'hint', title: 'Vẫn đang quét thêm trang kết quả, tổng số file có thể còn tăng' }, 'đang quét thêm…'),
     counts: h('span'), cf: h('span', { class: 'danger' }, 'Bị bot challenge chặn'), error: h('span', { class: 'danger' }),
-    partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), known: h('span'),
+    partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), known: h('span'), imp: h('span'),
     mismatch: h('span', { class: 'warn', title: 'Video / ảnh động được model xem lại sau khi tải mà không khớp bộ lọc giới tính: đã chuyển vào thư mục con _gender_mismatch, không xoá' }),
     speed: h('span', { class: 'mono' }), eta: h('span'),
     dest: h('span', { class: 'mono' }),
@@ -1292,12 +1297,13 @@ function createJobView(id) {
     rerun: h('button', { class: 'btn sm ghost', title: 'Chạy lại đúng truy vấn và tuỳ chọn của job này', onclick: () => rerunJob(id) }, 'Chạy lại'),
     samples: [], // [time, bytes] of the last seconds: download speed
     logBtn: h('button', { class: 'btn sm ghost', onclick: () => toggleJobLog(id) }, 'Log'),
+    lists: h('button', { class: 'btn sm ghost', hidden: true, title: 'Tên không nhận ra, post không có trên site, lỗi', onclick: () => { const j = job(); if (j) openImportLists(j); } }, 'Danh sách'),
     fill: h('i'),
   };
   v.bar = h('div', { class: 'bar' }, v.fill);
   v.root = h('div', { class: 'job glass', dataset: { id } },
     h('div', { class: 'job-head' }, v.status, v.q,
-      h('div', { class: 'job-actions' }, v.cancel, v.rerun,
+      h('div', { class: 'job-actions' }, v.cancel, v.rerun, v.lists,
         h('button', { class: 'btn sm ghost', onclick: () => { const j = job(); if (j) L.app.openPath(j.dest); } }, 'Mở thư mục'),
         v.logBtn)),
     v.bar, h('div', { class: 'job-meta' }, Object.values(m)));
@@ -1317,10 +1323,10 @@ function updateJobView(v, j) {
   const width = indet ? '' : `${pct}%`; // inline width would override the indeterminate animation's width
   if (v.width !== width) { v.width = width; v.fill.style.width = width; }
   const { m } = v;
-  slot(m.module, `Module: ${j.module}`);
-  slot(m.state, p.stateName && j.status !== 'failed' ? `Trạng thái: ${STATE_VI[p.stateName] || p.stateName}` : null);
+  slot(m.module, jobModuleText(j));
+  slot(m.state, p.stateName && j.status !== 'failed' ? `Trạng thái: ${STATE_VI[p.stateName] || p.stateName}` : jobWaitText(j));
   slot(m.task, p.tasks > 1 ? `Task ${p.task || 0}/${p.tasks}` : null);
-  const files = p.totalAll ? `${nf.format(p.processed || 0)} / ${nf.format(p.totalAll)} file` : p.total ? `Tìm thấy ${nf.format(p.total)}` : null;
+  const files = jobFilesText(j, p);
   slot(m.files, files);
   setHidden(m.scan, !(files && p.scanning && j.status === 'running'));
   slot(m.counts, (p.success || p.failed) ? `✓ ${p.success || 0} · ✗ ${p.failed || 0}` : null);
@@ -1329,8 +1335,10 @@ function updateJobView(v, j) {
   setHidden(m.partial, !(j.status === 'done' && j.exitCode === 3));
   slot(m.gender, p.genderFiltered ? `Lọc giới tính: ${nf.format(p.genderFiltered)}` : null);
   slot(m.blocked, p.blocked ? `Chặn (an toàn): ${nf.format(p.blocked)}` : null);
-  slot(m.known, p.known ? `Bỏ qua (đã tải): ${nf.format(p.known)}` : null);
+  slot(m.known, p.known ? `${j.kind === 'import' ? 'Đã có trong index' : 'Bỏ qua (đã tải)'}: ${nf.format(p.known)}` : null);
   slot(m.mismatch, p.genderMismatch ? `Không khớp, đã chuyển: ${nf.format(p.genderMismatch)} / ${nf.format(p.genderVerified || 0)} file đã xem lại` : null);
+  slot(m.imp, j.kind === 'import' ? importCountsText(p) : null);
+  setHidden(v.lists, !(j.kind === 'import' && !JOB_ACTIVE.has(j.status) && (p.unknown || p.notFound || p.failed || p.mismatch)));
   const transfer = jobTransfer(v, j, p);
   slot(m.speed, transfer.speed);
   slot(m.eta, transfer.eta);
@@ -1368,18 +1376,24 @@ function flushJobs() {
     if (!v) { v = createJobView(id); jobViews.set(id, v); jobsResort = true; }
     updateJobView(v, j);
   }
+  const groups = new Set([...dirtyJobs].map((id) => S.jobs.get(id)?.group?.id).filter(Boolean));
   dirtyJobs.clear();
   if (jobsResort) {
     jobsResort = false;
-    // newest first; only nodes that are out of place are moved (a new job is inserted, existing ones stay put)
+    // newest first; only nodes that are out of place are moved (a new job is inserted, existing ones stay put).
+    // A multi-site group is one box (jobSlot) placed where its newest job goes
     let i = 0;
+    const placed = new Set();
     for (const j of [...S.jobs.values()].sort((a, b) => b.createdAt - a.createdAt)) {
-      const el = jobViews.get(j.id)?.root;
-      if (!el) continue;
+      const el = jobSlot(j);
+      if (!el || placed.has(el)) continue;
+      placed.add(el);
       if (host.children[i] !== el) host.insertBefore(el, host.children[i] || null);
       i++;
     }
+    pruneJobGroups();
   }
+  groups.forEach(updateGroupView);
   let active = 0;
   for (const j of S.jobs.values()) if (JOB_ACTIVE.has(j.status)) active++;
   const badge = $('#badge-jobs');
@@ -1830,6 +1844,221 @@ async function refreshIndexStats() {
 }
 $('#index-refresh').addEventListener('click', () => refreshIndexStats());
 $('#s-skip-known').addEventListener('change', (e) => { $('#f-skip-known').checked = e.target.checked; });
+
+// ---------------- download index tools: clean (index.clean in the sidecar, via main) ----------------
+// finished: ids of cleans whose index.cleanDone arrived (a small index is done before main's reply reaches the renderer)
+const IDX = { cleaning: '', finished: new Set() };
+function renderCleanState(text) {
+  slot($('#index-clean-status'), text);
+  setHidden($('#index-clean-stop'), !IDX.cleaning);
+  $('#index-clean').disabled = Boolean(IDX.cleaning);
+  $('#index-clean-check').disabled = Boolean(IDX.cleaning);
+}
+async function startIndexClean(dryRun) {
+  if (!L.index) { toast('Bản app này chưa có công cụ dọn index', 'err'); return; }
+  try {
+    // main asks for confirmation (native dialog, with the "missing folders" choice); a dry run only counts
+    const r = await L.index.clean(dryRun ? { dryRun: true } : undefined);
+    if (IDX.finished.has(r.job)) return; // the result is already shown
+    IDX.cleaning = r.job;
+    renderCleanState(dryRun ? 'Đang kiểm tra…' : 'Đang dọn…');
+  } catch (err) {
+    if (!/cancelled/.test(errMsg(err))) toast(`Không dọn được index: ${errMsg(err)}`, 'err');
+  }
+}
+function onIndexCleanNotify(method, p) {
+  if (method === 'index.cleanProgress') {
+    if (IDX.finished.has(p.job)) return;
+    IDX.cleaning = p.job;
+    renderCleanState(`${p.dryRun ? 'Đang kiểm tra' : 'Đang dọn'}: ${nf.format(p.checked)} / ${nf.format(p.total)} dòng · `
+      + `${nf.format(p.missing)} file không còn${p.dryRun ? '' : ` · đã bỏ ${nf.format(p.removed)} dòng`}`);
+    return;
+  }
+  IDX.cleaning = '';
+  if (p.job) IDX.finished.add(p.job);
+  if (!p.ok) {
+    renderCleanState(`Lỗi: ${p.message || '?'}`);
+    toast(`Dọn index lỗi: ${p.message || '?'}`, 'err');
+    return;
+  }
+  const keptDirs = p.missingDirs && !p.missingFolders;
+  const kept = keptDirs ? ` ${nf.format(p.missingDirs)} dòng có cả thư mục không còn được giữ lại (ổ cứng ngoài / thư mục mạng chưa kết nối?).` : '';
+  const folders = p.folders?.length ? ` Thư mục không còn: ${p.folders.slice(0, 5).join(', ')}${p.folders.length > 5 ? '…' : ''}` : '';
+  const text = p.dryRun
+    ? `Đã kiểm ${nf.format(p.checked)} dòng: ${nf.format(p.missing)} file không còn trên đĩa, dọn sẽ bỏ ${nf.format(p.missing - (keptDirs ? p.missingDirs : 0))} dòng.${kept}`
+    : `${p.cancelled ? 'Đã dừng' : 'Đã dọn'}: kiểm ${nf.format(p.checked)} / ${nf.format(p.total)} dòng, bỏ ${nf.format(p.removed)} dòng có file không còn.${kept} Không file nào bị xoá.`;
+  renderCleanState(text + folders);
+  if (!p.dryRun) {
+    toast(text, 'ok');
+    refreshIndexStats();
+    if (LIB.ready) runLibrary(LIB.page);
+  }
+}
+$('#index-clean-check').addEventListener('click', () => startIndexClean(true));
+$('#index-clean').addEventListener('click', () => startIndexClean(false));
+$('#index-clean-stop').addEventListener('click', () => L.index?.cleanCancel().catch(() => {}));
+
+// ---------------- download index tools: library import (a job: lustra/dlindex_tools.py import) ----------------
+function openImportDialog() {
+  if (!L.index) { toast('Bản app này chưa có công cụ nhập thư viện', 'err'); return; }
+  let folder = '';
+  const pathEl = h('code', { class: 'import-path', title: '' }, 'chưa chọn');
+  const modSel = h('select', {}, h('option', { value: '' }, 'Không chọn (liệt kê, không tra)'),
+    ...S.modules.filter((m) => m.installed).map((m) => h('option', { value: m.abbr }, `${m.abbr} · ${m.name}`)));
+  const recursive = h('input', { type: 'checkbox', checked: true });
+  const verify = h('input', { type: 'checkbox' });
+  const dry = h('input', { type: 'checkbox' });
+  const startBtn = h('button', { class: 'btn primary', disabled: true }, 'Bắt đầu nhập');
+  const pick = async () => {
+    const p = await L.index.pickImportFolder(); // native dialog in main: the only way to give the import a folder
+    if (!p) return;
+    folder = p;
+    setText(pathEl, p);
+    pathEl.title = p;
+    startBtn.disabled = false;
+  };
+  startBtn.addEventListener('click', async () => {
+    const opts = { folder, module: modSel.value, recursive: recursive.checked, verifyMd5: verify.checked, dryRun: dry.checked };
+    try {
+      const job = await addJob((allowDuplicate) => L.index.importLibrary({ ...opts, allowDuplicate }));
+      if (!job) return;
+      closeModal();
+      toast(opts.dryRun ? 'Đã thêm job kiểm tra thư mục' : 'Đã thêm job nhập thư viện: xem trang Tải xuống', 'ok');
+      showPage('downloads');
+    } catch (err) {
+      toast(`Không bắt đầu được: ${errMsg(err)}`, 'err');
+    }
+  });
+  const row = (label, hint, ctl) => h('label', { class: 'setting' }, h('span', {}, label, hint ? h('span', { class: 'muted' }, ` ${hint}`) : null), ctl);
+  openModal(h('div', { class: 'import-modal' },
+    h('h2', {}, 'Nhập thư viện có sẵn vào index'),
+    h('p', { class: 'muted' }, 'Lustra quét thư mục, nhận module và id của post từ tên file (db_123.jpg, rx_456_…png, __tag__<md5>.jpg của '
+      + 'Danbooru), rồi lấy tag, điểm, rating, ngày post và md5 từ website theo lô, đúng giới hạn tốc độ của từng site (Danbooru 100 post '
+      + 'mỗi request, site khác 1 post mỗi request, tối đa 2 request mỗi giây). Không đọc nội dung file (trừ khi bật so md5), không đổi '
+      + 'tên hay di chuyển file. File đã có trong index được bỏ qua; tên không nhận ra được liệt kê, không đoán.'),
+    h('div', { class: 'setting' }, h('span', {}, 'Thư mục'), h('span', { class: 'row' }, pathEl, h('button', { class: 'btn sm', onclick: pick }, 'Chọn…'))),
+    row('Module của tên không có tiền tố', '(12345.jpg, <md5>.jpg): chỉ chọn khi cả thư mục là file của một site', modSel),
+    row('Quét cả thư mục con', '', recursive),
+    row('So md5 với file gốc trên site', '(đọc từng file, chậm hơn; bỏ file đã sửa / ảnh nhẹ)', verify),
+    row('Chỉ kiểm tra tên file', '(không gửi request, không ghi index)', dry),
+    h('div', { class: 'modal-actions' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Huỷ'), startBtn)));
+}
+function openImportLists(j) {
+  const p = j.progress || {};
+  const block = (title, items, total) => (!total ? null : h('div', { class: 'import-list' },
+    h('h3', {}, `${title} (${nf.format(total)})`),
+    h('div', { class: 'files-list' }, (items || []).map((t) => h('div', { class: 'files-item' }, h('span', { class: 'files-name', title: t }, t)))),
+    total > (items || []).length ? h('p', { class: 'muted' }, `… và ${nf.format(total - (items || []).length)} mục khác: xem Log của job`) : null));
+  openModal(h('div', { class: 'files-modal' },
+    h('h2', {}, p.dryRun ? 'Kiểm tra thư mục' : 'Kết quả nhập thư viện'), h('p', { class: 'muted lib-path' }, j.dest),
+    block('Không nhận ra tên', p.unknownNames, p.unknown),
+    block('Không có trên website (đã xoá, bị ẩn hoặc sai module)', p.notFoundItems, p.notFound),
+    block('Lỗi khi lấy metadata (chạy lại job để thử tiếp)', p.failedItems, p.failed),
+    block('md5 khác file gốc (không nhập)', p.mismatchItems, p.mismatch),
+    h('div', { class: 'modal-actions' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng'))));
+}
+const importSeen = new Map(); // import job id -> last status: the index views are refreshed once, when the job ends
+function onImportJob(job) {
+  const prev = importSeen.get(job.id);
+  importSeen.set(job.id, job.status);
+  if (prev === undefined || prev === job.status || JOB_ACTIVE.has(job.status) || job.progress?.dryRun) return;
+  refreshIndexStats();
+  if (LIB.ready) runLibrary(LIB.page);
+}
+$('#index-import').addEventListener('click', () => openImportDialog());
+$('#lib-import').addEventListener('click', () => openImportDialog());
+
+// ---------------- job card texts (download, multi-site, import) ----------------
+function jobModuleText(j) {
+  if (j.kind === 'import') return `Nhập thư viện${j.module && j.module !== '*' ? ` · tên không tiền tố: ${j.module}` : ''}`;
+  return `Module: ${j.module}${j.group ? ` · site ${j.group.index + 1}/${j.group.size}` : ''}`;
+}
+function jobWaitText(j) {
+  return j.status === 'queued' && j.group?.index > 0 ? 'Chờ site trước tải xong' : null;
+}
+function jobFilesText(j, p) {
+  if (j.kind !== 'import') return p.totalAll ? `${nf.format(p.processed || 0)} / ${nf.format(p.totalAll)} file` : p.total ? `Tìm thấy ${nf.format(p.total)}` : null;
+  if (p.dryRun && p.stateName === 'DONE') {
+    const per = Object.entries(p.modules || {}).map(([m, st]) => `${m}: ${nf.format(st.files)}`).join(', ');
+    return `${nf.format(p.scanned || 0)} file media, ${nf.format(p.totalAll || 0)} file sẽ được tra${per ? ` (${per})` : ''}`;
+  }
+  if (p.stateName === 'IMPORT_SCAN' || (!p.totalAll && p.scanned)) return `Đã quét ${nf.format(p.scanned || 0)} file media`;
+  return p.totalAll ? `${nf.format(p.processed || 0)} / ${nf.format(p.totalAll)} file · ${nf.format(p.requests || 0)} request` : null;
+}
+function importCountsText(p) {
+  const parts = [p.unknown && `không nhận ra: ${nf.format(p.unknown)}`, p.notFound && `không có trên site: ${nf.format(p.notFound)}`,
+    p.mismatch && `md5 khác: ${nf.format(p.mismatch)}`].filter(Boolean);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+// ---------------- multi-site download: one query, one job per site (jobs:startMulti), md5 dedupe by the index ----------------
+const multi = new Set(); // extra modules picked for the current query (not saved)
+const multiAvailable = () => typeof L?.jobs?.startMulti === 'function';
+function renderMultiSites() {
+  const field = $('#f-multi');
+  const others = S.modules.filter((m) => m.installed && m.abbr !== S.module);
+  for (const abbr of [...multi]) if (!others.some((m) => m.abbr === abbr)) multi.delete(abbr); // also drops the current module
+  setHidden(field, !multiAvailable() || !others.length);
+  $('#f-multi-pills').replaceChildren(...others.map((m) => h('button', {
+    type: 'button', class: `pill${multi.has(m.abbr) ? ' on' : ''}`, title: m.site || m.name,
+    onclick: () => { if (!multi.delete(m.abbr)) multi.add(m.abbr); renderMultiSites(); filtersSummary(); },
+  }, `${m.abbr} · ${m.name}`)));
+  const warn = $('#f-multi-warn');
+  if (multi.size) {
+    warn.replaceChildren(h('b', {}, `Tải từ ${multi.size + 1} site: ${[S.module, ...multi].join(' → ')}. `),
+      'Cùng chuỗi tag được gửi nguyên văn tới từng site, nhưng tên tag, metatag và alias khác nhau giữa các site (rating, tên nhân vật, '
+      + 'tag đã đổi tên…): thử truy vấn trên từng site bằng Preview trước. Các site chạy lần lượt; luôn bỏ qua file đã tải và đặt tiền '
+      + 'tố module cho tên file, nên post trùng md5 với file site trước đã tải sẽ không tải lại (chỉ với site có báo md5).');
+  }
+  setHidden(warn, !multi.size);
+  setText($('#btn-download'), multi.size ? `Tải xuống (${multi.size + 1} site)` : 'Tải xuống');
+}
+const jobGroups = new Map(); // group id -> view: one box per multi-site group, its jobs inside in site order
+const groupJobs = (id) => [...S.jobs.values()].filter((j) => j.group?.id === id).sort((a, b) => a.group.index - b.group.index);
+function groupView(id) {
+  let v = jobGroups.get(id);
+  if (!v) {
+    v = { title: h('span', { class: 'job-q' }), info: h('span', { class: 'muted' }), body: h('div', { class: 'job-group-body' }),
+      cancel: h('button', { class: 'btn sm danger', onclick: () => cancelGroup(id) }, 'Huỷ cả nhóm') };
+    v.root = h('div', { class: 'job-group', dataset: { group: id } },
+      h('div', { class: 'job-group-head' }, h('span', { class: 'status' }, 'Nhiều site'), v.title, v.info, h('div', { class: 'job-actions' }, v.cancel)),
+      v.body);
+    jobGroups.set(id, v);
+  }
+  return v;
+}
+function jobSlot(j) {
+  // the element that takes the job's place in the list: its own card, or the box of its multi-site group
+  const el = jobViews.get(j.id)?.root;
+  if (!el || !j.group?.id) return el;
+  const g = groupView(j.group.id);
+  groupJobs(j.group.id).forEach((x, k) => {
+    const xe = jobViews.get(x.id)?.root;
+    if (xe && g.body.children[k] !== xe) g.body.insertBefore(xe, g.body.children[k] || null);
+  });
+  updateGroupView(j.group.id);
+  return g.root;
+}
+function updateGroupView(id) {
+  const v = jobGroups.get(id);
+  const list = groupJobs(id);
+  if (!v || !list.length) return;
+  setText(v.title, list[0].tags);
+  const ended = list.filter((j) => !JOB_ACTIVE.has(j.status)).length;
+  const sum = (k) => list.reduce((n, j) => n + (Number(j.progress?.[k]) || 0), 0);
+  setText(v.info, `${list.map((j) => j.module).join(' → ')} · xong ${ended}/${list.length} site · ${nf.format(sum('success'))} file mới`
+    + `${sum('known') ? ` · bỏ qua ${nf.format(sum('known'))} file đã có` : ''}`);
+  setHidden(v.cancel, !list.some((j) => ['queued', 'running'].includes(j.status)));
+}
+function cancelGroup(id) {
+  // later sites first: a queued site never starts while an earlier one is being cancelled
+  groupJobs(id).reverse().filter((j) => ['queued', 'running'].includes(j.status)).forEach((j) => L.jobs.cancel(j.id));
+}
+function pruneJobGroups() {
+  for (const [id, v] of jobGroups) {
+    if (!groupJobs(id).length) { v.root.remove(); jobGroups.delete(id); }
+  }
+}
 
 // ---------------- tag lists status / update ----------------
 const UPDATABLE = ['rx', 'db', 'xb', 'bb', 'en'];
@@ -2743,6 +2972,8 @@ function listen() {
     if (method === 'tags.updateProgress') {
       const cell = $(`#tagupd-${params.module}`);
       if (cell) cell.textContent = `đang tải… ${nf.format(params.count)} tag`;
+    } else if (method === 'index.cleanProgress' || method === 'index.cleanDone') {
+      onIndexCleanNotify(method, params);
     } else if (method === 'app.notice') {
       // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');

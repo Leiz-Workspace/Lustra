@@ -529,7 +529,7 @@ function coreCommand(kind, args = []) {
   const core = bundledCore();
   // 'aigen' (extension generator worker) and 'extgen' (draft tools: check / pack) are commands of the same core
   if (core) return { cmd: core, args: [kind, ...args], cwd: userData(), frozen: true };
-  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen' }[kind];
+  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen', index: 'lustra.dlindex_tools' }[kind];
   if (!mod) throw new Error(`unknown core command ${kind}`);
   return { cmd: resolvePython(), args: ['-m', mod, ...args], cwd: REPO_ROOT, frozen: false };
 }
@@ -1086,7 +1086,7 @@ function notifyJob(job) {
     if (!Notification.isSupported()) return;
     const p = job.progress || {};
     const body = job.status === 'done'
-      ? `${p.success || 0} file đã tải${p.failed ? `, ${p.failed} lỗi` : ''}`
+      ? `${p.success || 0} file ${job.kind === 'import' ? 'đã nhập vào index' : 'đã tải'}${p.failed ? `, ${p.failed} lỗi` : ''}`
       : `Lỗi: ${String(job.error || '').slice(0, 120)}`;
     const n = new Notification({ title: `${job.status === 'done' ? 'Xong' : 'Lỗi'}: ${job.module} · ${job.label || job.tags}`.slice(0, 120), body });
     n.on('click', () => { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); send('nav:page', 'downloads'); } });
@@ -1101,7 +1101,7 @@ class Jobs {
   }
 
   public(job) {
-    const { proc, logTail, args, secretArgs, testCommand, query, ...rest } = job;
+    const { proc, logTail, args, secretArgs, moduleSecretArgs, testCommand, query, importQuery, coreKind, ...rest } = job;
     return { ...rest, logTail: logTail.slice(-40) };
   }
 
@@ -1109,12 +1109,12 @@ class Jobs {
     send('jobs:update', this.public(job));
   }
 
-  async start(q) {
+  async _build(q) {
     if (this.closing) throw new Error('app is closing');
     if (!q || !q.module || !String(q.tags || '').trim()) throw new Error('module and tags are required');
     asQuery(q);
-    const allowDuplicate = q.allowDuplicate === true;
-    const query = structuredClone({ ...q, allowDuplicate: undefined }); // kept for 'run again' (no secrets: they are added per run)
+    // kept for 'run again' (no secrets: they are added per run); a job of a multi-site group runs again on its own
+    const query = structuredClone({ ...q, allowDuplicate: undefined, group: undefined });
     const id = `job-${Date.now()}-${++this.seq}`;
     const { args, dest } = downloadArgs(q);
     const job = {
@@ -1126,17 +1126,85 @@ class Jobs {
         ...String(q.tags).trim().split(/\s+/)],
       query,
       autoKey: typeof q.autoKey === 'string' ? q.autoKey : '',
+      group: isPlainObject(q.group) ? q.group : null, // multi-site download (startMulti only)
     };
+    return job;
+  }
+
+  _duplicate(job) {
     // the same download twice (double click, a query run again by mistake): the renderer asks, then retries with allowDuplicate
     const same = this.active().find((j) => j.args.join('\0') === job.args.join('\0'));
-    if (same && !allowDuplicate) throw new Error(`DUPLICATE: một job giống hệt đang ${same.status === 'queued' ? 'chờ' : 'chạy'}`);
+    return same ? new Error(`DUPLICATE: một job giống hệt đang ${same.status === 'queued' ? 'chờ' : 'chạy'}`) : null;
+  }
+
+  async start(q) {
+    const job = await this._build(q);
+    const dup = q.allowDuplicate === true ? null : this._duplicate(job);
+    if (dup) throw dup;
+    return this._add(job);
+  }
+
+  // one query on several sites: one job per module, each waits for the previous site's job to end (see _waiting). Forced options:
+  // '-skip_known' (a post another site of the group already brought, same md5 in the index, is skipped) and module prefixed file
+  // names (post 123 of two sites never share a file name). Tags are sent as typed to every site: their syntax may differ
+  async startMulti(q, modules) {
+    asQuery(q);
+    const list = [...new Set([q.module, ...(Array.isArray(modules) ? modules : [])])];
+    if (list.length < 2 || list.length > MULTI_SITE_MAX || !list.every((m) => typeof m === 'string' && RE_ABBR.test(m))) {
+      throw new Error(`cần 2–${MULTI_SITE_MAX} module khác nhau`);
+    }
+    const group = { id: `group-${Date.now()}-${++this.seq}`, size: list.length, modules: list };
+    const options = { ...(isPlainObject(q.options) ? q.options : {}), skipKnown: true, prefix: true };
+    const built = [];
+    for (const [index, module] of list.entries()) built.push(await this._build({ ...q, module, options, group: { ...group, index } }));
+    const dup = q.allowDuplicate === true ? null : built.map((j) => this._duplicate(j)).find(Boolean);
+    if (dup) throw dup;
+    return built.map((job) => this._add(job));
+  }
+
+  // library import into the download index (lustra/dlindex_tools.py 'import'): a core job like a download (progress lines,
+  // 'cancel'). The folder must come from the native dialog (index:pickFolder): the renderer cannot name an arbitrary path
+  async startImport(opts) {
+    if (this.closing) throw new Error('app is closing');
+    if (!isPlainObject(opts)) throw new Error('invalid import options');
+    const folder = String(opts.folder || '');
+    if (!approvedImportFolders.has(folder)) throw new Error('choose the folder with the folder dialog first');
+    if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) throw new Error('thư mục không còn');
+    const module = String(opts.module || '');
+    if (module && !RE_ABBR.test(module)) throw new Error('invalid module');
+    const importQuery = { folder, module, recursive: opts.recursive !== false, verifyMd5: opts.verifyMd5 === true, dryRun: opts.dryRun === true };
+    const moduleSecretArgs = {}; // the files may belong to any module: each one gets its own key (the core reads them, then drops them)
+    for (const abbr of Object.keys(secrets).filter((k) => RE_ABBR.test(k))) {
+      const key = await getSecret(abbr);
+      if (key) moduleSecretArgs[abbr] = ['-api_key', key];
+    }
+    const job = {
+      id: `job-${Date.now()}-${++this.seq}`, kind: 'import', coreKind: 'index', module: module || '*', tags: folder, dest: folder,
+      status: 'queued', progress: {}, createdAt: Date.now(), startedAt: 0, endedAt: 0, exitCode: null, logTail: [],
+      label: importQuery.dryRun ? 'Kiểm tra thư mục (không gửi request)' : 'Nhập thư viện vào index',
+      secretArgs: await connectionArgs(''), moduleSecretArgs, importQuery, autoKey: '', group: null,
+      args: ['import', folder, ...(module ? ['--module', module] : []), ...(importQuery.recursive ? [] : ['--no-recursive']),
+        ...(importQuery.verifyMd5 ? ['--verify-md5'] : []), ...(importQuery.dryRun ? ['--dry-run'] : [])],
+    };
+    const dup = opts.allowDuplicate === true ? null : this._duplicate(job);
+    if (dup) throw dup;
     return this._add(job);
   }
 
   rerun(id, allowDuplicate = false) {
     const job = this.jobs.get(id);
+    if (job?.importQuery) return this.startImport({ ...job.importQuery, allowDuplicate });
     if (!job?.query) throw new Error('job không còn thông tin để chạy lại');
     return this.start({ ...job.query, allowDuplicate });
+  }
+
+  _waiting(job) {
+    // multi-site group: a site's job starts once every earlier site's job ended, so their files are in the index (-skip_known)
+    if (!job.group) return false;
+    for (const j of this.jobs.values()) {
+      if (j.group?.id === job.group.id && j.group.index < job.group.index && ['queued', 'running', 'cancelling'].includes(j.status)) return true;
+    }
+    return false;
   }
 
   _add(job) {
@@ -1159,7 +1227,7 @@ class Jobs {
     const max = Math.max(1, settings.download.maxConcurrentJobs || 1);
     for (const job of this.jobs.values()) {
       if (this.running() >= max) break;
-      if (job.status === 'queued') this._spawn(job);
+      if (job.status === 'queued' && !this._waiting(job)) this._spawn(job);
     }
   }
 
@@ -1178,9 +1246,10 @@ class Jobs {
     try {
       fs.mkdirSync(job.dest, { recursive: true });
       const env = { LUSTRA_IPC: '1', LUSTRA_SECRET_ARGS: JSON.stringify(job.secretArgs || []) };
+      if (job.moduleSecretArgs) env.LUSTRA_SECRET_MODULE_ARGS = JSON.stringify(job.moduleSecretArgs); // library import
       if (job.testCommand) { // self-test only: a stand-in process (never set from the renderer)
         proc = spawn(job.testCommand.cmd, job.testCommand.args, { env: { ...process.env, ...job.testCommand.env }, stdio: ['pipe', 'pipe', 'pipe'] });
-      } else proc = spawnCore('cli', job.args, env);
+      } else proc = spawnCore(job.coreKind || 'cli', job.args, env);
     } catch (err) {
       // a failed job must not block the queue (Ruxx-era code threw here and the queue stalled forever)
       this._fail(job, err.message);
@@ -1233,6 +1302,7 @@ class Jobs {
     if (job.status === 'queued') {
       job.status = 'cancelled';
       this.emit(job);
+      this.pump();
       return true;
     }
     if (job.status === 'running' && job.proc) {
@@ -1738,7 +1808,7 @@ function registerIpc() {
   });
   handle('secrets:clear', (_e, module) => { clearSecret(module); return secretsStatus(); });
 
-  handle('jobs:start', (_e, q) => jobs.start(isPlainObject(q) ? { ...q, autoKey: undefined } : q)); // only the scheduler sets autoKey
+  handle('jobs:start', (_e, q) => jobs.start(isPlainObject(q) ? { ...q, autoKey: undefined, group: undefined } : q)); // only the scheduler sets autoKey
   // gender image model: runs in a model server (lustra/model_server.py); the app only calls its API, the token stays in main
   handle('gmodel:status', async () => {
     if (!settings.genderModel.url) return { url: '', reachable: false, local: false, error: 'off' };
@@ -1857,6 +1927,44 @@ function registerIpc() {
     else if (fs.existsSync(path.dirname(target)) && fs.statSync(path.dirname(target)).isDirectory()) shell.openPath(path.dirname(target));
     return true;
   });
+}
+
+// ---------- download index tools: clean (sidecar), library import (job), multi-site downloads (jobs) ----------
+
+const MULTI_SITE_MAX = 8;
+const approvedImportFolders = new Set(); // folders picked with the native dialog for a library import (renderer paths are refused)
+
+// native confirmation of an index clean; the self-test replaces it
+let confirmIndexClean = async () => {
+  const r = await dialog.showMessageBox(mainWindow, {
+    type: 'question', buttons: ['Huỷ', 'Dọn index'], defaultId: 1, cancelId: 0, noLink: true,
+    message: 'Dọn index các lần tải?',
+    detail: 'Xoá khỏi index những dòng có file không còn trên đĩa. Chỉ xoá dòng trong index (CSDL của Lustra): không xoá, '
+      + 'di chuyển hay đọc file nào. Có thể chạy trong lúc đang tải.\n\nDòng mà cả thư mục chứa file cũng không còn (ổ cứng ngoài '
+      + 'chưa cắm, thư mục mạng chưa kết nối) được giữ lại, trừ khi bạn đánh dấu ô bên dưới. Hãy cắm ổ / kết nối thư mục trước khi dọn.',
+    checkboxLabel: 'Xoá cả dòng có thư mục không còn', checkboxChecked: false,
+  });
+  return { ok: r.response === 1, missingFolders: r.checkboxChecked === true };
+};
+
+function registerIndexIpc() {
+  // clean: rows only, after a native confirmation; a dry run (count only) needs none. The direct rpc methods are not allowlisted
+  handle('index:clean', async (_e, opts) => {
+    if (opts !== undefined && opts !== null && !isPlainObject(opts)) throw new Error('invalid options');
+    if (opts?.dryRun === true) return sidecar.call('index.clean', { dryRun: true, missingFolders: opts.missingFolders === true });
+    const answer = await confirmIndexClean();
+    if (!answer.ok) throw new Error('cancelled');
+    return sidecar.call('index.clean', { missingFolders: answer.missingFolders === true });
+  });
+  handle('index:cleanCancel', () => sidecar.call('index.cleanCancel', {}));
+  handle('index:pickFolder', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, { title: 'Chọn thư mục thư viện để nhập vào index', properties: ['openDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return '';
+    approvedImportFolders.add(r.filePaths[0]);
+    return r.filePaths[0];
+  });
+  handle('index:import', (_e, opts) => jobs.startImport(opts));
+  handle('jobs:startMulti', (_e, q, modules) => jobs.startMulti(isPlainObject(q) ? { ...q, autoKey: undefined, group: undefined } : q, modules));
 }
 
 const LIBRARY_MEDIA_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm', 'mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav']);
@@ -2093,6 +2201,7 @@ async function runSelfTest(dir) {
     }
     report.quitGuard = await selfTestQuitGuard(dir);
     report.generator = await selfTestGenerator(js);
+    report.indexTools = await selfTestIndexTools(js, shot);
     if (process.env.LUSTRA_SELFTEST_ICONS) {
       // writes ~/.local/share/applications/lustra.desktop: run it with a scratch HOME only
       const read = () => fs.readFileSync(desktopEntryPath(), 'utf8');
@@ -2397,6 +2506,192 @@ async function selfTestGenerator(js) {
   return out;
 }
 
+async function selfTestIndexTools(js, shot) {
+  // download index tools: clean only through main (confirmation), import only from a dialog-picked folder (a dry run job runs the
+  // real core command), multi-site groups (validation, forced options, a site waits for the previous one; nothing is spawned)
+  const out = {};
+  const blocked = async (m) => js(`window.lustra.rpc(${JSON.stringify(m)}, {}).then(() => 'allowed', (e) => 'blocked: ' + e.message)`);
+  out.rpcBlocked = [await blocked('index.clean'), await blocked('index.cleanCancel')];
+  const realConfirm = confirmIndexClean;
+  const waitDone = `new Promise((resolve) => {
+    const off = window.lustra.on('sidecar:notify', ({ method, params }) => { if (method === 'index.cleanDone') { off(); resolve(params); } });
+    setTimeout(() => { off(); resolve({ timeout: true }); }, 20000);
+  })`;
+  try {
+    let asked = 0;
+    confirmIndexClean = async () => { asked += 1; return { ok: false }; };
+    out.cleanDeclined = await js(`window.lustra.index.clean().then(() => 'STARTED', (e) => e.message)`);
+    out.cleanBadOptions = await js(`window.lustra.index.clean('x').then(() => 'STARTED', (e) => e.message)`);
+    const askedDeclined = asked;
+    out.cleanDryRun = await js(`(async () => { const done = ${waitDone}; const r = await window.lustra.index.clean({ dryRun: true }); return { r, done: await done }; })()`);
+    confirmIndexClean = async () => { asked += 1; return { ok: true, missingFolders: false }; };
+    out.clean = await js(`(async () => { const done = ${waitDone}; const r = await window.lustra.index.clean(); return { r, done: await done }; })()`);
+    out.cleanAsked = asked;
+    out.cleanOk = /cancelled/.test(out.cleanDeclined) && /invalid options/.test(out.cleanBadOptions) && askedDeclined === 1 && asked === 2
+      && out.cleanDryRun.done?.ok === true && out.cleanDryRun.done?.dryRun === true && out.clean.done?.ok === true
+      && out.clean.done?.dryRun === false && typeof out.clean.done?.removed === 'number';
+  } catch (e) {
+    out.cleanOk = false;
+    out.cleanError = String(e.message || e);
+  } finally {
+    confirmIndexClean = realConfirm;
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lustra-selftest-import-'));
+  try {
+    for (const name of ['db_1.jpg', 'rx_2.png', 'IMG_3.jpg', 'notes.txt']) fs.writeFileSync(path.join(dir, name), 'x');
+    out.importUnpicked = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)} }).then(() => 'STARTED', (e) => e.message)`);
+    approvedImportFolders.add(dir); // what index:pickFolder does after the native dialog
+    out.importBadModule = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)}, module: 'DB!' }).then(() => 'STARTED', (e) => e.message)`);
+    const job = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)}, dryRun: true })`);
+    let j = jobs.jobs.get(job.id);
+    for (let i = 0; i < 120 && j && !['done', 'failed', 'cancelled'].includes(j.status); i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      j = jobs.jobs.get(job.id);
+    }
+    const p = j?.progress || {};
+    out.importJob = { kind: job.kind, publicHidesSecrets: !('moduleSecretArgs' in job) && !('importQuery' in job), status: j?.status,
+      exit: j?.exitCode, scanned: p.scanned, totalAll: p.totalAll, unknown: p.unknown, unknownNames: p.unknownNames, error: j?.error };
+    // the job card: import texts, the lists of names (renderer)
+    await js(`document.querySelector('[data-page="downloads"]').click()`);
+    out.importCard = await js(`(async () => {
+      for (let i = 0; i < 20 && !document.querySelector('.job[data-id="${job.id}"]'); i++) await new Promise((r) => setTimeout(r, 100));
+      const card = document.querySelector('.job[data-id="${job.id}"]');
+      if (!card) return { card: false };
+      const lists = [...card.querySelectorAll('.job-actions .btn')].find((b) => b.textContent === 'Danh sách');
+      const text = card.textContent;
+      if (lists && !lists.hidden) lists.click();
+      await new Promise((r) => setTimeout(r, 200));
+      const modal = document.querySelector('#modal-card').textContent;
+      return { card: true, text, listsShown: Boolean(lists && !lists.hidden), modal };
+    })()`);
+    await shot('24-import-job-lists');
+    await js('closeModal()');
+    out.importCardOk = out.importCard.card && /Nhập thư viện/.test(out.importCard.text) && /2 file sẽ được tra/.test(out.importCard.text)
+      && out.importCard.listsShown && /Không nhận ra tên \(1\)/.test(out.importCard.modal) && /IMG_3\.jpg/.test(out.importCard.modal);
+    out.importOk = /folder dialog/.test(out.importUnpicked) && /invalid module/.test(out.importBadModule) && job.kind === 'import'
+      && out.importJob.publicHidesSecrets && j?.status === 'done' && p.scanned === 3 && p.totalAll === 2 && p.unknown === 1 && out.importCardOk;
+    jobs.jobs.delete(job.id);
+  } catch (e) {
+    out.importOk = false;
+    out.importError = String(e.message || e);
+  } finally {
+    approvedImportFolders.delete(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const realPump = jobs.pump;
+  const made = [];
+  try {
+    jobs.pump = () => {};
+    const q = { module: 'db', tags: 'selftest_multi', path: path.join(os.tmpdir(), 'lustra-selftest-multi'), options: { skipKnown: false } };
+    const tryMulti = (mods) => js(`window.lustra.jobs.startMulti(${JSON.stringify(q)}, ${JSON.stringify(mods)}).then((r) => 'ADDED ' + r.length, (e) => e.message)`);
+    out.multiRefused = [await tryMulti([]), await tryMulti(['db']), await tryMulti(['rx', 'BAD!']), await tryMulti(Array.from({ length: 9 }, (_, i) => `m${i}`))];
+    const list = await js(`window.lustra.jobs.startMulti(${JSON.stringify(q)}, ['rx', 'db', 'rx'])`);
+    made.push(...list.map((x) => x.id));
+    const [a, b] = list.map((x) => jobs.jobs.get(x.id));
+    const waitsBefore = jobs._waiting(b);
+    jobs.cancel(a.id);
+    const waitsAfter = jobs._waiting(b);
+    const forged = await js(`window.lustra.jobs.start({ ...${JSON.stringify(q)}, tags: 'selftest_multi_forged', group: { id: 'x', index: 9 } })`);
+    made.push(forged.id);
+    out.multi = {
+      modules: list.map((x) => x.module), sameGroup: list[0].group?.id === list[1].group?.id && list[1].group?.index === 1,
+      forcedArgs: [a, b].every((x) => x.args.includes('-skip_known') && x.args.includes('-prefix')), waitsBefore, waitsAfter,
+      forgedGroup: forged.group, rerunAlone: (await jobs.rerun(a.id, true)).group,
+    };
+    made.push(...jobs.list().filter((x) => x.tags === 'selftest_multi' && !made.includes(x.id)).map((x) => x.id));
+    out.multiOk = out.multiRefused.every((x) => /module khác nhau/.test(x)) && out.multi.modules.join() === 'db,rx' && out.multi.sameGroup
+      && out.multi.forcedArgs && waitsBefore === true && waitsAfter === false && forged.group === null && out.multi.rerunAlone === null;
+  } catch (e) {
+    out.multiOk = false;
+    out.multiError = String(e.message || e);
+  } finally {
+    made.forEach((id) => { jobs.cancel(id); jobs.jobs.delete(id); });
+    jobs.pump = realPump;
+    await js(`document.querySelector('#jobs-clear').click()`).catch(() => {}); // the renderer drops the jobs main no longer has
+  }
+  out.ui = await selfTestIndexUi(js, shot);
+  out.ok = out.rpcBlocked.every((x) => /^blocked: .*not allowed/.test(x)) && out.cleanOk && out.importOk && out.multiOk && out.ui.ok;
+  return out;
+}
+
+async function selfTestIndexUi(js, shot) {
+  // renderer side of the index tools: settings controls (a dry run fills the status line), the import dialog, the multi-site picker
+  // and a multi-site group box in the job list (nothing is spawned: pump is off)
+  const out = {};
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    await js(`document.querySelector('[data-page="settings"]').click()`);
+    await pause(300);
+    out.dryRun = await js(`(async () => {
+      document.querySelector('#index-clean-check').click();
+      const st = document.querySelector('#index-clean-status');
+      for (let i = 0; i < 60 && !(!st.hidden && /Đã kiểm/.test(st.textContent)); i++) await new Promise((r) => setTimeout(r, 250));
+      st.scrollIntoView({ block: 'center' });
+      return { text: st.textContent, buttons: ['#index-clean', '#index-clean-check', '#index-import'].every((s) => document.querySelector(s)) };
+    })()`);
+    await pause(300);
+    await shot('20-index-settings');
+    out.importDialog = await js(`(async () => {
+      document.querySelector('#index-import').click();
+      await new Promise((r) => setTimeout(r, 300));
+      const m = document.querySelector('.import-modal');
+      return { open: Boolean(m), modules: m ? m.querySelectorAll('select option').length : 0, startDisabled: m ? m.querySelector('.btn.primary').disabled : null };
+    })()`);
+    await shot('21-import-dialog');
+    await js('closeModal()');
+    out.multi = await js(`(async () => {
+      document.querySelector('[data-page="search"]').click();
+      document.querySelector('#filters').open = true;
+      const pills = [...document.querySelectorAll('#f-multi-pills .pill')];
+      pills[0]?.click();
+      await new Promise((r) => setTimeout(r, 150));
+      document.querySelector('#f-multi').scrollIntoView({ block: 'center' });
+      return { visible: !document.querySelector('#f-multi').hidden, pills: pills.length, label: document.querySelector('#btn-download').textContent,
+        warn: !document.querySelector('#f-multi-warn').hidden, summary: document.querySelector('#filters-sum').textContent };
+    })()`);
+    await pause(200);
+    await shot('22-multi-site');
+    out.multiOff = await js(`(async () => { document.querySelector('#f-multi-pills .pill.on')?.click(); await new Promise((r) => setTimeout(r, 50));
+      return document.querySelector('#btn-download').textContent; })()`);
+  } catch (e) {
+    out.error = String(e.message || e);
+  }
+  const realPump = jobs.pump;
+  let made = [];
+  try {
+    jobs.pump = () => {};
+    const list = await js(`window.lustra.jobs.startMulti({ module: 'db', tags: 'selftest_group_ui', path: ${JSON.stringify(path.join(os.tmpdir(), 'lustra-selftest-group'))} }, ['rx'])`);
+    made = list.map((x) => x.id);
+    jobs.jobs.get(made[0]).progress = { stateName: 'DOWNLOADING', totalAll: 10, processed: 4, success: 4 };
+    jobs.emit(jobs.jobs.get(made[0]));
+    await js(`document.querySelector('[data-page="downloads"]').click()`);
+    out.group = await js(`(async () => {
+      const find = () => [...document.querySelectorAll('.job-group')].find((x) => x.textContent.includes('selftest_group_ui'));
+      for (let i = 0; i < 20 && !find(); i++) await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
+      const g = find();
+      return g ? { cards: g.querySelectorAll('.job').length, head: g.querySelector('.job-group-head').textContent,
+        order: [...g.querySelectorAll('.job')].map((c) => c.textContent.includes('site 1/2') ? 1 : c.textContent.includes('site 2/2') ? 2 : 0),
+        waiting: g.textContent.includes('Chờ site trước tải xong') } : null;
+    })()`);
+    await pause(200);
+    await shot('23-job-group');
+  } catch (e) {
+    out.groupError = String(e.message || e);
+  } finally {
+    made.forEach((id) => { jobs.cancel(id); });
+    jobs.pump = realPump;
+    await js(`document.querySelector('#jobs-clear').click()`).catch(() => {});
+    await pause(200);
+    out.groupRemoved = await js(`![...document.querySelectorAll('.job-group')].some((x) => x.textContent.includes('selftest_group_ui'))`).catch(() => null);
+  }
+  out.ok = Boolean(out.dryRun?.buttons && /Đã kiểm/.test(out.dryRun?.text) && out.importDialog?.open && out.importDialog.modules >= 3
+    && out.importDialog.startDisabled === true && out.multi?.visible && out.multi.pills >= 1 && /\(2 site\)/.test(out.multi.label) && out.multi.warn
+    && /\+1 site/.test(out.multi.summary) && out.multiOff === 'Tải xuống' && out.group?.cards === 2 && out.group.order.join() === '1,2'
+    && out.group.waiting && /db → rx/.test(out.group.head) && out.groupRemoved === true);
+  return out;
+}
+
 async function selfTestQuitGuard(dir) {
   // quit / relaunch with jobs: stand-in processes (Electron as node) for a job that honours 'cancel' and one that ignores it
   const graceful = "process.stdin.on('data', (d) => { if (String(d).includes('cancel')) process.exit(130); }); setInterval(() => {}, 1000);";
@@ -2452,6 +2747,7 @@ if (!app.requestSingleInstanceLock()) {
     await initEncryption();
     registerThumbProtocol();
     registerIpc();
+    registerIndexIpc();
     await applyProxyToSession();
     sidecar.start();
     setupMenu();

@@ -116,6 +116,11 @@
                 <label class="check" id="f-gender-verify-wrap" hidden><input type="checkbox" id="f-gender-verify"> Kiểm tra video sau khi tải</label>
               </div>
             </div>
+            <div class="field wide multi-field" id="f-multi">
+              <span>Tải thêm từ site khác <em class="muted">· mỗi site một job, chạy lần lượt; Preview chỉ xem site đang chọn</em></span>
+              <div class="row" id="f-multi-pills"></div>
+              <p class="multi-warn" id="f-multi-warn" hidden></p>
+            </div>
             <label class="field wide"><span>Thư mục lưu</span>
               <span class="path-row"><input type="text" id="f-path"><button class="btn sm" id="f-path-pick">Chọn…</button><button class="btn sm ghost" id="f-path-open" title="Mở thư mục">↗</button></span></label>
           </div>
@@ -163,7 +168,7 @@
 
       <!-- LIBRARY: offline search of the download index -->
       <section class="page" id="page-library">
-        <div class="page-head"><h1>Đã tải</h1><span class="muted" id="lib-stats"></span></div>
+        <div class="page-head"><h1>Đã tải</h1><span class="row"><span class="muted" id="lib-stats"></span><button class="btn sm ghost" id="lib-import" title="Ghi vào index các file đã có sẵn trong một thư mục">Nhập thư viện…</button></span></div>
         <div class="glass panel lib-bar">
           <input type="text" id="lib-q" spellcheck="false" autocomplete="off" placeholder="tag  -tag  tiền_tố*  rating:e  md5:…  id:…  (để trống = tất cả)">
           <select id="lib-module" title="Module"></select>
@@ -293,6 +298,10 @@
             <table class="table" id="index-stats"></table>
             <p class="muted mono" id="index-path"></p>
             <div class="setting"><span></span><button class="btn sm" id="index-refresh">Làm mới</button></div>
+            <div class="setting index-tool"><span>Dọn index <span class="muted">(bỏ dòng có file đã mất, không xoá file)</span></span>
+              <span class="row"><button class="btn sm ghost" id="index-clean-check" title="Chỉ đếm, không xoá gì">Kiểm tra</button><button class="btn sm" id="index-clean">Dọn index…</button><button class="btn sm ghost danger" id="index-clean-stop" hidden>Dừng</button></span></div>
+            <p class="muted index-clean-status" id="index-clean-status" hidden></p>
+            <div class="setting index-tool"><span>Nhập thư viện có sẵn <span class="muted">(file đã tải trước đây)</span></span><button class="btn sm" id="index-import">Nhập thư mục…</button></div>
           </div>
 
           <div class="glass panel">
