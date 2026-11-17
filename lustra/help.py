@@ -40,6 +40,8 @@ HELP_ARG_GENDER = ('Keep only posts with these character gender labels (comma se
 HELP_ARG_GENDER_MODE = 'Gender labeling mode: \'tags\' (default) or \'model\' (not available yet)'
 HELP_ARG_GENDER_CONF = 'Minimal label confidence, lower confidence labels count as \'unknown\'. Default is \'medium\''
 HELP_ARG_GENDER_STRICT = 'Posts with futanari, trap or ambiguous characters never count as only_female / only_male'
+HELP_ARG_SKIP_KNOWN = ('Skip posts already in the local download index (same md5, or same module and id) whose file is still on disk. '
+                       'Default is \'off\'')
 HELP_ARG_MINDATE = 'Skip everything posted before this date, default is \'01-01-1970\''
 HELP_ARG_MAXDATE = 'Skip everything posted after this date, default is \'<today>\''
 HELP_ARG_THREADS = 'Maximum simultaneous downloads (affects pages scan too), default is \'1\''

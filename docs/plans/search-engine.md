@@ -1,7 +1,7 @@
 # Plan — Cải thiện search engine của Lustra
 
-> 2026-11-16 · Trạng thái: Giai đoạn 1 **đã làm** trong 2.0 r1, Giai đoạn 2–3 là đề xuất.
-> Lustra không có index riêng: "search engine" là **bộ biên dịch truy vấn + bộ lọc cục bộ** đặt trước search engine của từng website. Cải thiện vì vậy tập trung vào bốn hướng:
+> 2026-11-16 · Trạng thái: Giai đoạn 1 **đã làm** trong 2.0 r1, Giai đoạn 2–3 là đề xuất; riêng mục "Index cục bộ các lần tải" (Giai đoạn 3) **đã làm phần lõi** ngày 2026-11-17.
+> Lustra không có index tìm kiếm của site: "search engine" là **bộ biên dịch truy vấn + bộ lọc cục bộ** đặt trước search engine của từng website. Index cục bộ duy nhất là index các file đã tải (`lustra/dlindex.py`). Cải thiện vì vậy tập trung vào bốn hướng:
 > - nhập truy vấn dễ hơn;
 > - gửi lên server phần chọn lọc nhất của truy vấn;
 > - lọc cục bộ phần còn lại;
@@ -34,7 +34,15 @@
 ## 3. Giai đoạn 3 — dài hạn
 
 - **Bộ lọc nội dung theo model** (xem [gender-filter-model.md](gender-filter-model.md)) cắm vào pipeline như một filter mới.
-- **Index cục bộ các lần tải**: SQLite lưu `ItemInfo` (tags, score, md5) của các post đã tải để tìm lại offline, tránh tải trùng giữa các module (md5) và hỗ trợ tool re-tag.
+- **Index cục bộ các lần tải** — *đã làm phần lõi (2026-11-17, [dev log 7o](../dev_log.md))*:
+  - **Đã có:** `lustra/dlindex.py`, SQLite `<data>/index/downloads.sqlite` (WAL, nhiều job CLI ghi cùng lúc an toàn). Mỗi file tải xong được ghi qua hàng đợi + thread nền theo lô: module, id, md5, đường dẫn, tags, score, rating, ngày post, thời điểm tải. Chỉ metadata, không đọc file. `-skip_known` (mặc định tắt) bỏ qua post trùng module + id hoặc trùng md5 (mọi module) khi file còn trên đĩa. RPC `index.search` (tag / module / khoảng ngày, phân trang) và `index.stats`. App: ô "Bỏ qua file đã tải", số liệu ở Cài đặt.
+  - **Để sau:**
+    1. Trang tìm offline đầy đủ trong app: ô tag (dùng lại chip), lọc module / ngày / rating, lưới kết quả từ file trên đĩa (thumbnail cục bộ, không request), mở file / thư mục, đánh dấu file đã mất.
+    2. Dọn index: xoá dòng có file không còn (chạy nền, theo lô, có nút ở Cài đặt).
+    3. Nhập thư viện có sẵn: quét thư mục, nhận id từ tên file (`files.identify`) rồi lấy metadata theo lô, tôn trọng rate limit.
+    4. Preview đánh dấu post đã tải (tra index theo id / md5 của trang kết quả, không thêm request).
+    5. Tool re-tag (`file_tagger`) đọc tag từ index thay vì file info JSON.
+    6. Truy vấn đa site (mục dưới) khử trùng bằng md5 trong index.
 - **Truy vấn đa site**: một truy vấn chạy trên nhiều module, khử trùng theo md5.
 
 ## 4. Rủi ro

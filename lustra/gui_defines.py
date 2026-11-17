@@ -97,6 +97,7 @@ OPTION_CMD_TAGS_LIMIT_CMD = '-tags_limit'
 OPTION_CMD_GENDER_MODE_CMD = '-gender_mode'
 OPTION_CMD_GENDER_CONF_CMD = '-gender_conf'
 OPTION_CMD_GENDER_STRICT = ('', '-gender_strict')
+OPTION_CMD_SKIP_KNOWN = ('', '-skip_known')
 GENDER_MODES = ('tags', 'model')
 GENDER_CONFS = ('low', 'medium', 'high')
 # non-gui

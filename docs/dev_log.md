@@ -297,6 +297,22 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Szurubooru: chưa thử thật (không có instance công khai chắc chắn).
 - **Toàn bộ suite:** 175 test + `tests.py` đạt; ruff sạch; self-test Electron bước `generator` đạt.
 
+### 7o. Index cục bộ các lần tải — 2026-11-17
+- **Yêu cầu ([search-engine](plans/search-engine.md), Giai đoạn 3):** lưu thông tin các post đã tải để tìm lại offline và bỏ qua file trùng giữa các module. Chỉ metadata, không gửi dữ liệu ra ngoài, hành vi CLI cũ giữ nguyên khi không bật tuỳ chọn mới.
+- **Đã làm:**
+  - `lustra/dlindex.py`: SQLite `<data>/index/downloads.sqlite`, WAL, `busy_timeout` 10 s. Bảng `files` (một dòng mỗi file, khoá theo đường dẫn; index `(module, post_id)`, `md5`, ngày post, thời điểm tải) và `tag_names` + `file_tags` để tìm tag bằng index.
+  - Ghi: `Downloader._download` gọi `_index_file` khi file xong (chế độ `full`). Bản ghi dựng từ `ItemInfo` của lượt quét (`_item_info_for`), rating lấy từ chuỗi item gốc (`rating="e"`) hoặc tag `rating:`. `IndexWriter` nhận qua hàng đợi, thread `dlindex` ghi theo lô (200 bản ghi / 1,5 s, một transaction), đóng ở cuối `_launch` kể cả khi huỷ hoặc lỗi. Lỗi CSDL chỉ sinh một cảnh báo. `LUSTRA_DLINDEX=0` tắt ghi.
+  - `-skip_known` (mặc định tắt): `_filter_known_items_by_id` (trước khi lấy info) và `_filter_known_items_by_md5` (sau khi lấy info, khớp mọi module), chỉ khi file trong index còn trên đĩa. Có ở cả pipeline streaming lẫn cổ điển; đếm vào `known_skipped_count`, gửi lên app qua trường `known` của `@@LUSTRA_PROGRESS`.
+  - Sidecar: `index.search` (tag, `-tag`, `tiền_tố*`, `rating:`, `md5:`, `id:`, module, khoảng ngày post, phân trang, 6 kiểu sắp xếp) và `index.stats`; đã thêm vào allowlist `rpc` của `app/main.js`.
+  - App: ô "Bỏ qua file đã tải" trong tuỳ chọn tải (`download.skipKnown` → `-skip_known`), khung "Index các lần tải" ở Cài đặt (số file, post, md5, tag, dung lượng, theo module, mặc định bỏ qua), số "Bỏ qua (đã tải)" trên thẻ job. Mock có `index.stats` / `index.search`.
+  - `lustra/tests/__init__.py` đặt `LUSTRA_DLINDEX=0`: các test khác không ghi vào index thật của máy dev.
+- **Kiểm chứng:**
+  - `lustra.tests.test_dlindex`: 21 test offline (schema/WAL, upsert, tìm kiếm, writer không chặn khi CSDL bị khoá, lỗi được đếm, 4 tiến trình ghi song song, pipeline giả ghi đúng md5/tags/score/rating/ngày từ thread `dlindex`, `-skip_known` theo id ở cả hai pipeline, file đã xoá được tải lại, md5 khác module, tên có tiền tố, tắt mặc định, RPC, wiring app). Đã thêm vào CI.
+  - Toàn bộ suite: 186 test + `tests.py` đạt; `ruff check` sạch; `node --check` các file JS đã sửa sạch; `node app/test/icon-utils.test.js` đạt.
+  - UI mock: ô tuỳ chọn và khung Cài đặt hiển thị đúng, bật ô ở Cài đặt cập nhật ô ở trang Tìm kiếm, không có lỗi console.
+- **Chưa kiểm:** tải thật từ website (chỉ chạy với site giả); self-test Electron (đã thêm bước `indexStats` / `indexSearch` / `skipKnownArgs` nhưng chưa chạy); Windows / macOS thật.
+- **Để sau:** trang tìm offline đầy đủ trong app (dùng `index.search`), dọn dòng có file đã bị xoá, nhập file đã có từ thư mục (cần quét tên file + metadata), tool re-tag đọc index, đánh dấu "đã tải" trong preview.
+
 ### 8. Việc tiếp theo
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đóng gói app (electron-builder + Python embed hoặc PyInstaller sidecar).

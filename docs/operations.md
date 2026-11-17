@@ -29,6 +29,7 @@ Biến môi trường:
 - `LUSTRA_CATALOG_AUTOLOAD=0`: chỉ dùng extension builtin và đã cài (app đặt cho sidecar và job). Mặc định CLI và GUI Tk vẫn nạp extension trong catalog khi cần;
 - `LUSTRA_CORE`: đường dẫn lõi đóng băng (`lustra-core`) cho app dev;
 - `LUSTRA_STREAMING=0`: tắt pipeline streaming (quay lại kiểu quét hết rồi mới tải, dùng để so sánh / gỡ lỗi);
+- `LUSTRA_DLINDEX=0`: không ghi file tải xong vào index các lần tải (mục 3b). Index vẫn đọc được, `-skip_known` vẫn chạy. Các test đặt sẵn biến này (`lustra/tests/__init__.py`);
 - `LUSTRA_SECRET_ARGS`: danh sách JSON các tham số bí mật (`["-api_key", "KEY,USER"]`) do app truyền cho CLI; CLI đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
 - `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron. Bước `generator` kiểm: khoá chỉ ghi (không lộ ra renderer, không có dạng chữ thường), phiên bị từ chối (R10), không cài được bản nháp chưa đạt, cài cần xác nhận, dọn dẹp.
@@ -56,6 +57,16 @@ Biến môi trường của script:
 
 Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/python tools/update_tags.py --modules db --delay 0.5`.
 
+## 3b. Index các lần tải
+- File: `<data dir>/index/downloads.sqlite` (kèm `-wal`, `-shm` khi đang có tiến trình mở). Mỗi file tải xong ở chế độ `full` được ghi một dòng (module, id, md5, đường dẫn, tags, score, rating, ngày post, thời điểm tải). Không đọc nội dung file, không gửi dữ liệu ra ngoài.
+- Bỏ qua post đã tải: CLI `-skip_known`; app: ô "Bỏ qua file đã tải" trong tuỳ chọn tải, mặc định ở Cài đặt → Index các lần tải. Post chỉ bị bỏ qua khi file đã ghi trong index vẫn còn trên đĩa, nên xoá file là cách tải lại.
+  ```bash
+  .venv/bin/python -m lustra -module db -skip_known -path ~/Downloads/Lustra -- cat_ears rating:g
+  ```
+- Nhiều job ghi cùng lúc an toàn (WAL, chờ khoá tối đa 10 s, mỗi lô thử lại 3 lần). Nếu một lô vẫn không ghi được, log có `Warning (W2): download index: …` và lượt tải không bị ảnh hưởng.
+- Xem nhanh bằng `sqlite3`: `sqlite3 ~/.config/Lustra/index/downloads.sqlite "SELECT module, COUNT(*) FROM files GROUP BY module"`. Sidecar: `{"jsonrpc":"2.0","id":1,"method":"index.stats"}`, `{"jsonrpc":"2.0","id":2,"method":"index.search","params":{"tags":"cat_ears -rating:e","pageSize":20}}`.
+- Sao lưu: copy file khi không có job nào chạy, hoặc `sqlite3 <file> ".backup <đích>"`. Làm lại từ đầu: đóng app và mọi job rồi xoá cả ba file `downloads.sqlite*`; index được tạo lại ở lần tải sau.
+
 ## 4. Test
 ```bash
 .venv/bin/python -m unittest lustra.tests.test_lustra
@@ -65,6 +76,11 @@ cd app && npm run check
 LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -a ./node_modules/.bin/electron . --no-sandbox --ozone-platform=x11
 ```
 `ConnTests` và `RealDownloadTests` gọi mạng thật. `lustra.tests.test_extgen` chạy offline; test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói.
+
+Toàn bộ test offline như CI (`.github/workflows/run-tests.yml`), với thư mục dữ liệu tạm:
+```bash
+LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex
+```
 
 ## 5. Build
 - CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.

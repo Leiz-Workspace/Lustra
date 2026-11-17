@@ -68,6 +68,7 @@ const DEFAULT_SETTINGS = {
     path: path.join(os.homedir(), 'Downloads', 'Lustra'), threads: 4, images: true, videos: true, videoFormat: '',
     gender: { select: [], conf: 'medium', strict: false },
     lowRes: false, prefix: true, appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false,
+    skipKnown: false, // -skip_known: skip posts found in the local download index (core lustra/dlindex.py)
     subfolderPerQuery: false, dumpTags: false, dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run',
     warnNonEmpty: true, maxConcurrentJobs: 1,
   },
@@ -892,6 +893,7 @@ function downloadArgs(q) {
   if (d.limit > 0) a.push('-dlimit', String(d.limit));
   if (d.parchi) a.push('-include_parchi');
   if (d.preserveDate) a.push('-preserve_date');
+  if (d.skipKnown === true) a.push('-skip_known');
   if (d.dumpTags) a.push('-dump_tags');
   if (d.dumpSources) a.push('-dump_sources');
   if (d.dumpComments) a.push('-dump_comments');
@@ -1400,7 +1402,7 @@ function registerIpc() {
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify'];
+      'tags.validate', 'tags.status', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};
     if (method === 'ext.uninstall' && !RE_EXT_ID.test(String(params.id || ''))) throw new Error('invalid extension id');
@@ -1862,6 +1864,8 @@ async function selfTestContract(js, quick) {
     await t('resolve', () => window.lustra.rpc('tags.resolve', { module: 'db', tags: ['scenery', 'sky', 'skyy', 'rating:g'] }));
     await t('fuzzy', () => window.lustra.rpc('tags.fuzzy', { module: 'db', text: 'scenrey', limit: 5 }));
     await t('notAllowed', () => window.lustra.rpc('ext.install', { id: 'x' }));
+    await t('indexStats', () => window.lustra.rpc('index.stats'));
+    await t('indexSearch', () => window.lustra.rpc('index.search', { tags: 'scenery', pageSize: 5 }));
     if (!${quick}) {
       await t('related', () => window.lustra.search.related({ module: 'db', tags: 'scenery rating:g', limit: 10 }));
       await t('previewPageSize', async () => {
@@ -1899,6 +1903,10 @@ async function selfTestContract(js, quick) {
   settings.search.tagLimits = { db: 6 };
   out.tagLimitArgs = tagLimitArgs('db');
   settings.search.tagLimits = limits;
+  // download index: '-skip_known' only when the option is on (off by default, old behavior unchanged)
+  const hasSkip = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_known');
+  out.skipKnownArgs = { on: hasSkip({ skipKnown: true }), off: hasSkip({ skipKnown: false }), default: hasSkip({}) };
+  out.skipKnownArgs.ok = out.skipKnownArgs.on && !out.skipKnownArgs.off && out.skipKnownArgs.default === Boolean(settings.download.skipKnown);
   saveSettings();
   return out;
 }

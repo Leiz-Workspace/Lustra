@@ -9,6 +9,7 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 import os
 import pathlib
 import re
+import sqlite3
 from abc import abstractmethod
 from collections.abc import Callable, MutableSet
 from typing import Any, TypeVar, final
@@ -28,6 +29,7 @@ from .defines import (
     ModuleConfigType,
     PageCheck,
 )
+from .dlindex import DownloadIndex, norm_md5
 from .gender import GenderConf, GenderResult, decide, infer_from_tags, rules_for_module
 from .logger import trace
 from .network import PART_SUFFIX, ThreadedHtmlWorker, thread_exit
@@ -123,6 +125,11 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.favorites_search_user: str = ''
         self.pool_search_str: str = ''
         self.current_task_subfolder: str = ''
+        self.skip_known: bool = False
+        '''-skip_known: posts already in the download index (md5 or module + id) whose file is still on disk are skipped'''
+        self.known_skipped_count: int = 0
+        self._known_skipped_ids: set[str] = set()
+        self._known_db: DownloadIndex | None = None
 
     @property
     def dest_base_s(self) -> pathlib.Path:
@@ -635,6 +642,70 @@ class DownloaderBase(ThreadedHtmlWorker):
 
         if total_count_temp != self.total_count:
             trace(f'Filtered out {total_count_temp - self.total_count:d} / {total_count_temp:d} items!')
+
+    def _known_lookup(self, post_ids: list[str], md5s: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+        """-skip_known: download index lookup (lustra/dlindex.py), only files still on disk count"""
+        try:
+            if self._known_db is None:
+                self._known_db = DownloadIndex()
+            return self._known_db.find_known(self._get_module_abbr(), post_ids, md5s)
+        except (sqlite3.Error, OSError) as err:
+            trace(f'Warning (W2): download index is not readable, \'-skip_known\' is ignored: {err}')
+            self.skip_known = False
+            return {}, {}
+
+    def _close_known_db(self) -> None:
+        db, self._known_db = self._known_db, None
+        if db is not None:
+            db.close()
+
+    def _note_known_skipped(self, idstring: str) -> None:
+        self.filtered_out_ids_cache.add(idstring)
+        if idstring not in self._known_skipped_ids:  # multi task queries may meet a post more than once
+            self._known_skipped_ids.add(idstring)
+            self.known_skipped_count += 1
+
+    def _filter_known_items_by_id(self) -> None:
+        """-skip_known, before item infos are collected (modules fetching item pages for infos skip those requests too)"""
+        if not self.skip_known or not self.items_raw_per_task:
+            return
+        trace('Filtering out items already downloaded (download index, same module and id)...')
+        ids = [self._extract_id(self._local_addr_from_string(str(x))) for x in self.items_raw_per_task]
+        by_id, _ = self._known_lookup(ids, [])
+        if not by_id:
+            return
+        total = len(self.items_raw_per_task)
+        idx: int
+        for idx in reversed(range(total)):
+            if ids[idx] in by_id:
+                del self.items_raw_per_task[idx]
+                self._note_known_skipped(self._item_idstring(ids[idx]))
+        trace(f'Filtered out {total - len(self.items_raw_per_task):d} / {total:d} items already downloaded!')
+
+    def _filter_known_items_by_md5(self, parents: MutableSet[str]) -> None:
+        """-skip_known, md5 reported by the website (the same file downloaded earlier, by any module)"""
+        if not self.skip_known or not self.items_raw_per_task:
+            return
+        trace('Filtering out items already downloaded (download index, same md5)...')
+        rows = []
+        for raw in self.items_raw_per_task:
+            item_id = self._extract_id(self._local_addr_from_string(str(raw)))
+            idstring = self._item_idstring(item_id)
+            info = self.item_info_dict_per_task.get(idstring)
+            rows.append((item_id, idstring, info, norm_md5(info.md5) if info else ''))
+        _, by_md5 = self._known_lookup([], [r[3] for r in rows if r[3]])
+        if not by_md5:
+            return
+        total = len(rows)
+        removed = 0
+        idx: int
+        for idx in reversed(range(total)):
+            item_id, idstring, info, md5 = rows[idx]
+            if md5 and md5 in by_md5:
+                self._drop_task_item(idx, item_id, idstring, info, parents)
+                self._note_known_skipped(idstring)
+                removed += 1
+        trace(f'Filtered out {removed:d} / {total:d} items already downloaded (same file)!')
 
     def _filter_items_matching_negative_and_groups(self, parents: MutableSet[str]) -> None:
         trace('Filtering out items using custom filters...')
