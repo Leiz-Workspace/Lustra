@@ -178,3 +178,41 @@ jobs:
             app/dist/*.zip
           compression-level: 0
           if-no-files-found: error
+
+  model-server:
+    # standalone gender model server (tools/build_model_server.py): CPU onnxruntime on every OS, DirectML on Windows too
+    if: inputs.linux || inputs.macos || inputs.windows
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            variant: cpu
+          - os: macos-15
+            variant: cpu
+          - os: windows-latest
+            variant: cpu
+          - os: windows-latest
+            variant: directml
+        exclude:
+          - os: ${{ !inputs.linux && 'ubuntu-latest' || 'none' }}
+          - os: ${{ !inputs.macos && 'macos-15' || 'none' }}
+          - os: ${{ !inputs.windows && 'windows-latest' || 'none' }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Build model server
+        run: python tools/build_model_server.py --variant ${{ matrix.variant }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: model-server-${{ matrix.os }}-${{ matrix.variant }}
+          path: |
+            dist-model-server/*.tar.gz
+            dist-model-server/*.zip
+          compression-level: 0
+          if-no-files-found: error
