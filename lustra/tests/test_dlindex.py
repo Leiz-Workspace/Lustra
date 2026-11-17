@@ -349,7 +349,8 @@ class PipelineTests(TestCase):
             self.assertEqual(' '.join(post['tags']), item['tags'])
             self.assertEqual((post['score'], 'g', post['date'].date().isoformat()), (item['score'], item['rating'], item['date']))
             self.assertTrue(item['exists'])
-            self.assertEqual(str(self.tmp / 'one'), os.path.dirname(item['path']))
+            # macOS: the temp folder is reached through a link (/var -> /private/var), the index keeps the real path
+            self.assertEqual(os.path.realpath(self.tmp / 'one'), os.path.realpath(os.path.dirname(item['path'])))
 
     def test_skip_known_is_off_by_default(self) -> None:
         first, _ = self._run(ProcModule.DB, 'one', ['--', 'sky'])
