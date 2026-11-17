@@ -10,8 +10,9 @@
 | `moebooru_json` | `post.json?limit=1` trả mảng có `jpeg_url` / `sample_url` | `page=n+1`; đếm qua `post.xml?limit=1` | **template** (`DownloaderJsonApi`) | — |
 | `philomena_json` | `api/v1/json/search/images?q=*&per_page=1` trả `{"images":[…],"total":N}` | `page`, `per_page`; tag nối bằng dấu phẩy, `_` gửi đi thành dấu cách | **template** (`DownloaderJsonApi`) | — |
 | `szurubooru_json` | `api/posts/?limit=1` với `Accept: application/json` trả `{"results":[…],"total":N}` | `offset=n*limit`; URL file tương đối | **template** (`DownloaderJsonApi`) | — |
-| `shimmie` | chân trang có "Shimmie", `/post/list/<tags>/<page>` | HTML theo trang, hoặc `/api/danbooru/find_posts` | viết tay | `extensions/paheal` (API), `extensions/rule34hentai` (HTML) |
-| `custom` | không khớp mục nào | theo trang listing / docs API | viết tay | `extensions/rule34us` (HTML), `lustra/download_db.py` (JSON) |
+| `shimmie_api` | `api/danbooru/find_posts?limit=1` trả XML `<posts count="N">` | `page=n+1`, không giới hạn độ sâu; tag nối bằng dấu cách, metatag dùng `=` | **template** (`DownloaderJsonApi` đọc XML; đuôi file lấy từ `file_name` khi URL không có) | `extensions/paheal` |
+| `shimmie` | chân trang có "Shimmie" nhưng không có API danbooru | HTML `/post/list/<tags>/<page>` | viết tay (`_parse` HTML hoặc trang từng post) | `extensions/rule34hentai` |
+| `custom` | không khớp mục nào | theo trang listing / docs API | viết tay: `HTML_EXAMPLE` nếu trang danh sách đủ thông tin, không thì `extensions/rule34us` | `extensions/rule34us`, `lustra/download_db.py` |
 
 ## JSON API bất kỳ: `lustra/download_json.py`
 

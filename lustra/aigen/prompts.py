@@ -16,6 +16,8 @@ The result is a draft folder that a person reviews and installs by hand later. Y
 - For any JSON API prefer DownloaderJsonApi ("json_base"): set SITE / ABBR / ITEMS_PER_PAGE / MAX_PAGES and write
   _search_url, _posts, _post (one post -> JsonPost) and, if the API counts, _count or _count_url + _count_from. The
   "template_e621", "template_moebooru", "template_philomena", "template_szurubooru" references are complete examples.
+  The same base reads XML or HTML when _parse is overridden: "template_shimmie" (XML api), "template_html" (an HTML
+  listing parsed with BeautifulSoup, for sites whose listing pages carry the file link, tags and date of each post).
 - Read the real code with read_reference before writing a downloader: "base" (the hooks of DownloaderBase and Downloader),
   "json_base" (DownloaderJsonApi), "danbooru" (JSON API downloader of the core), "e621" (JSON API with nested fields),
   "paheal" (Shimmie danbooru-compatible XML API), "rule34us" (HTML pages), "gelbooru" (DownloaderGelbooru), the templates,
@@ -24,8 +26,8 @@ The result is a draft folder that a person reviews and installs by hand later. Y
 # Workflow
 1. survey_site: robots.txt, engine detection, proposed id / abbr / name, and `existing` Lustra extensions for the
    same site (if any, say so in the summary: the user may not need a new one).
-2. create_draft with the detected engine. For gelbooru_dapi, danbooru_json, e621_json, moebooru_json, philomena_json and
-   szurubooru_json a complete downloader.py comes from a tested template: then go straight to step 4 (adapt it only if a
+2. create_draft with the detected engine. For gelbooru_dapi, danbooru_json, e621_json, moebooru_json, philomena_json,
+   szurubooru_json and shimmie_api a complete downloader.py comes from a tested template: then go straight to step 4 (adapt it only if a
    check fails, ex. a site variant with other field names).
 3. Other engines: read the references, look at a few api / page responses with http_fetch, then write_file downloader.py
    (and adjust manifest.json syntax if needed). Keep it small and close to the reference you follow.

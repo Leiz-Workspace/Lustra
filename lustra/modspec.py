@@ -101,6 +101,8 @@ class ExtensionManifest:
     safetyTags: list[str] = field(default_factory=list)
     '''optional extra tags for the safety blacklist (can only add)'''
     # runtime (not part of the file)
+    generator: dict = field(default_factory=dict)
+    '''origin of a generated extension, from the '$generator' key (lustra.extgen / lustra.aigen): shown as a badge (rule R13)'''
     path: pathlib.Path | None = None
     source: str = ''
     '''builtin | catalog | user'''
@@ -145,11 +147,15 @@ class ExtensionManifest:
         required = ('id', 'name', 'abbr', 'version', 'entry')
         if missing := [k for k in required if not raw.get(k)]:
             raise ManifestError(f'missing required field(s): {", ".join(missing)}')
-        known = set(ExtensionManifest.__dataclass_fields__) - {'path', 'source'}
+        known = set(ExtensionManifest.__dataclass_fields__) - {'path', 'source', 'generator'}
         if unknown := [k for k in raw if k not in known and not k.startswith('$')]:
             raise ManifestError(f'unknown field(s): {", ".join(unknown)}')
         m = ExtensionManifest(**{k: v for k, v in raw.items() if k in known and k != 'syntax'})
         m.syntax = TagSyntax.from_dict(raw.get('syntax'))
+        gen = raw.get('$generator')
+        if isinstance(gen, dict):  # only short plain strings of known keys: it is displayed, never interpreted
+            m.generator = {k: str(gen[k])[:80] for k in ('tool', 'mode', 'model', 'engine', 'createdAt', 'session')
+                           if isinstance(gen.get(k), (str, int, float)) and str(gen.get(k)).strip()}
         m.path, m.source = path, source
         m.validate()
         return m

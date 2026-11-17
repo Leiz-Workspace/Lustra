@@ -74,7 +74,7 @@ def notify(method: str, params: dict) -> None:
     _send({'jsonrpc': '2.0', 'method': method, 'params': params})
 
 
-re_secret_args = re.compile(r'(-api_key|-cookies|-headers|-proxy)(\s+|=)(\S+)')
+re_secret_args = re.compile(r'(-api_key|-cookies|-headers|-proxy|-gender_model_token)(\s+|=)(\S+)')
 
 
 def _redact(text: str) -> str:
@@ -403,12 +403,16 @@ class _ResultsFilter:
         self.gender_stats: dict[str, int] = {}
         self.blocked = 0
         self.hidden_no_tags = 0
+        self.model_pending: list[tuple[dict, str, object]] = []
+        self.model_info: dict = {}
 
     def item(self, h: str) -> dict | None:
         """Preview item, None if it must not be shown at all"""
         dwn = self.dwn
         item = {'id': dwn._extract_id(dwn._local_addr_from_string(h)), 'preview': dwn.extract_preview_url(h), 'sample': _attr(h, 'sample_url'),
-                'isVideo': bool(dwn._is_video(h))}
+                'isVideo': bool(dwn._is_video(h)), 'mediaKind': dwn._media_kind(h)}
+        if item['mediaKind'] != 'image':  # the in-app player streams the original file
+            item['file'] = _attr(h, 'file_url')
         if not self.with_tags:
             if self.gender_on:
                 # tags are unknown without fetching each post: the safety blacklist cannot be checked -> fail closed,
@@ -419,7 +423,7 @@ class _ResultsFilter:
         info = dwn._extract_item_info(h)
         tags = info.tags.split(' ') if info.tags else []
         item.update({'tags': tags, 'score': info.score, 'width': info.width, 'height': info.height, 'ext': info.ext,
-                     'date': info.date, 'rating': _attr(h, 'rating')})
+                     'date': info.date, 'rating': _attr(h, 'rating'), 'md5': getattr(info, 'md5', '') or ''})
         if self.gender_on and blocked_tag(tags):
             self.blocked += 1  # safety: never returned, not even a thumbnail url
             return None
@@ -436,9 +440,74 @@ class _ResultsFilter:
             self.gender_stats[str(eff)] = self.gender_stats.get(str(eff), 0) + 1
             if not keep:
                 excluded_by.append('gender')
+            if dwn.gender_mode == 'model':
+                from .gender_model import needs_model
+                if needs_model(res, dwn.gender_min_conf):
+                    self.model_pending.append((item, h, res))
         item['excluded'] = bool(excluded_by)
         item['excludedBy'] = excluded_by
         return item
+
+
+PREVIEW_MODEL_MAX = 40
+'''posts of one preview page the gender model looks at (images are fetched at the module's request pace)'''
+
+
+def _apply_gender_model(filt: _ResultsFilter, items: list[dict]) -> None:
+    """-gender_mode model: the image model labels the posts of the page whose tags were not conclusive, its safety gate
+    removes posts entirely (like the blacklist: never returned). Posts past PREVIEW_MODEL_MAX keep their tag label"""
+    if not filt.model_pending:
+        return
+    from .gender_model import ModelUnavailable, combine, verdicts_for
+    dwn = filt.dwn
+    todo = filt.model_pending[:PREVIEW_MODEL_MAX]
+    for it, _, _ in filt.model_pending[PREVIEW_MODEL_MAX:]:
+        it['gender']['modelSkipped'] = True
+    try:
+        verdicts = verdicts_for(dwn, [(it['id'], h) for it, h, _ in todo])
+    except ModelUnavailable as err:
+        filt.model_info = {'error': str(err)}
+        return
+    stats = filt.gender_stats
+    dropped: set[int] = set()
+    for it, _, res in todo:
+        v = verdicts.get(it['id'])
+        if v is None:
+            continue
+        old = it['gender']['effective']
+        stats[old] = stats.get(old, 1) - 1
+        if v.safety_tag:
+            dropped.add(id(it))
+            filt.blocked += 1
+            continue
+        comb = combine(res, v.result, dwn.gender_min_conf)
+        keep, eff = decide(comb, dwn.gender_select, dwn.gender_min_conf, dwn.gender_strict)
+        stats[str(eff)] = stats.get(str(eff), 0) + 1
+        it['gender'] = {**comb.as_dict(), 'effective': str(eff)}
+        by = [x for x in it['excludedBy'] if x != 'gender'] + ([] if keep else ['gender'])
+        it['excludedBy'], it['excluded'] = by, bool(by)
+    for k in [k for k, n in stats.items() if n <= 0]:
+        del stats[k]
+    if dropped:
+        items[:] = [it for it in items if id(it) not in dropped]
+    filt.model_info = {'checked': len(todo), 'labeled': sum(1 for v in verdicts.values() if str(v.result.label) != 'unknown'),
+                       'skipped': max(0, len(filt.model_pending) - len(todo))}
+
+
+def _mark_downloaded(module: str, items: list[dict]) -> None:
+    """items already in the download index with their file on disk (same post of this module, or same md5 from any module):
+    'downloaded': 'id' | 'md5'. Index only, no request. A missing index or a database error marks nothing"""
+    try:
+        from .dlindex import DownloadIndex
+        with DownloadIndex() as index:
+            by_id, by_md5 = index.find_known(module, [it['id'] for it in items], [it.get('md5', '') for it in items])
+    except Exception:
+        return
+    for it in items:
+        if it['id'] in by_id:
+            it['downloaded'] = 'id'
+        elif it.get('md5') and it['md5'].lower() in by_md5:
+            it['downloaded'] = 'md5'
 
 
 def m_search_preview(p: dict) -> dict:
@@ -452,9 +521,12 @@ def m_search_preview(p: dict) -> dict:
         items_raw, has_more = _fetch_results_page(dwn, page, page_size, maxlim)
         filt = _ResultsFilter(dwn)
         result = [item for item in map(filt.item, items_raw) if item is not None]
+        _apply_gender_model(filt, result)
+        _mark_downloaded(dwn._get_module_abbr(), result)
         return {'page': page, 'pageSize': page_size, 'hasMore': has_more, 'items': result, 'tasks': list(dwn.tags_str_arr),
                 'requiredTags': list(dwn.required_tags), 'site': dwn._get_sitename(), 'genderStats': filt.gender_stats,
-                'blockedCount': filt.blocked, 'hiddenNoTags': filt.hidden_no_tags, 'genderEnabled': filt.gender_on}
+                'blockedCount': filt.blocked, 'hiddenNoTags': filt.hidden_no_tags, 'genderEnabled': filt.gender_on,
+                'genderModel': filt.model_info}
     return _with_downloader(p.get('module', 'rx'), p.get('tags', ''), list(p.get('args', [])), fn)
 
 
@@ -677,6 +749,41 @@ def m_index_search(p: dict) -> dict:
                             order=str(p.get('order') or 'downloaded'))
 
 
+def _model_server_params(p: dict) -> tuple[str, str]:
+    url, token = p.get('url') or '', p.get('token') or ''
+    if not isinstance(url, str) or not isinstance(token, str):
+        raise RpcError(-32602, 'url and token must be strings')
+    return url, token
+
+
+def m_gender_model_status(p: dict) -> dict:
+    """{url, token?}: can the gender model server at url be used (the desktop app runs the model there, never in the app),
+    on what hardware (check: GPU with enough VRAM, or the CPU). Without url: the model in this process (CLI / developers)"""
+    from .gender_model import api_status, model_status
+    url, token = _model_server_params(p)
+    if not url:
+        return {'local': True, 'inProcess': model_status()}
+    return api_status(url, token)
+
+
+def m_gender_model_load(p: dict) -> dict:
+    """{url, token?}: the app turns the model on: load it on the server now (the first job does not wait), then the status"""
+    from .gender_model import api_status
+    url, token = _model_server_params(p)
+    if not url:
+        raise RpcError(-32602, 'url required')
+    return api_status(url, token, 'load')
+
+
+def m_gender_model_unload(p: dict) -> dict:
+    """{url, token?}: the app turns the model off: free the memory it holds on the server"""
+    from .gender_model import api_status
+    url, token = _model_server_params(p)
+    if not url:
+        raise RpcError(-32602, 'url required')
+    return api_status(url, token, 'unload')
+
+
 def m_index_stats(_: dict) -> dict:
     """Totals of the download index (files, posts, tags, sizes, per module), exists: False until the first file is recorded"""
     from .dlindex import DownloadIndex
@@ -703,6 +810,9 @@ METHODS: dict[str, Callable[[dict], Any]] = {
     'files.nonEmpty': m_files_nonempty,
     'files.identify': m_files_identify,
     'index.search': m_index_search,
+    'gender.modelStatus': m_gender_model_status,
+    'gender.modelLoad': m_gender_model_load,
+    'gender.modelUnload': m_gender_model_unload,
     'index.stats': m_index_stats,
 }
 

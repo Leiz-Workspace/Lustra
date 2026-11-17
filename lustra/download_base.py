@@ -25,6 +25,7 @@ from .defines import (
     DownloaderStates,
     DownloadModes,
     ItemInfo,
+    MediaKind,
     ModuleCaps,
     ModuleConfigType,
     PageCheck,
@@ -71,6 +72,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.include_parchi: bool = False
         self.skip_images: bool = False
         self.skip_videos: bool = False
+        self.skip_audio: bool = False
         self.prefer_webm: bool = False
         self.prefer_mp4: bool = False
         self.low_res: bool = False
@@ -80,6 +82,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.dest_base: pathlib.Path = pathlib.Path().resolve().parent
         self.subfolder_vid: str = ''
         self.subfolder_img: str = ''
+        self.subfolder_aud: str = ''
         self.warn_nonempty: bool = False
         self.api_key: APIKey = APIKey()
         self.tags_str_arr: list[str] = []
@@ -96,6 +99,8 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.success_count: int = 0
         self.fail_count: int = 0
         self.failed_items: list[str] = []
+        self.max_item_id: int = 0
+        '''highest post id processed by this run (or found by -get_maxid): saved queries download only newer posts next time'''
         self.total_count: int = 0
         self.total_count_old: int = 0
         self.processed_count: int = 0
@@ -112,6 +117,11 @@ class DownloaderBase(ThreadedHtmlWorker):
         # content filter (character gender, tier 0 = tags). Enabling it also enables the safety blacklist
         self.gender_select: frozenset[str] = frozenset()
         self.gender_mode: str = 'tags'
+        self.gender_model_checked: int = 0
+        self.gender_model_url: str = ''
+        '''model server of '-gender_mode model' (empty: LUSTRA_GENDER_MODEL_URL, else the model in process)'''
+        self.gender_model_token: str = ''
+        '''posts looked at by the gender image model in this run'''
         self.gender_min_conf: GenderConf = GenderConf.MEDIUM
         self.gender_strict: bool = False
         self.gender_results: dict[str, GenderResult] = {}
@@ -566,12 +576,20 @@ class DownloaderBase(ThreadedHtmlWorker):
         trace(f'Filtered out {cut:d} / {orig_len:d} items')
         del items_raw_list[:cut]
 
+    def _media_kind(self, h: str) -> str:
+        """image / video / audio of a raw item. Default: from _is_video; modules with audio media override it (download_json.py)"""
+        return MediaKind.VIDEO if self._is_video(h) else MediaKind.IMAGE
+
+    def _subfolder_for(self, kind: str) -> str:
+        return {MediaKind.VIDEO: self.subfolder_vid, MediaKind.AUDIO: self.subfolder_aud}.get(kind, self.subfolder_img)
+
     def _filter_items_by_type(self) -> None:
         trace('Filtering items by type...')
 
-        if self.skip_images is False and self.skip_videos is False:
-            trace('Both types are enabled! Skipping')
+        if self.skip_images is False and self.skip_videos is False and self.skip_audio is False:
+            trace('All types are enabled! Skipping')
             return
+        skipped = {MediaKind.IMAGE: self.skip_images, MediaKind.VIDEO: self.skip_videos, MediaKind.AUDIO: self.skip_audio}
 
         total_count_temp = self.total_count
 
@@ -579,8 +597,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         for idx in reversed(range(len(self.items_raw_per_task))):
             self.catch_cancel_or_ctrl_c()
             h = str(self.items_raw_per_task[idx])
-            is_vid = self._is_video(h)
-            if self.skip_videos if is_vid else self.skip_images:
+            if skipped.get(self._media_kind(h), False):
                 del self.items_raw_per_task[idx]
                 self.total_count -= 1
 
@@ -609,7 +626,8 @@ class DownloaderBase(ThreadedHtmlWorker):
     def _filter_existing_items(self) -> None:
         trace('Filtering out existing items...')
 
-        folders = [self.dest_base_s] + [self.dest_base_s / sub for sub in dict.fromkeys((self.subfolder_img, self.subfolder_vid)) if sub]
+        folders = [self.dest_base_s] + [self.dest_base_s / sub for sub in dict.fromkeys((self.subfolder_img, self.subfolder_vid,
+                                                                                         self.subfolder_aud)) if sub]
         abbrp = self._get_module_abbr_p()
         re_owned_file = re.compile(fr'^(?:{re.escape(abbrp)})?(\d+)[._]')
         existing_ids: set[str] = set()
@@ -820,29 +838,63 @@ class DownloaderBase(ThreadedHtmlWorker):
             trace(f'Blocked {removed:d} / {total:d} items (safety blacklist, active while content filter is enabled)')
 
     def _filter_items_by_gender(self, parents: MutableSet[str]) -> None:
-        """Tier 0 gender filter: labels inferred from post tags (lustra/gender.py)"""
+        """Gender filter: tier 0 labels from post tags (lustra/gender.py); with '-gender_mode model' posts whose tags are not
+        conclusive are looked at by the image model (lustra/gender_model.py), its safety gate blocks posts as well"""
         if not self.gender_select:
             return
         trace('Filtering items by character gender...')
         rules = rules_for_module(self._get_module_abbr())
         total = len(self.items_raw_per_task)
         removed: dict[str, int] = {}
+        results: dict[int, tuple] = {}
+        for idx in range(total):
+            self.catch_cancel_or_ctrl_c()
+            item_id, idstring, tags, info = self._task_item_tags(idx)
+            results[idx] = (item_id, idstring, info, infer_from_tags(tags, rules))
+        verdicts = self._gender_model_verdicts(results) if self.gender_mode == 'model' else {}
+        model_blocked = 0
         idx: int
         for idx in reversed(range(total)):
             self.catch_cancel_or_ctrl_c()
-            item_id, idstring, tags, info = self._task_item_tags(idx)
-            res = infer_from_tags(tags, rules)
+            item_id, idstring, info, res = results[idx]
+            if (v := verdicts.get(item_id)) is not None:
+                if v.safety_tag:  # model safety gate (plan §4.2): blocked like a blacklisted tag
+                    self._drop_task_item(idx, item_id, idstring, info, parents)
+                    model_blocked += 1
+                    continue
+                from .gender_model import combine
+                res = combine(res, v.result, self.gender_min_conf)
             keep, eff = decide(res, self.gender_select, self.gender_min_conf, self.gender_strict)
             self.gender_results[idstring] = res
             self.gender_stats[str(eff)] = self.gender_stats.get(str(eff), 0) + 1
             if not keep:
                 self._drop_task_item(idx, item_id, idstring, info, parents)
                 removed[str(eff)] = removed.get(str(eff), 0) + 1
+        if model_blocked:
+            self.safety_blocked_count += model_blocked
+            trace(f'Blocked {model_blocked:d} / {total:d} items (gender model safety gate)')
         if removed:
             count = sum(removed.values())
             self.gender_filtered_count += count
             details = ', '.join(f'{k}: {v:d}' for k, v in sorted(removed.items()))
             trace(f'Filtered out {count:d} / {total:d} items by gender ({details})')
+
+    def _gender_model_verdicts(self, results: dict[int, tuple]) -> dict:
+        """image model verdicts for the posts tier 0 could not label confidently (cached per post)"""
+        from .gender_model import ModelUnavailable, needs_model, verdicts_for
+        posts = [(item_id, str(self.items_raw_per_task[idx])) for idx, (item_id, _, _, res) in results.items()
+                 if needs_model(res, self.gender_min_conf)]
+        if not posts:
+            return {}
+        trace(f'Gender model: looking at {len(posts):d} / {len(results):d} item(s) without conclusive tags...')
+        try:
+            verdicts = verdicts_for(self, posts)
+        except ModelUnavailable as err:
+            thread_exit(f'Error: {err}')
+        decided = sum(1 for v in verdicts.values() if str(v.result.label) != 'unknown')
+        trace(f'Gender model: {decided:d} labeled, {len(posts) - decided:d} still unknown')
+        self.gender_model_checked += len(posts)
+        return verdicts
 
     def _filter_items_by_module_filters(self, parents: MutableSet[str]) -> None:
         trace('Filtering out items using module filters...')

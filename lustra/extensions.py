@@ -65,6 +65,20 @@ def data_dir() -> pathlib.Path:
     return base / 'Lustra'
 
 
+def _version_key(version: str) -> tuple:
+    """'1.10.2' -> (1, 10, 2); non numeric parts compare after numbers ('1.2.0-beta' < '1.2.0' is not modelled: equal)"""
+    parts = []
+    for p in str(version).split('-', 1)[0].split('.'):
+        parts.append((0, int(p), '') if p.isdigit() else (1, 0, p))
+    while parts and parts[-1] == (0, 0, ''):
+        parts.pop()
+    return tuple(parts)
+
+
+def version_newer(candidate: str, current: str) -> bool:
+    return _version_key(candidate) > _version_key(current)
+
+
 class Extensions:
     """Extensions !Static!"""
     _lock = RLock()
@@ -233,7 +247,11 @@ class Extensions:
         user_ids = {m.id for m in Extensions._scan(Extensions.user_dir(), SOURCE_USER)}
         for m in Extensions._scan(Extensions.catalog_dir(), SOURCE_CATALOG):
             if m.id in rows:
-                rows[m.id]['installed'] = rows[m.id]['source'] == SOURCE_BUILTIN or m.id in user_ids
+                row = rows[m.id]
+                row['installed'] = row['source'] == SOURCE_BUILTIN or m.id in user_ids
+                if row['source'] != SOURCE_BUILTIN and row['installed']:  # a newer copy in the local catalog: offered as an update
+                    row['catalogVersion'] = m.version
+                    row['updateAvailable'] = version_newer(m.version, row['version'])
                 continue
             rows[m.id] = {**m.to_public_dict(), 'installed': False, 'loaded': False}
         return sorted(rows.values(), key=lambda r: (not r['default'], r['source'] != SOURCE_BUILTIN, r['name'].lower()))

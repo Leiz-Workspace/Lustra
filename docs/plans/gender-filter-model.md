@@ -1,6 +1,6 @@
 # Plan — Gán nhãn & lọc theo giới tính nhân vật (`only_female` / `only_male` / `both`)
 
-> 2026-11-16 · Trạng thái: **đề xuất, chưa có code**. User story: US-21 ([user-stories.md](../user-stories.md)). Liên quan: [search-engine.md](search-engine.md) (Giai đoạn 3).
+> 2026-11-16 · Trạng thái (cập nhật 2026-11-17): tầng 0 và tầng 1 phương án A0 **đã làm**, xem [Trạng thái triển khai](#trạng-thái-triển-khai). User story: US-21 ([user-stories.md](../user-stories.md)). Liên quan: [search-engine.md](search-engine.md) (Giai đoạn 3).
 > Mục tiêu: người dùng chọn "chỉ nữ", "chỉ nam" hoặc "cả hai" và Lustra tự loại post không khớp **trước khi tải**.
 > Hướng đi gồm hai tầng:
 > - **Tầng 0** suy nhãn từ tag sẵn có. Không cần ML, không tải ảnh, ra mắt được ngay.
@@ -24,10 +24,21 @@
 
 ## Trạng thái triển khai
 
+- **Model server (2026-11-17, dev log 7u)**: model chạy ở `lustra/model_server.py` (HTTP API, Docker, systemd), app và CLI chỉ gọi API; bản app không kèm onnxruntime / numpy / Pillow / model (lõi đóng băng 51,4 MiB). Khác §3.6 / §4.4 / §5.4: suy luận không bắt buộc trên máy người dùng, ảnh được gửi tới model server mà người dùng cấu hình (mặc định 127.0.0.1); http chỉ cho máy này / mạng nội bộ, ngoài ra phải https + token. Bộ luật, safety gate và cache vẫn ở client. Nút tải / xoá model trong app được bỏ (server tự tải).
+- **Bật / tắt và phần cứng (2026-11-17, dev log 7v)**: app có công tắc Dùng model (mặc định tắt), kiểm tra GPU / VRAM của server trước khi bật và cảnh báo khi model sẽ chạy bằng CPU, kèm hướng dẫn chung. Server chạy model trên GPU khi onnxruntime có provider GPU, nạp lười và tự giải phóng sau 15 phút không dùng.
+- **Tầng 1, phương án A0 đã làm (2026-11-17, dev log 7t)**: `lustra/gender_model.py`, `-gender_mode model`, RPC `gender.modelStatus` / `gender.modelInstall` / `gender.modelRemove`, Cài đặt → Model nhận diện giới tính, lựa chọn "Tag + model (ảnh)" trong bộ lọc. Đo thử: 20/20 ảnh mẫu khớp nhãn tag (sample), 18/20 với thumbnail (2 ca lệch đều ở độ tin cậy low, nên thành unknown với ngưỡng mặc định medium); ~0,4 s/ảnh trên CPU; Xbooru `scenery` chỉ nữ / cả hai: model xem 4/42 post thiếu tag, gán nhãn cả 4. **Khác plan**:
+  - Không train gì: dùng thẳng WD tagger v3 ViT (fp32, ~361 MB, revision ghim), đầu ra đi qua bộ luật `db`. Chưa có tập vàng nên chưa đo precision theo §7; ngưỡng §3.4 lấy theo xác suất yếu nhất trong bằng chứng (≥ 0,85 high, ≥ 0,6 medium).
+  - Extra là `lustra[model]` (numpy, onnxruntime, pillow), không phải `lustra[gender]`. Chỉ `CPUExecutionProvider`, session không giải phóng khi rảnh.
+  - Thư mục `data_dir()/models/wd-vit-tagger-v3/` (biến `LUSTRA_GENDER_MODEL_DIR` để trỏ chỗ khác), tải thẳng từ Hugging Face, không có catalog model (§5.4) và chưa có rollback.
+  - Ảnh: `sample_url` khi là ảnh (~850 px, tốt hơn nhiều so với thumbnail 150–180 px), nếu không thì thumbnail; không đọc cache thumbnail của Electron. Cache kết quả `cache/gender_model.sqlite`, khoá `<module>:<post id>` + id model.
+  - RPC đặt tên `gender.model*`; không có `gender.classify` chạy nền: preview gọi model đồng bộ cho tối đa 40 post / trang.
+  - Video: chỉ ảnh poster (độ tin cậy tối đa medium); P4 chưa làm.
+- Còn lại của tầng 1: tập vàng và đo precision / thiên lệch (P1, §3.7), head A1 / phương án B, int8, catalog model, DirectML / CoreML.
+- **Bổ sung 2026-11-17 (dev log 7s)**: chế độ loại bỏ: `-gender_exclude` ở lõi / CLI, nút gạt Giữ / Loại bỏ trong app.
 - **P0 đã làm (2026-11-16)**: `lustra/gender.py`, `lustra/gender_rules/{db,rx,en,gelbooru_generic}.json`, `lustra/safety.py`, hai filter trong `_process_tags`, CLI `-gender/-gender_conf/-gender_strict/-gender_mode`, RPC `search.preview` (`gender`, `excludedBy`, `genderStats`, `blockedCount`), IPC (`genderFiltered`, `blocked`, `genderStats`), UI (chip, badge, thống kê, lightbox, card job), manifest `genderRules`/`safetyTags`, `tools/gender_coverage.py`, test `lustra/tests/test_gender.py`.
 - **Khác plan**: không chuẩn hoá qua `all_tag_aliases.json`. File đó là alias dùng để đặt tên file (ví dụ `male` → `1+boys`), dùng để suy nhãn sẽ sai. Mỗi bộ luật mang khoá `aliases` riêng (rx: `hetero`, `hetero_sex` → `straight`). Chưa có `-dump_gender` (câu hỏi mở §8.5).
 - **Độ phủ đo được** (≥ medium): db 95,9 % (mới nhất) / 99,5 % (ngẫu nhiên, `random:200` vì `order:random` timeout trên toàn DB); rx 85,8 % / 94,6 %. Xem `docs/reports/`.
-- Chưa làm: tập vàng và đo precision (P1), model (P2–P4), đo độ phủ e621.
+- Chưa làm (tầng 0): tập vàng và đo precision (P1), đo độ phủ e621.
 
 ## 0. Tóm tắt & quyết định chính
 

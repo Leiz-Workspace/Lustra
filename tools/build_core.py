@@ -37,6 +37,9 @@ ALIASES_FILE = 'all_tag_aliases.json'
 EXCLUDED_MODULES = (
     'tkinter', '_tkinter', 'tkinterdnd2', 'lxml', 'PyInstaller', 'pip', 'setuptools', 'ruff', 'pydoc', 'lib2to3',
     'lustra.tests', 'lustra.release',
+    # gender image model: runs in the model server (lustra/model_server.py), the app core only calls its API. gender_model.py
+    # imports these lazily for its in-process backend; without the exclusion a build environment that has them adds ~110 MB
+    'numpy', 'onnxruntime', 'PIL', 'lustra.model_server',
 )
 
 
@@ -132,6 +135,14 @@ def _smoke_test(exe: pathlib.Path) -> None:
         if r.returncode != 0 or not ready:
             raise SystemExit(f'smoke test failed: server exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
         print(f'smoke test: server ready, version {ready["params"].get("version")}, python {ready["params"].get("python")}')
+        # gender model: the core is a client of the model server (no numpy / onnxruntime in the bundle), port 9 answers nothing
+        r = subprocess.run((str(exe), 'server'), env=env, capture_output=True, text=True, encoding='utf-8', timeout=120,
+                           input='{"jsonrpc":"2.0","id":1,"method":"gender.modelStatus","params":{"url":"http://127.0.0.1:9"}}\n'
+                                 '{"jsonrpc":"2.0","method":"app.shutdown"}\n')
+        st = next((json.loads(line) for line in r.stdout.splitlines() if line.startswith('{') and '"id":1' in line.replace(' ', '')), {})
+        if st.get('result', {}).get('reachable') is not False or 'not reachable' not in st['result'].get('error', ''):
+            raise SystemExit(f'smoke test failed: gender.modelStatus\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
+        print('smoke test: gender model client ok')
         r = subprocess.run((str(exe), 'cli', '--help'), env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
         if r.returncode != 0 or '-module' not in r.stdout:
             raise SystemExit(f'smoke test failed: cli --help exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
@@ -165,7 +176,8 @@ def build(out_dir: pathlib.Path, tags: str, smoke: bool) -> pathlib.Path:
         else:
             print('note: the anthropic package is not installed: the bundled core will offer only the template mode of the generator')
         for name in (*_lustra_modules(), 'lustra.extgen.sandbox_boot', *_extension_imports()):
-            cmd += ['--hidden-import', name]
+            if name not in EXCLUDED_MODULES:
+                cmd += ['--hidden-import', name]
         for name in EXCLUDED_MODULES:
             cmd += ['--exclude-module', name]
         for src, dest in data:

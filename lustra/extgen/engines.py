@@ -24,8 +24,11 @@ ENGINES: dict[str, dict] = {
     'moebooru_json': {'template': True, 'description': 'Moebooru JSON API: post.json', 'reference': 'danbooru'},
     'philomena_json': {'template': True, 'description': 'Philomena API: api/v1/json/search/images', 'reference': 'e621'},
     'szurubooru_json': {'template': True, 'description': 'Szurubooru API: api/posts/', 'reference': 'e621'},
-    'shimmie': {'template': False, 'description': 'Shimmie2 (HTML listing or api/danbooru/find_posts)', 'reference': 'paheal'},
-    'custom': {'template': False, 'description': 'unknown engine: custom HTML / JSON parsing', 'reference': 'rule34us'},
+    'shimmie_api': {'template': True, 'description': 'Shimmie2 with the danbooru compatible API: api/danbooru/find_posts (XML)',
+                    'reference': 'paheal'},
+    'shimmie': {'template': False, 'description': 'Shimmie2 without its danbooru API: HTML listing /post/list/<tags>/<page>',
+                'reference': 'template_html'},
+    'custom': {'template': False, 'description': 'unknown engine: custom HTML / JSON parsing', 'reference': 'template_html'},
 }
 
 
@@ -73,7 +76,7 @@ def detect_engine(fetcher: SafeFetcher, site: str) -> EngineGuess:
     # 1. gelbooru 0.2 DAPI
     if res := probe('index.php?page=dapi&s=post&q=index&limit=1'):
         t = res.text(4000)
-        if re.search(r'<posts\s[^>]*count="\d+"', t):
+        if re.search(r'<posts\s[^>]*count=["\']\d+', t):
             return EngineGuess('gelbooru_dapi', 'high', evidence, notes)
         if 'Missing authentication' in t:
             notes.append('the DAPI needs an API key of the user (manifest auth.apiKey)')
@@ -102,7 +105,11 @@ def detect_engine(fetcher: SafeFetcher, site: str) -> EngineGuess:
         data = _json(res)
         if isinstance(data, dict) and 'results' in data and 'total' in data:
             return EngineGuess('szurubooru_json', 'high', evidence, notes)
-    # 6. home page: shimmie / anything else
+    # 6. shimmie with its danbooru compatible api
+    if res := probe('api/danbooru/find_posts?limit=1'):
+        if re.search(r'<posts\s[^>]*count=["\']\d+', res.text(4000)):  # shimmie quotes attributes with '
+            return EngineGuess('shimmie_api', 'high', evidence, notes)
+    # 7. home page: shimmie / anything else
     if res := probe(''):
         t = res.text(200000)
         if re.search(r'shimmie', t, re.IGNORECASE):

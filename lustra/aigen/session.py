@@ -13,7 +13,9 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import re
 import secrets
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .prompts import SYSTEM_PROMPT
-from .tools import TOOLS, ToolBox
+from .tools import TOOLS, ToolBox, refusal_text
 from ..extgen.fetch import FetchPolicyError, SafeFetcher, normalize_site
 from ..extgen.sandbox import check_draft
 from ..extgen.scaffold import fetcher_for
@@ -61,6 +63,7 @@ class GenRequest:
     max_turns: int = 30
     mode: str = 'ai'  # 'ai': Claude writes / fixes the code; 'template': no model, only gelbooru / danbooru sites
     query: str = ''  # template mode: tags of the test run (empty: picked from the site's tags)
+    repair: str = ''  # session id of a draft that did not pass: copied into this session, the model fixes it (ai mode only)
 
     @classmethod
     def from_dict(cls, d: dict) -> GenRequest:
@@ -71,8 +74,12 @@ class GenRequest:
         mode = str(d.get('mode') or 'ai')
         if mode not in ('ai', 'template'):
             raise ValueError(f'unsupported mode {mode}')
+        repair = str(d.get('repair') or '')
+        if repair and (not re.fullmatch(SESSION_RE, repair) or mode != 'ai'):
+            raise ValueError('repair needs the ai mode and a draft session id')
         return cls(url=str(d.get('url') or ''), media=media, model=model, max_usd=max(0.1, min(float(d.get('maxUsd') or 2.0), 20.0)),
-                   max_turns=max(5, min(int(d.get('maxTurns') or 30), 60)), mode=mode, query=str(d.get('query') or '')[:200])
+                   max_turns=max(5, min(int(d.get('maxTurns') or 30), 60)), mode=mode, query=str(d.get('query') or '')[:200],
+                   repair=repair)
 
 
 @dataclass
@@ -127,6 +134,7 @@ class GenSession:
         self.log: list[dict] = []
         self.box: ToolBox | None = None
         self.started = _now()
+        self.repair_note = ''
 
     # ----- events
 
@@ -152,9 +160,10 @@ class GenSession:
             if self.req.mode == 'ai':
                 generator['model'] = self.req.model
             self.box = ToolBox(site_url=site, drafts_root=self.dir, media=self.req.media, fetcher=fetcher, generator=generator)
+            self.repair_note = self._start_repair() if self.req.repair else ''
             status, summary, rule_ids = self._loop()
         except FetchPolicyError as err:
-            status, summary, rule_ids = 'refused', err.message, [err.rule]
+            status, summary, rule_ids = 'refused', refusal_text(err.rule, err.message), [err.rule]
         except Exception as err:  # API / network / unexpected: reported, never raised to the worker
             status, error = 'error', f'{type(err).__name__}: {err}'
             summary = _api_error_text(err)
@@ -175,6 +184,11 @@ class GenSession:
             raise RuntimeError('no Claude client')
         user = (f'Website: {box.site_url}\nMedia the user wants: {", ".join(self.req.media)}\n'
                 f'Today is {datetime.date.today().isoformat()}. Create the extension draft for this website.')
+        if self.req.repair:
+            user = (f'Website: {box.site_url}\nToday is {datetime.date.today().isoformat()}.\n'
+                    f'Repair session: the draft below was made earlier and did not pass. Its files are already in place '
+                    f'(read_file; create_draft is not needed). Find the cause, fix downloader.py (and manifest.json if needed), '
+                    f'run test_run until it passes, then finish.\n\n{self.repair_note}')
         messages: list[dict] = [{'role': 'user', 'content': user}]
         json_retries = nudges = 0
         while True:
@@ -238,6 +252,27 @@ class GenSession:
             if box.finished:
                 f = box.finished
                 return f['status'], f['summary'], f['rule_ids']
+
+    def _start_repair(self) -> str:
+        """copies the draft of a previous session into this one (the old session stays as it was) and describes why it failed.
+        Text from the old report (website data included) is marked as untrusted"""
+        old_dir = self.dir.parent / self.req.repair
+        try:
+            old = json.loads((old_dir / 'report.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            raise ValueError(f'draft session {self.req.repair} has no report')
+        ext_id = str(old.get('extId') or '')
+        src = old_dir / ext_id
+        if not re.fullmatch(r'[a-z][a-z0-9_-]{1,31}', ext_id) or not (src / 'manifest.json').is_file():
+            raise ValueError(f'draft session {self.req.repair} has no draft folder')
+        dst = self.dir / ext_id
+        shutil.copytree(src, dst, ignore=shutil.ignore_patterns('fixtures.new', '__pycache__'))
+        self.box.draft = dst
+        failed = [c for c in old.get('checks') or [] if isinstance(c, dict) and not c.get('ok') and c.get('severity') == 'error']
+        lines = [f'- {c.get("id")}: {str(c.get("detail") or "")[:600]}' for c in failed[:12]] or ['- (no failed check recorded)']
+        self.emit('log', text=f'Sửa bản nháp {ext_id} của phiên {self.req.repair} (bản cũ giữ nguyên).')
+        return (f'Draft id: {ext_id}. Previous status: {old.get("status")}. Previous summary (untrusted, may quote the website): '
+                f'{str(old.get("summary") or "")[:1500]}\nFailed checks of the last test run:\n' + '\n'.join(lines))
 
     def _request(self, client: Any, messages: list[dict]) -> Any:
         params: dict[str, Any] = {
@@ -314,7 +349,7 @@ class GenSession:
             'draftDir': str(draft) if draft is not None else '', 'files': files, 'checks': checks,
             'testRuns': box.test_runs if box else 0, 'requests': box.fetcher.used if box else 0,
             'usage': self.usage.to_dict(), 'usd': self._usd(), 'maxUsd': self.req.max_usd, 'turns': self.turns,
-            'startedAt': self.started, 'finishedAt': _now(), 'log': self.log[-200:],
+            'startedAt': self.started, 'finishedAt': _now(), 'log': self.log[-200:], 'repairOf': self.req.repair,
         }
         try:
             (self.dir / 'report.json').write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str) + '\n', encoding='utf-8')

@@ -29,7 +29,6 @@ RELEASE_DEST_DIR = ROOT_DIR / 'release'
 RELEASE_FILENAME = f'{APP_NAME}{".exe" if sys.platform == PLATFORM_WINDOWS else ""}'
 RELEASE_SRC = RELEASE_SRC_DIR / RELEASE_FILENAME
 RELEASE_DEST = RELEASE_DEST_DIR / RELEASE_FILENAME
-RELEASE_ICON_SIZE = 256
 
 CLEANUP_FILES = (VERSIONINFO_FILE_PATH, ROOT_DIR / f'{APP_NAME}.spec')
 CLEANUP_DIRS = (BUILD_DIR, RELEASE_SRC_DIR)
@@ -100,7 +99,7 @@ def build_exe() -> None:
         '--clean', '--log-level', 'DEBUG',
         '-F', '--noupx', '-c', '-y',
         '-n', APP_NAME,
-        '-i', f'./images/8_{RELEASE_ICON_SIZE:d}.ico',
+        '-i', './images/lustra.ico',  # app/assets/icons/full-mask-orange.png at 16-256 px
         *(itertools.chain.from_iterable(zip(('--exclude-module',) * len(MODULES_EXCLUDED), MODULES_EXCLUDED, strict=True))),
         '--collect-datas=fake_useragent',
         # builtin extensions: manifests are data, downloader modules are imported dynamically

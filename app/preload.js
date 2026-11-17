@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('lustra', {
     cancel: (id) => invoke('jobs:cancel', id),
     list: () => invoke('jobs:list'),
     clear: () => invoke('jobs:clear'),
+    rerun: (id, allowDuplicate) => invoke('jobs:rerun', id, allowDuplicate === true),
   },
   dialogs: {
     folder: (current) => invoke('dialog:folder', current),
@@ -54,6 +55,22 @@ contextBridge.exposeInMainWorld('lustra', {
     setKey: (value) => invoke('gen:setKey', value),
     clearKey: () => invoke('gen:clearKey'),
   },
+  genderModel: {
+    status: () => invoke('gmodel:status'),
+    load: () => invoke('gmodel:load'), // turn on: load the model on the server now
+    unload: () => invoke('gmodel:unload'), // turn off: free its memory on the server
+    setToken: (value) => invoke('gmodel:setToken', value),
+    clearToken: () => invoke('gmodel:clearToken'),
+  },
+  saved: {
+    // saved query schedule: every = hours (0 = off), from 'now' (only posts newer than today) or 'all'
+    setAuto: (key, every, from) => invoke('saved:auto', key, every, from),
+  },
+  library: {
+    // files of the download index: open with the default app (media extensions only) or show in the file manager
+    open: (file) => invoke('library:open', file),
+    reveal: (file) => invoke('library:reveal', file),
+  },
   appearance: {
     setBackgroundImage: (file) => invoke('appearance:setBackgroundImage', file),
   },
@@ -65,8 +82,9 @@ contextBridge.exposeInMainWorld('lustra', {
     openExternal: (url) => invoke('shell:external', url),
   },
   thumbUrl: (url, referer) => `lustra-thumb://t/?u=${encodeURIComponent(url)}&r=${encodeURIComponent(referer || '')}`,
+  mediaUrl: (url, referer) => `lustra-thumb://m/?u=${encodeURIComponent(url)}&r=${encodeURIComponent(referer || '')}`,
   on: (channel, cb) => {
-    const allowed = ['log', 'sidecar:status', 'sidecar:notify', 'jobs:update', 'jobs:log', 'appearance:changed', 'gen:event'];
+    const allowed = ['log', 'sidecar:status', 'sidecar:notify', 'jobs:update', 'jobs:log', 'appearance:changed', 'gen:event', 'nav:page'];
     if (!allowed.includes(channel)) throw new Error(`channel not allowed: ${channel}`);
     const handler = (_event, data) => cb(data);
     ipcRenderer.on(channel, handler);

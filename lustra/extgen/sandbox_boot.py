@@ -40,7 +40,7 @@ from lustra.logger import Logger  # noqa: E402
 Logger.init(True, True)
 
 from lustra.cmdargs import prepare_arglist  # noqa: E402
-from lustra.defines import FMT_DATE, KNOWN_EXTENSIONS_IMG, KNOWN_EXTENSIONS_VID, ModuleCaps  # noqa: E402
+from lustra.defines import FMT_DATE, KNOWN_EXTENSIONS, ModuleCaps  # noqa: E402
 from lustra.download import Downloader  # noqa: E402
 from lustra.downloaders import _make_downloader  # noqa: E402
 from lustra.extensions import Extensions  # noqa: E402
@@ -222,8 +222,7 @@ def main() -> dict:
         for d in DOWNLOADS:
             p = url_parse.urlparse(d['link'])
             ext = d['name'].rsplit('.', 1)[-1].lower() if '.' in d['name'] else ''
-            if p.scheme != 'https' or not p.hostname or ext not in (*KNOWN_EXTENSIONS_IMG, *KNOWN_EXTENSIONS_VID, 'mp3', 'ogg', 'wav',
-                                                                      'flac', 'm4a', 'opus'):
+            if p.scheme != 'https' or not p.hostname or ext not in KNOWN_EXTENSIONS:
                 bad_links.append(d['link'][:200])
             elif _site_base(p.hostname.lower()) != _site_base(site_host):
                 foreign.add(p.hostname.lower())

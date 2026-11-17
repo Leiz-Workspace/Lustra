@@ -30,6 +30,9 @@ Biến môi trường:
 - `LUSTRA_CORE`: đường dẫn lõi đóng băng (`lustra-core`) cho app dev;
 - `LUSTRA_STREAMING=0`: tắt pipeline streaming (quay lại kiểu quét hết rồi mới tải, dùng để so sánh / gỡ lỗi);
 - `LUSTRA_DLINDEX=0`: không ghi file tải xong vào index các lần tải (mục 3b). Index vẫn đọc được, `-skip_known` vẫn chạy. Các test đặt sẵn biến này (`lustra/tests/__init__.py`);
+- `LUSTRA_GENDER_MODEL_URL`, `LUSTRA_GENDER_MODEL_TOKEN`: địa chỉ và token model server cho CLI (mục 3c; app dùng Cài đặt). Model server đọc `LUSTRA_GENDER_MODEL_TOKEN` làm token của nó;
+- `LUSTRA_GENDER_MODEL_DIR`: thư mục model (model server hoặc model trong tiến trình) thay cho `<data>/models/wd-vit-tagger-v3`. Đặt biến này khi chạy test thì có thêm test với model thật;
+- `LUSTRA_GENDER_MODEL_DEVICE`: `auto` (mặc định: GPU nếu onnxruntime có provider GPU, nếu không thì CPU), `cpu`, `gpu` (không có GPU thì báo lỗi thay vì chạy CPU); model server có `--device` tương ứng;
 - `LUSTRA_SECRET_ARGS`: danh sách JSON các tham số bí mật (`["-api_key", "KEY,USER"]`) do app truyền cho CLI; CLI đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
 - `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron. Bước `generator` kiểm: khoá chỉ ghi (không lộ ra renderer, không có dạng chữ thường), phiên bị từ chối (R10), không cài được bản nháp chưa đạt, cài cần xác nhận, dọn dẹp.
@@ -67,6 +70,45 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
 - Xem nhanh bằng `sqlite3`: `sqlite3 ~/.config/Lustra/index/downloads.sqlite "SELECT module, COUNT(*) FROM files GROUP BY module"`. Sidecar: `{"jsonrpc":"2.0","id":1,"method":"index.stats"}`, `{"jsonrpc":"2.0","id":2,"method":"index.search","params":{"tags":"cat_ears -rating:e","pageSize":20}}`.
 - Sao lưu: copy file khi không có job nào chạy, hoặc `sqlite3 <file> ".backup <đích>"`. Làm lại từ đầu: đóng app và mọi job rồi xoá cả ba file `downloads.sqlite*`; index được tạo lại ở lần tải sau.
 
+## 3c. Model nhận diện giới tính (`-gender_mode model`)
+Model (~361 MB) chạy ở **model server** riêng; app và CLI chỉ gọi API nên bản app không kèm numpy / onnxruntime / Pillow / model. Lần đầu chạy server tự tải model từ Hugging Face `SmilingWolf/wd-vit-tagger-v3` (revision ghim, kiểm sha256). Mỗi ảnh ~0,4 s trên CPU (Ryzen, 4 luồng).
+
+Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--preload`) và giải phóng sau 15 phút không dùng (`--idle-unload 900`, `0` = giữ mãi). Model chạy trong một tiến trình con; giải phóng là tiến trình con thoát, nên RAM và VRAM được trả hết. Đo trên máy dev: server chưa nạp ~30 MB; model trên CUDA ~530–850 MB RAM và ~1,3 GB VRAM; giải phóng xong VRAM về 0. Log khởi động có dòng `hardware:` (GPU, VRAM trống, onnxruntime có GPU hay không), mỗi lần nạp có `model loaded on <cpu|cuda> in … s`.
+
+- **Trên máy này** (app mặc định gọi `http://127.0.0.1:8765`, không cần token):
+  ```bash
+  uv pip install --python .venv/bin/python 'numpy>=1.26' 'onnxruntime>=1.18' 'pillow>=10'
+  ```
+  ```bash
+  .venv/bin/python -m lustra.model_server
+  ```
+  Chạy nền theo user: `cp tools/systemd/lustra-model-server.service ~/.config/systemd/user/ && systemctl --user enable --now lustra-model-server`.
+- **GPU (VRAM)**: model chạy trên GPU khi onnxruntime của server là bản GPU. NVIDIA: `onnxruntime-gpu` 1.32 dùng CUDA 13 nên cần driver 580 trở lên (`nvidia-smi` ghi "CUDA Version: 13.0"). Thay `onnxruntime` bằng `onnxruntime-gpu` kèm CUDA / cuDNN từ pip (`.venv` tăng từ 227 MB lên 2,6 GB; hoặc extra `.[model-gpu]` thay cho `.[model]`), rồi khởi động lại server:
+  ```bash
+  uv pip uninstall --python .venv/bin/python onnxruntime
+  ```
+  ```bash
+  uv pip install --python .venv/bin/python 'onnxruntime-gpu[cuda,cudnn]'
+  ```
+  `GenderTagger` gọi `onnxruntime.preload_dlls()` để nạp CUDA / cuDNN từ các gói `nvidia-*`. Provider GPU không nạp được thì onnxruntime rơi về CPU: status báo `device: "cpu"`, app báo `gpu_fallback`; `--device gpu` biến trường hợp này thành lỗi. DirectML (Windows), ROCm / MIGraphX (AMD) được chọn nếu có, chưa thử; TensorRT (có trong danh sách provider của onnxruntime-gpu) không dùng. Image Docker chỉ có CPU.
+  Đo trên RTX 4070 Ti SUPER (driver 580.178, onnxruntime-gpu 1.32.0, CUDA 13.5 / cuDNN 9.28 từ pip): riêng model 8 ms / ảnh (CPU 323 ms), qua HTTP ~18 ms / ảnh, 2 luồng ~10 ms / ảnh; VRAM ~1,3 GB; nạp 0,7 s. Xác suất lệch với CPU < 0,001, nhãn như nhau. `--device cpu` vẫn chạy CPU (app báo `cpu_forced`).
+- **Docker** (máy này hoặc máy chủ; lắng nghe ngoài loopback bắt buộc có token):
+  ```bash
+  docker build -f tools/model_server/Dockerfile -t lustra-model-server .
+  ```
+  ```bash
+  docker run -d --name lustra-model --restart unless-stopped -e LUSTRA_GENDER_MODEL_TOKEN=<token> -p 127.0.0.1:8765:8765 -v lustra-model:/models lustra-model-server
+  ```
+  Model tải vào volume `/models` ở lần chạy đầu. Đã có model trên máy thì gắn thẳng: `-v ~/.config/Lustra/models/wd-vit-tagger-v3:/models:ro`. Image ~420 MB (chưa gồm model). Cho máy khác dùng: `-p 8765:8765` và đặt server sau reverse proxy https (app từ chối http tới máy ngoài mạng nội bộ).
+- **App**: Cài đặt → Model nhận diện giới tính: công tắc **Dùng model** (mặc định tắt), địa chỉ API, token (nếu server có), nút Kiểm tra, dòng **Phần cứng của server**, nút **Hướng dẫn** (hướng dẫn chung, `app/renderer/guide.js`). Bật: app hỏi server GPU / VRAM trước; không có GPU có VRAM riêng ≥ 1,5 GB, onnxruntime bản CPU, server bị đặt `--device cpu` hoặc VRAM trống không đủ thì hiện cảnh báo khuyên để tắt (Hướng dẫn / Vẫn bật (chạy bằng CPU) / Để tắt), rồi nạp model ngay và báo chạy bằng gì. Tắt: job chỉ lọc theo tag, server trên máy này giải phóng model. Sau khi bật: Bộ lọc giới tính → Nhận diện → "Tag + model (ảnh)". Server không phản hồi thì preview ghi lỗi, job dừng với `Error: '-gender_mode model': model server … is not reachable`.
+- **CLI**:
+  ```bash
+  .venv/bin/python -m lustra -module xb -gender only_female,both -gender_mode model -gender_model_url http://127.0.0.1:8765 -path ~/Downloads/Lustra -- scenery
+  ```
+  Token: `-gender_model_token` hoặc `LUSTRA_GENDER_MODEL_TOKEN`. Không có địa chỉ thì CLI chạy model trong tiến trình (cần `pip install "lustra[model]"` và `python -m lustra.gender_model install`). Log có `Gender model: looking at N / M item(s) …` và `N labeled, K still unknown`.
+- Công cụ: `python -m lustra.gender_model status` (có `LUSTRA_GENDER_MODEL_URL` thì kiểm server), `install`, `remove`, `classify ảnh.jpg …` (in nhãn, độ tin cậy, bằng chứng, safety tag; qua server nếu có biến địa chỉ).
+- Kết quả theo post nằm ở `<data>/cache/gender_model.sqlite` của client; xoá file này để model xem lại.
+
 ## 4. Test
 ```bash
 .venv/bin/python -m unittest lustra.tests.test_lustra
@@ -75,17 +117,17 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
 cd app && npm run check
 LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -a ./node_modules/.bin/electron . --no-sandbox --ozone-platform=x11
 ```
-`ConnTests` và `RealDownloadTests` gọi mạng thật. `lustra.tests.test_extgen` chạy offline; test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói.
+`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `lustra.tests.test_extgen` chạy offline; test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói.
 
 Toàn bộ test offline như CI (`.github/workflows/run-tests.yml`), với thư mục dữ liệu tạm:
 ```bash
-LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex
+LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_model_server
 ```
 
 ## 5. Build
-- CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.
+- CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`, icon `images/lustra.ico`: icon mặt nạ cam của app ở 16–256 px). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.
 - App desktop:
-  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm. Smoke test kiểm `server`, `cli` và `aigen`.
+  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli` và `aigen`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
   2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
   - App đã đóng gói dùng `<resources>/core/lustra-core`. Biến `LUSTRA_CORE` trỏ app dev sang một lõi đóng băng.
   - Self-test chạy được trên file đã đóng gói với cùng các biến `LUSTRA_SELFTEST_*`; thêm `LUSTRA_SELFTEST_QUICK=1` để bỏ các bước cần mạng. `LUSTRA_SELFTEST_ICONS=1` kiểm việc đồng bộ launcher khi đổi icon; nó **ghi vào `~/.local/share/applications`**, nên chỉ chạy kèm `HOME=<thư mục tạm>`.

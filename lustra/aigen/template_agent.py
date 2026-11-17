@@ -17,7 +17,7 @@ from collections import Counter
 from types import SimpleNamespace
 from typing import Any
 
-from .tools import UNTRUSTED
+from .tools import UNTRUSTED, refusal_text
 from ..extgen.templates import TEMPLATE_ENGINES
 
 __all__ = ('TemplateClient',)
@@ -29,8 +29,9 @@ SAMPLE_URLS = {  # recent posts, to pick a tag that surely has results
     'moebooru_json': ('post.json?limit=40', 'application/json'),
     'philomena_json': ('api/v1/json/search/images?q=*&per_page=40', 'application/json'),
     'szurubooru_json': ('api/posts/?limit=40', 'application/json'),
+    'shimmie_api': ('api/danbooru/find_posts?limit=40', ''),
 }
-ENGINE_NAMES = 'Gelbooru 0.2 (DAPI), Danbooru, e621, Moebooru, Philomena và Szurubooru'
+ENGINE_NAMES = 'Gelbooru 0.2 (DAPI), Danbooru, e621, Moebooru, Philomena, Szurubooru và Shimmie (API danbooru)'
 RE_TAG_OK = re.compile(r'[a-z\d][a-z\d_()\-]{1,40}')
 
 
@@ -53,8 +54,8 @@ def _unescape(s: str) -> str:
 def pick_tag(body: str, engine: str) -> str:
     """The most common general tag of a sample of recent posts (a tag that surely has results)"""
     counts: Counter = Counter()
-    if engine == 'gelbooru_dapi':
-        for tags in re.findall(r'\btags="([^"]*)"', body):
+    if engine in ('gelbooru_dapi', 'shimmie_api'):  # xml attributes
+        for _, tags in re.findall(r'\btags=(["\'])(.*?)\1', body):  # shimmie quotes attributes with '
             counts.update(t for t in tags.split() if t)
         return _most_common(counts)
     pattern, kind = TAG_FIELDS.get(engine, TAG_FIELDS['danbooru_json'])
@@ -142,7 +143,7 @@ class TemplateClient:
         if step == 'survey_site':
             if err:
                 m = re.match(r'refused by rule (R\d+): (.*)', text, re.S)
-                return self._finish('refused', m.group(2), [m.group(1)]) if m else self._finish('failed', f'Không khảo sát được site: {text}')
+                return self._finish('refused', refusal_text(m.group(1), m.group(2)), [m.group(1)]) if m else self._finish('failed', f'Không khảo sát được site: {text}')
             data = json.loads(text)
             self.existing = [e for e in data.get('existing') or [] if isinstance(e, dict)]
             eng = data.get('engine', {})

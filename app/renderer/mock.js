@@ -14,7 +14,7 @@
   ];
   const settings = {
     appearance: { theme: 'ember', icon: 'full-mask-orange', background: { mode: 'icon', image: '', blur: 4, opacity: 0.9, dim: 0.18 } },
-    search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {} },
+    search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {}, filtersOpen: true },
     download: { path: '/home/user/Downloads/Lustra', threads: 4, images: true, videos: true, videoFormat: '', lowRes: false, prefix: true,
       gender: { select: [], conf: 'medium', strict: false },
       appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
@@ -23,11 +23,14 @@
     tags: { autoUpdate: false, autoUpdateDays: 7 },
     advanced: { pythonPath: '', verbose: false, catalogUrl: '' },
     ai: { model: 'claude-opus-5-5', maxUsd: 2 },
+    genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
   };
   const secrets = {}; // abbr -> true (the real app never sends key values to the renderer either)
   let aiKey = false;
   const aiStatus = () => ({ set: aiKey, encryption: true });
-  const secretsStatus = () => ({ encryption: true, modules: Object.fromEntries(Object.keys(secrets).map((k) => [k, { set: true, encrypted: true }])), ai: aiStatus() });
+  let gmToken = false;
+  let gmLoaded = false;
+  const secretsStatus = () => ({ encryption: true, modules: Object.fromEntries(Object.keys(secrets).map((k) => [k, { set: true, encrypted: true }])), ai: aiStatus(), genderModel: { set: gmToken, encrypted: gmToken, encryption: true } });
   // extension generator: a scripted session (template path) producing an in-memory draft
   const drafts = [];
   const gen = { running: false, session: '', events: [] };
@@ -181,7 +184,19 @@
           bytes: 2.9e9, dbBytes: 3.1e6, first: now - 86400 * 40, last: now - 3600, recording: true,
           modules: [{ module: 'rx', files: 1210, bytes: 2.1e9, last: now - 3600 }, { module: 'db', files: 624, bytes: 0.8e9, last: now - 86400 * 3 }] };
       }
-      if (method === 'index.search') return { total: 0, page: p.page || 0, pageSize: p.pageSize || 50, items: [], terms: [] };
+      if (method === 'index.search') {
+        // a few fake files (the browser cannot read local files: thumbnails fall back to the placeholder)
+        const exts = ['jpg', 'png', 'mp4', 'webm', 'mp3', 'jpg', 'gif', 'png'];
+        const all = Array.from({ length: 23 }, (_, i) => ({
+          module: i % 3 ? 'db' : 'rx', id: String(9000 - i), md5: `${i}`.padStart(32, 'a'), path: `/home/user/Downloads/Lustra/${i % 3 ? 'db' : 'rx'}_${9000 - i}.${exts[i % 8]}`,
+          name: `${i % 3 ? 'db' : 'rx'}_${9000 - i}.${exts[i % 8]}`, ext: exts[i % 8], size: 350000 + i * 91000, tags: 'scenery sky cloud original',
+          score: 10 + i, rating: 'g', date: '2026-11-10', downloadedAt: Date.now() / 1000 - i * 3600, exists: i % 7 !== 6 }));
+        const q = String(p.tags || '').trim();
+        const hit = all.filter((x) => (!p.module || x.module === p.module) && (!q || q.split(/\s+/).every((t) => x.tags.split(' ').includes(t))));
+        const size = p.pageSize || 50;
+        const page = p.page || 0;
+        return { total: hit.length, page, pageSize: size, items: hit.slice(page * size, (page + 1) * size), terms: [] };
+      }
       throw new Error(`mock: ${method}`);
     },
     tags: { update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; } },
@@ -212,7 +227,7 @@
             genderStats[label] = (genderStats[label] || 0) + 1;
             if (!sel.includes(label)) excludedBy.push('gender');
           }
-          return { id: String(id), preview: thumb(id), sample: thumb(id), isVideo: i % 9 === 4, ext: i % 9 === 4 ? 'mp4' : 'jpg', score: String((id % 97)),
+          return { id: String(id), preview: thumb(id), sample: thumb(id), isVideo: i % 9 === 4, mediaKind: i % 9 === 4 ? 'video' : i % 13 === 7 ? 'audio' : 'image', downloaded: i % 5 === 1 ? 'id' : undefined, ext: i % 9 === 4 ? 'mp4' : i % 13 === 7 ? 'mp3' : 'jpg', score: String((id % 97)),
             width: '1920', height: '1080', date: '16-11-2026', rating: 'g', tags, gender, excludedBy, excluded: excludedBy.length > 0 };
         });
         return { page, pageSize, hasMore: page < pages - 1, items, tasks, requiredTags: required, site: 'https://example.invalid/',
@@ -248,19 +263,23 @@
     },
     jobs: {
       start: async (q) => {
-        const id = `job-${Date.now()}`;
-        const job = { id, module: q.module, tags: q.tags, label: q.label || '', dest: q.path, status: 'running', createdAt: Date.now(), progress: { stateName: 'SEARCHING' }, logTail: ['mock job started'] };
+        if (!q.allowDuplicate && [...jobs.values()].some((j) => j.status === 'running' && j.module === q.module && j.tags === q.tags)) {
+          throw new Error('DUPLICATE: một job giống hệt đang chạy');
+        }
+        const id = `job-${Date.now()}-${jobs.size}`;
+        const job = { id, module: q.module, tags: q.tags, label: q.label || '', dest: q.path, status: 'running', createdAt: Date.now(), startedAt: Date.now(), progress: { stateName: 'SEARCHING' }, logTail: ['mock job started'] };
         jobs.set(id, job);
         let n = 0;
         const t = setInterval(() => {
           n += 4;
-          job.progress = n < 12 ? { stateName: 'SCANNING_PAGES1', total: 96 } : { stateName: 'DOWNLOADING', totalAll: 96, processed: Math.min(96, n), success: Math.min(96, n) };
+          job.progress = n < 12 ? { stateName: 'SCANNING_PAGES1', total: 96 } : { stateName: 'DOWNLOADING', totalAll: 96, processed: Math.min(96, n), success: Math.min(96, n), bytes: n * 1.7e6 };
           if (n >= 96) { job.status = 'done'; job.progress.stateName = 'DONE'; clearInterval(t); }
           emit('jobs:update', { ...job });
         }, 300);
         return { ...job };
       },
       cancel: async (id) => { const j = jobs.get(id); if (j) { j.status = 'cancelled'; emit('jobs:update', { ...j }); } return true; },
+      rerun: async (id) => { const j = jobs.get(id); if (!j) throw new Error('job không còn'); return window.lustra.jobs.start({ module: j.module, tags: j.tags, path: j.dest }); },
       list: async () => [...jobs.values()],
       clear: async () => { for (const [k, j] of jobs) if (j.status !== 'running') jobs.delete(k); return [...jobs.values()]; },
     },
@@ -270,10 +289,49 @@
       installCatalog: async (id) => { const m = modules.find((x) => x.id === id); if (m) m.installed = true; return { ...m, restartRequired: false }; },
       installRemote: async () => { throw new Error('mock'); },
     },
+    genderModel: {
+      // window.__gmDown = true: the model server does not answer. window.__gmHw: 'no_gpu' (default), 'gpu_no_runtime',
+      // 'vram_low', 'gpu', 'gpu_fallback' (a GPU runtime that falls back to the CPU once loaded), 'cpu_forced' (--device cpu)
+      status: async () => {
+        await delay(250);
+        const url = settings.genderModel.url;
+        const local = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url);
+        if (window.__gmDown) return { url, reachable: false, local, error: `model server ${url} is not reachable (ConnectionError)` };
+        const kind = window.__gmHw || 'no_gpu';
+        const rtx = { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 4070 Ti SUPER', vramMiB: 16376, vramFreeMiB: kind === 'vram_low' ? 600 : 15249, shared: false };
+        const igpu = { vendor: 'amd', name: 'AMD GPU 0x164e', vramMiB: 512, vramFreeMiB: 496, shared: false };
+        const gpus = kind === 'no_gpu' ? [igpu] : [rtx, igpu];
+        const cuda = ['gpu', 'vram_low', 'gpu_fallback', 'cpu_forced'].includes(kind);
+        const hardware = { gpus, providers: cuda ? ['CUDAExecutionProvider', 'CPUExecutionProvider'] : ['CPUExecutionProvider'], runtime: '1.32.0', ramMiB: 30728, ramFreeMiB: 20938, cpus: 16, os: 'linux' };
+        const device = gmLoaded ? (kind === 'gpu' ? 'cuda' : 'cpu') : '';
+        let code = kind === 'gpu_fallback' ? (gmLoaded ? 'gpu_fallback' : 'gpu') : kind;
+        if (device === 'cuda') code = 'gpu';
+        const check = { level: code === 'gpu' ? 'ok' : 'warn', code, gpu: kind === 'no_gpu' ? null : rtx, runtime: cuda ? 'cuda' : '', device, vramMinMiB: 1536, ramFreeMiB: 20938 };
+        return { url, reachable: true, local, error: '', check,
+          model: { id: 'wd-vit-tagger-v3', license: 'Apache-2.0', revision: '7f6b584d', ms: 3, loaded: gmLoaded, device, idleUnload: 900, hardware } };
+      },
+      load: async () => { await delay(600); gmLoaded = true; return window.lustra.genderModel.status(); },
+      unload: async () => { gmLoaded = false; return window.lustra.genderModel.status(); },
+      setToken: async (v) => { if (String(v).length < 8) throw new Error('token: 8–256 ký tự ASCII, không có dấu cách'); gmToken = true; return { set: true, encrypted: true, encryption: true }; },
+      clearToken: async () => { gmToken = false; return { set: false, encrypted: false, encryption: true }; },
+    },
+    saved: {
+      setAuto: async (key, every, from) => {
+        const e = settings.search.saved.find((x) => `${x.module}\n${x.tags}` === key);
+        if (!e) throw new Error('không tìm thấy truy vấn đã lưu');
+        if (!every) delete e.auto;
+        else e.auto = { ...(e.auto || {}), every, maxId: from === 'now' ? 12565561 : 0, lastRun: from === 'now' ? Date.now() : 0, lastStatus: from === 'now' ? 'baseline' : '', lastCount: 0 };
+        return { settings: JSON.parse(JSON.stringify(settings)), appearance: appearance(), secrets: secretsStatus() };
+      },
+    },
+    library: {
+      open: async () => '', reveal: async () => true,
+    },
     gen: {
       status: async () => ({ running: gen.running, session: gen.session, events: gen.events.slice(-300), key: aiStatus(), models: ['claude-opus-5-5', 'claude-sonnet-5-5'], defaults: { ...settings.ai } }),
       start: async (opts) => {
         if (gen.running) throw new Error('một phiên tạo extension đang chạy');
+        if (opts.repair) { const d = drafts.find((x) => x.session === opts.repair); opts = { ...opts, url: d.url, mode: 'ai' }; }
         if (opts.mode === 'ai' && !aiKey) throw new Error('Chưa có khoá Claude API: thêm trong Cài đặt → AI tạo extension, hoặc dùng chế độ không AI.');
         genRun(opts);
         return { started: true };
@@ -286,7 +344,8 @@
       install: async (session) => {
         if (!window.confirm('(mock) Cài extension vào Lustra?')) throw new Error('cancelled');
         const d = drafts.find((x) => x.session === session);
-        modules.push({ id: d.extId, name: d.name, abbr: d.abbr, version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: d.site, description: 'Generated draft', auth: {}, syntax: { maxTags: 0 } });
+        modules.push({ id: d.extId, name: d.name, abbr: d.abbr, version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: d.site, description: 'Generated draft', auth: {}, syntax: { maxTags: 0 },
+          generator: { tool: 'lustra.aigen', mode: d.mode, model: d.model, engine: d.engine, createdAt: d.finishedAt } });
         return { restartRequired: false };
       },
       remove: async (session) => { if (!window.confirm('(mock) Xoá bản nháp?')) return false; const i = drafts.findIndex((d) => d.session === session); if (i >= 0) drafts.splice(i, 1); return true; },
@@ -299,6 +358,7 @@
       relaunch: async () => location.reload(), installLauncher: async () => ({ ok: false, message: 'mock' }), openPath: async () => '', openExternal: async () => false,
     },
     thumbUrl: (url) => url,
+    mediaUrl: (url) => url,
     on: (ch, cb) => { (listeners[ch] = listeners[ch] || []).push(cb); return () => {}; },
   };
   setTimeout(() => emit('sidecar:status', { ok: true, info: { version: '2.0 r1 (mock)' } }), 300);

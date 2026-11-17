@@ -313,7 +313,141 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Chưa kiểm:** tải thật từ website (chỉ chạy với site giả); self-test Electron (đã thêm bước `indexStats` / `indexSearch` / `skipKnownArgs` nhưng chưa chạy); Windows / macOS thật.
 - **Để sau:** trang tìm offline đầy đủ trong app (dùng `index.search`), dọn dòng có file đã bị xoá, nhập file đã có từ thư mục (cần quét tên file + metadata), tool re-tag đọc index, đánh dấu "đã tải" trong preview.
 
-### 8. Việc tiếp theo
+### 7p. Âm thanh trong lõi + template Shimmie — 2026-11-17
+- **Âm thanh (plan A.10):**
+  - `KNOWN_EXTENSIONS_AUD` (`mp3 ogg oga opus flac m4a wav`), `MediaKind`, `media_kind_by_ext`.
+  - Hook `_media_kind` / `_subfolder_for` trong `DownloaderBase`, mặc định giữ hành vi cũ. `DownloaderJsonApi` phân loại theo đuôi file, tải file gốc cho âm thanh, không dùng file âm thanh làm ảnh xem trước.
+  - `-skip_aud`, `-audsub`; lọc 3 loại; tải theo khối cho cả âm thanh.
+  - `search.preview` trả `mediaKind`. App: `download.audio` → `-skip_aud`, ô "Âm thanh" chỉ hiện khi module khai báo media `audio`, badge "♪ âm thanh", ô ♪ khi không có ảnh bìa.
+  - Module tích hợp sẵn không đổi hành vi.
+- **Shimmie:**
+  - Engine mới `shimmie_api`: nhận diện qua `api/danbooru/find_posts`.
+  - Template trên `DownloaderJsonApi` với `_parse` đọc XML; đuôi file lấy từ `file_name` khi URL không có (`JsonPost.ext`); URL tương đối; không giới hạn độ sâu (`MAX_PAGES = 0`).
+  - Mẫu `HTML_EXAMPLE` (tham khảo `template_html` cho AI) cho site HTML có trang danh sách đủ thông tin. Engine `shimmie` không có API và `custom` trỏ AI tới mẫu này.
+- **Lỗi phát hiện khi chạy thật:** Shimmie đặt thuộc tính XML trong nháy đơn (`count='5986'`), regex chỉ nhận nháy kép. Đã sửa nhận diện engine, đọc XML và chọn tag; site giả trong test đổi sang nháy đơn như thật.
+- **Lỗi phát hiện khi viết test:** `ItemInfo.ext` bị ghi đè bằng chuỗi rỗng khi URL không có đuôi; nay lấy từ `ext=""` của item.
+- **Kiểm chứng:**
+  - `test_extgen`: 34 test (thêm Shimmie qua sandbox, nhận diện `shimmie_api`, 3 test âm thanh: loại, `-skip_aud`, thư mục `-audsub`, ảnh xem trước).
+  - Self-test Electron thêm bước `audioArgs`.
+  - Chạy thật chế độ không AI trên shimmie.shishnet.org: đạt, tag "poly" 7 bài, 3 link, 10 request (crawl-delay 3 s được tôn trọng).
+
+### 7q. Cải tiến UX sau khi rà app — 2026-11-17
+- **Rà app** trên UI mock (1360×860 và kích thước tối thiểu 1080×680), đối chiếu với code. Đã sửa 7 điểm:
+  1. **Thanh tìm kiếm:** các nút gom thành nhóm `.search-actions`, xuống hàng hai khi hẹp; ô nhập tag giữ trọn hàng đầu (trước đây bị bóp, chữ gợi ý bị cắt).
+  2. **Khung "Bộ lọc & tuỳ chọn tải":** nhớ trạng thái đóng / mở (`search.filtersOpen`); khi đóng hiện tóm tắt (loại media, khoảng ngày, giới hạn, số luồng, giới tính, bỏ file đã tải, ảnh nhẹ).
+  3. **Job trùng:** main từ chối job giống hệt (cùng tham số) một job đang chờ / chạy (`DUPLICATE: …`); renderer hỏi rồi mới gửi lại với `allowDuplicate`.
+  4. **Trang Tải xuống:**
+     - lõi đếm `bytes_received` (ghi theo từng khối) và gửi `bytes` trong `@@LUSTRA_PROGRESS`; app hiện dung lượng, tốc độ (~6 s gần nhất) và thời gian còn lại;
+     - nút **Chạy lại** (`jobs:rerun`, truy vấn lưu ở main, không đưa ra renderer);
+     - thông báo hệ điều hành khi job xong / lỗi lúc cửa sổ không được focus (`download.notify`).
+  5. **Huy hiệu nguồn gốc** trên thẻ extension (rule R13): `ExtensionManifest.generator` lấy từ `$generator`, chỉ giữ khoá đã biết và chuỗi ≤ 80 ký tự; hiện "AI" / "template" / "extgen" kèm chú thích model, engine, ngày.
+  6. **Lý do từ chối bằng tiếng Việt** (`RULE_VI`, `refusal_text`), chi tiết kỹ thuật tiếng Anh của lõi để sau.
+  7. **Cài đặt:** mục lục theo tiêu đề các khung; nhãn ngắn ("Thư mục") không còn xuống dòng, ô đường dẫn co lại thay.
+- **Kiểm chứng:**
+  - 201 test + `tests.py` đạt; ruff, `node --check` sạch.
+  - Self-test Electron thêm `duplicateJobs` (không spawn tiến trình nào: `pump` tắt trong lúc kiểm): job trùng bị từ chối, `allowDuplicate` thêm được, chạy lại job trùng bị hỏi, chạy lại sau khi huỷ thì được, `query` không lộ ra renderer.
+  - UI mock ở 1080×680: thanh tìm kiếm 2 hàng; tóm tắt bộ lọc khi đóng; hỏi trước khi thêm job trùng; job đang chạy hiện "71.3 MB · 21.5 MB/s · còn < 1 phút"; nút Chạy lại; mục lục Cài đặt; huy hiệu "AI" sau khi cài bản nháp; không có lỗi console.
+- **Chưa kiểm:** thông báo hệ điều hành trên desktop thật (xvfb không có notification daemon).
+
+### 7r. Đã tải, Preview đa phương tiện, lịch tự tải, bản mới extension, sửa bản nháp bằng AI — 2026-11-17
+- **Asset cũ của Ruxx:**
+  - Xoá `images/8_256.ico` và `images/8_32.ico` (icon cáo của Ruxx).
+  - Bản build CLI dùng `images/lustra.ico` (icon mặt nạ cam ở 7 cỡ, 16–256 px).
+  - Icon cửa sổ GUI Tk (`IMG_PROC_LUSTRA_DATA`, trước là GIF của Ruxx) đổi sang icon Lustra 64 px.
+  - Favicon từng site (`IMG_PROC_RX_DATA`…) giữ nguyên.
+- **Báo bản mới của extension:**
+  - `ext.list` trả `catalogVersion` / `updateAvailable` (`version_newer`, so từng phần số).
+  - Thẻ có huy hiệu và nút "Cập nhật lên vX"; mục Extensions có số; hiện 1 thông báo cho mỗi bộ phiên bản.
+  - Catalog từ xa so với bản đã cài cùng id.
+- **Preview:**
+  - Chip lọc Ảnh / Video / Âm thanh; "Chọn hết" chỉ chọn post đang hiện.
+  - Huy hiệu "✓ đã tải" (`_mark_downloaded`: `DownloadIndex.find_known` theo id + md5).
+  - Lightbox phát video / âm thanh qua `lustra-thumb://m/`: stream, chuyển tiếp `Range`, chỉ `video/*` `audio/*`, địa chỉ công khai, không cache; preview item có thêm `file` và `md5`.
+- **Trang "Đã tải":**
+  - `index.search` với ô tag, module, khoảng ngày, 6 kiểu sắp xếp, phân trang.
+  - Ảnh hiện thẳng từ đĩa (`file://`, có ô thay thế khi lỗi); file đã mất được làm mờ.
+  - Xem chi tiết phát được video / âm thanh; bấm tag để tìm tiếp.
+  - Main có `library:open` (chỉ đuôi media) và `library:reveal`.
+- **Lịch tự tải lại truy vấn đã lưu:**
+  - Lõi ghi `max_item_id` (mỗi item xử lý, và `-get_maxid`), gửi `maxId` trong dòng DONE.
+  - Main có `saved:auto` (chu kỳ; mốc "từ bây giờ" lấy bằng `-get_maxid`), lập lịch mỗi 5 phút, job `Tự cập nhật: …` với `-skip_known` + `id:>maxId`.
+  - Trạng thái lần chạy do main giữ, không bị bản ghi cũ từ renderer ghi đè (`mergeAutoRuntime`).
+- **Sửa bằng AI:**
+  - `GenRequest.repair`: chép bản nháp cũ sang phiên mới (bản cũ giữ nguyên), tin nhắn đầu gồm tóm tắt + các kiểm tra lỗi (đánh dấu là dữ liệu không tin cậy).
+  - Nút "Sửa bằng AI" cho bản nháp chưa đạt; `report.json` có `repairOf`.
+- **Kiểm chứng:**
+  - 204 test + `tests.py` đạt (thêm test phiên sửa bản nháp, so phiên bản, bản mới trong catalog); ruff, `node --check` sạch.
+  - Lần chạy đầu tiên của toàn bộ suite báo 1 lỗi, nhưng 4 lần chạy lại liên tiếp (thư mục dữ liệu mới) đều đạt. Chưa tìm ra test nào: có thể là test chập chờn theo thời gian, cần để ý.
+  - Self-test Electron thêm `libraryFiles` (trang `file://` hiện được ảnh trên đĩa, tên có dấu cách; "Mở file" từ chối `.desktop`) và `savedAuto` (bật, giữ trạng thái khi renderer ghi đè, tắt, chu kỳ sai bị từ chối). Các bước cũ vẫn đạt.
+  - `-get_maxid` thật trên Danbooru trả `maxId` 12565561.
+  - UI mock: chip loại, huy hiệu đã tải, lightbox âm thanh, trang Đã tải, hộp đặt lịch, nút Sửa bằng AI.
+- **Chưa kiểm:**
+  - phát video / âm thanh qua `lustra-thumb://m/` với site thật;
+  - job tự cập nhật chạy thật theo lịch (self-test tắt bộ lập lịch);
+  - "Sửa bằng AI" với Claude thật.
+
+### 7s. Lọc giới tính: chế độ "Loại bỏ" — 2026-11-17
+- **Yêu cầu:** lọc theo kiểu "robot, bỏ male-only", tức chỉ còn robot cả hai giới hoặc chỉ nữ. Bộ lọc tầng 0 đã làm được việc này bằng cách chọn nhóm được giữ (Chỉ nữ + Cả hai), nay thêm cách nói trực tiếp.
+- **Lõi / CLI:** `-gender_exclude LABEL[,LABEL…]` giữ mọi nhãn trừ các nhãn này. Bỏ hết 5 nhãn bị từ chối ngay lúc đọc tham số. Đi cùng `-gender` thì là các nhãn của `-gender` trừ đi.
+- **App:**
+  - Nút gạt **Giữ / Loại bỏ** trước các nút nhãn (`download.gender.op`, mặc định Giữ). Ở chế độ Loại bỏ, nhãn được chọn có viền đỏ, gạch ngang; gợi ý "loại: chỉ nam".
+  - Đổi chế độ thì các nút đổi sang phần bù, nên kết quả lọc giữ nguyên. Không cho chọn bỏ hết các nhãn.
+  - Main gửi `-gender_exclude` cho chế độ Loại bỏ.
+- **Kiểm chứng:**
+  - Test `test_exclude_labels`: `-gender_exclude only_male` → giữ only_female, both, none, unknown; kết hợp với `-gender`; bỏ hết → lỗi tham số.
+  - Self-test `genderArgs`.
+  - Chạy thử trên Danbooru với tag `robot`: 1girl giữ, 1boy loại, 1girl+1boy giữ.
+  - 205 test + `tests.py` đạt; UI mock: nút gạt, kiểu hiển thị và đổi chế độ đúng.
+
+### 7t. Lọc giới tính tầng 1: model nhận diện bằng ảnh — 2026-11-17
+- **Yêu cầu:** post thiếu tag giới tính (`unknown` hoặc tag yếu) vẫn lọc được, ví dụ "robot, bỏ male-only" trên site tag nghèo. Đồng thời xác nhận chế độ Loại bỏ chỉ bỏ nhãn được chọn: `-gender_exclude only_male` giữ only_female, both, none (kể cả `no_humans`) và unknown.
+- **Lõi:** `lustra/gender_model.py` (phương án A0 của plan): WD tagger v3 ViT (SmilingWolf, Apache-2.0), revision ghim, ONNX trên CPU. Tag đoán ra đi qua bộ luật `db` của tầng 0, gộp với nhãn từ tag (`combine`, plan §3.4), safety gate bằng `blocked_tag` ở ngưỡng 0,15, ảnh người thật (`photo_(medium)`) → unknown. Cache kết quả SQLite, không lưu ảnh. `_filter_items_by_gender` tính tầng 0 cho mọi post trước, gửi post chưa rõ cho model một lượt (`_gender_model_verdicts`), post bị safety gate chặn tính vào `blocked`. `-gender_mode model` kiểm model đã tải và đủ gói, nếu không thì dừng với hướng dẫn. Dòng DONE có `genderModel`.
+- **Sidecar / app:** preview cho model xem tối đa 40 post chưa rõ mỗi trang (`genderModel` trong kết quả, tooltip card ghi "từ ảnh (model)"). RPC `gender.modelStatus/Install/Remove`, tiến độ `gender.modelProgress`. Cài đặt → Model nhận diện giới tính: trạng thái, tải (hộp xác nhận native ở main, ghi nguồn, giấy phép, revision), xoá. Lựa chọn "Tag + model (ảnh)" trong bộ lọc chỉ bật khi đã có model; `download.gender.mode` → `-gender_mode model`.
+- **Đóng gói:** extra `lustra[model]` (numpy, onnxruntime, pillow); `tools/build_core.py` kèm onnxruntime khi có đủ gói. Model không kèm trong bản build.
+- **Kiểm chứng:**
+  - Test mới: `classify` (nhãn, độ tin cậy, video, safety gate, ảnh thật), `combine` / `needs_model`, model trong bộ lọc tải (model giả: chỉ post chưa rõ được gửi, post bị chặn bị bỏ), model thật trên icon app (chạy khi có `LUSTRA_GENDER_MODEL_DIR`). 209 test đạt (1 bỏ qua khi không có model).
+  - Model thật: 20/20 ảnh mẫu Danbooru khớp nhãn tag; thumbnail 18/20 (2 ca lệch ở mức low). ~0,4 s/ảnh trên CPU. Safety gate chặn 1 post có tag cấm mà tag gốc không có.
+  - CLI Xbooru `scenery -gender only_female,both -gender_mode model -dlimit 5`: model xem 4/42 post thiếu tag, gán nhãn cả 4 (3 only_female high, 1 none high).
+  - Self-test Electron (`genderArgs.model`, `genderModel` qua RPC được phép) và UI mock (panel Cài đặt, tiến độ tải, bật lựa chọn sau khi tải).
+- **Chưa làm:** tập vàng và đo precision theo plan §7, head A1 / int8, catalog model, video nhiều khung (P4).
+
+### 7u. Model nhận diện giới tính chuyển thành model server (API) — 2026-11-17
+- **Yêu cầu:** app nhẹ nhất có thể và dễ build: model thành API để app gọi, không đóng gói model hay onnxruntime vào app.
+- **Model server** `lustra/model_server.py` (stdlib `ThreadingHTTPServer`): `GET /v1/status`, `POST /v1/tag` (bytes ảnh → tag + xác suất). Token Bearer bắt buộc khi lắng nghe ngoài loopback, giới hạn 12 MB và 40 triệu pixel, `--workers`, 503 khi bận, lần đầu tự tải model. Chạy bằng `python -m lustra.model_server`, unit systemd user `tools/systemd/lustra-model-server.service`, hoặc Docker `tools/model_server/Dockerfile` (+ `.dockerignore`: chỉ gửi gói `lustra`).
+- **Client trong lõi** (`gender_model.py`): `ModelApi`, `backend()` (server nếu có địa chỉ, nếu không thì ONNX trong tiến trình), `check_api_url` (http chỉ cho máy này / mạng nội bộ), cache kết quả theo id model của server. Server không dùng được thì job dừng với lỗi thay vì để mọi post thành unknown. CLI `-gender_model_url`, `-gender_model_token` (ẩn trong log như `-api_key`), biến `LUSTRA_GENDER_MODEL_URL` / `LUSTRA_GENDER_MODEL_TOKEN`. Đường API không import numpy / onnxruntime / Pillow.
+- **App:** Cài đặt → Model nhận diện giới tính: địa chỉ API (`genderModel.url`, mặc định `http://127.0.0.1:8765`), token (secret `@gendermodel`, mã hoá bằng keyring, không tới renderer, đưa cho lõi qua `LUSTRA_SECRET_ARGS` / tham số RPC), nút Kiểm tra, cảnh báo khi ảnh được gửi tới máy khác. `gmodel:status` thay cho RPC trực tiếp; bỏ nút tải / xoá model và RPC `gender.modelInstall/Remove`. Mã spec của tầng 1 đổi thành F-21 (F-20 bị trùng).
+- **Build:** `tools/build_core.py` luôn loại numpy, onnxruntime, PIL, `lustra.model_server`; smoke test thêm bước client model server.
+- **Kiểm chứng:**
+  - `test_model_server` (11 test, server thật trên cổng ngẫu nhiên với model giả): kiểm địa chỉ, bind cần token, token sai / thiếu, 404 / 405 / 411 / 413, ảnh hỏng, cache theo id model, server sập thì dừng, client chạy khi chặn import numpy / onnxruntime / PIL, tham số CLI. Bộ test offline: 220 đạt.
+  - Lõi đóng băng build lại: 51,4 MiB, không có onnxruntime / numpy / Pillow, smoke test đạt.
+  - Docker: image ~418 MB (chưa gồm model); không có token thì từ chối chạy (exit 2); có token: 401 khi thiếu token. Lõi đóng băng chạy Xbooru `scenery -gender only_female,both -gender_mode model` qua container: model xem 4 post thiếu tag, gán nhãn cả 4 (3 only_female high, 1 none high), giống khi chạy trong tiến trình.
+  - Preview qua sidecar (Danbooru `robot rating:g`, `-gender_conf high`): model xem 2 post tag yếu, gán nhãn cả 2.
+  - Self-test Electron (`genderArgs.model` có `-gender_model_url`; `genderModel`: token không tới renderer, renderer không gọi thẳng RPC, tham số bí mật đúng) và UI mock (kiểm tra, server không phản hồi, địa chỉ LAN, token, tắt khi xoá địa chỉ).
+
+### 7v. Model: bật / tắt trong app, kiểm tra GPU / VRAM trước khi bật, hướng dẫn chung — 2026-11-17
+- **Yêu cầu:** có công tắc bật / tắt model trong app; trước khi bật thì kiểm tra VRAM, không có VRAM thì cảnh báo khuyên tắt, kèm hướng dẫn chung.
+- **Hiện trạng trước khi sửa:** model (WD ViT Tagger v3) luôn chạy trên CPU (`providers=['CPUExecutionProvider']`), không dùng VRAM kể cả khi có GPU. Máy dev có RTX 4070 Ti SUPER 16 GB nhưng onnxruntime trong `.venv` là bản CPU.
+- **`lustra/model_hw.py`** (mới): `detect_hardware()` đọc GPU và VRAM (NVIDIA qua `nvidia-smi`, AMD / Intel trên Linux qua sysfs), provider của onnxruntime, RAM. `hardware_check()` trả `gpu` / `no_gpu` / `gpu_no_runtime` / `vram_low` / `gpu_fallback` / `unknown`. Cần VRAM trống ≥ 1 GB; GPU tích hợp (dùng chung RAM, hoặc VRAM < 1 GB như iGPU Raphael 512 MB) không tính.
+- **Model chạy trên GPU khi có thể:** `GenderTagger(folder, device)` chọn provider GPU đầu tiên onnxruntime có (CUDA, ROCm, MIGraphX, DirectML), ghi `device` theo provider thật sự nạp được (rơi về CPU thì `cpu`). `--device` / `LUSTRA_GENDER_MODEL_DEVICE`: `auto`, `cpu`, `gpu`. Gọi `onnxruntime.preload_dlls()` cho bản `onnxruntime-gpu[cuda,cudnn]`. Ảnh hỏng → `BadImage` (400), lỗi của runtime (ví dụ hết VRAM) → 500, client dừng job thay vì coi là ảnh hỏng.
+- **Server nạp lười, tự giải phóng:** model nạp khi có ảnh đầu tiên, khi gọi `POST /v1/load` hoặc với `--preload`; `POST /v1/unload` và `--idle-unload` (mặc định 900 s) giải phóng (`gc` + `malloc_trim`). `/v1/status` thêm `loaded`, `device`, `idleUnload`, `hardware`. Client chỉ thử lại 503 khi lỗi là `busy`; lỗi kèm lý do từ server (`HTTP 503: no GPU runtime …`).
+- **App:** công tắc **Dùng model** (`genderModel.enabled`, mặc định tắt; tắt thì main không truyền `-gender_mode model` hay token). Bật: `gmodel:status` → hộp cảnh báo theo `check.code` (Hướng dẫn / Vẫn bật (chạy bằng CPU) / Để tắt; server không kết nối được thì chỉ Hướng dẫn / Đóng) → `gmodel:load` (nạp ngay, báo chạy bằng GPU hay CPU). Tắt: bộ lọc về "Tag", `gmodel:unload` khi server ở máy này. Dòng "Phần cứng của server" và khung cảnh báo trong panel. Hướng dẫn chung `app/renderer/guide.js` (7 mục: model làm gì, phần cứng, bật / tắt, chạy server, dùng GPU, quyền riêng tư, sự cố; lệnh có nút Chép), mở từ nút Hướng dẫn và nhảy tới mục liên quan tới cảnh báo. RPC mới `gender.modelLoad`, `gender.modelUnload` (renderer không gọi thẳng được).
+- **Kiểm chứng:**
+  - `test_model_server`: 20 test (thêm phát hiện GPU từ `nvidia-smi` / sysfs giả, 9 trường hợp `hardware_check`, chọn GPU / CPU với onnxruntime giả, nạp lười / unload / tự giải phóng, lỗi nạp không bị thử lại, lỗi model là 500, RPC). Bộ test offline trong docs/operations.md: 229 đạt, ruff sạch.
+  - Server thật (systemd) trên máy dev: chưa nạp 62 MB RAM → nạp trên CPU 583 MB (0,64 s) → sau 1 ảnh 652 MB → unload 81 MB. Status báo `gpu_no_runtime` (RTX 4070 Ti SUPER 16 GB, onnxruntime 1.32.0 bản CPU).
+  - Lõi đóng băng build lại: vẫn 51,4 MiB, có `model_hw`, smoke test đạt, gọi `gender.modelStatus` / `gender.modelUnload` tới server thật.
+  - Self-test Electron: `genderArgs` (bật → có `-gender_mode model`, tắt → không), `genderModel` (có `check`, unload qua main → sidecar → server, 3 RPC bị chặn từ renderer, token không tới renderer, tắt thì không đưa token).
+  - UI mock: không GPU → cảnh báo "Máy chạy model không có VRAM", "Vẫn bật" → chạy bằng CPU, "Để tắt" giữ tắt, tắt → bộ lọc về Tag và giải phóng; có GPU + CUDA → bật thẳng, báo "chạy bằng GPU (CUDA)"; có GPU nhưng onnxruntime bản CPU → cảnh báo riêng, Hướng dẫn nhảy tới "Dùng GPU"; server không chạy → không bật được.
+  - Chưa thử: đường GPU thật (cần cài `onnxruntime-gpu[cuda,cudnn]`, ~2 GB), ROCm / DirectML.
+
+### 7w. Model chạy trên GPU (onnxruntime-gpu), tiến trình con, bỏ trễ Nagle — 2026-11-17
+- **Cài:** `.venv` đổi `onnxruntime` 1.32.0 sang `onnxruntime-gpu[cuda,cudnn]` 1.32.0 (CUDA 13.5, cuDNN 9.28 từ các gói `nvidia-*`; `.venv` 227 MB → 2,6 GB). Driver 580.178 (CUDA 13.0) chạy được. Extra mới `.[model-gpu]` trong `pyproject.toml`.
+- **Đo (RTX 4070 Ti SUPER, icon Lustra):** riêng model 8,1 ms / ảnh trên GPU so với 323 ms trên CPU; mỗi ảnh tính cả giải mã 17 ms so với 335 ms; VRAM 1258 MiB; xác suất lệch tối đa 0,00086, nhãn như nhau. `VRAM_MIN_MIB` nâng từ 1024 lên 1536 theo số đo. Cảnh báo "Memcpy nodes" của onnxruntime bị tắt (`log_severity_level = 3`).
+- **Vấn đề 1, tắt không giải phóng trên GPU:** bỏ session trong cùng tiến trình vẫn để lại 675 MB RAM (RssAnon) và 224 MiB VRAM (CUDA context, bộ đệm cuDNN / cuBLAS). Sửa: model chạy trong tiến trình con `ModelProcess` (multiprocessing `spawn`, pipe, thread pool theo `--workers`). Tắt thì tiến trình con thoát sau khi các ảnh đang xử lý xong; tiến trình con chết thì thử lại ảnh một lần với tiến trình mới. Sau khi sửa: server chưa nạp 30 MB, giải phóng xong VRAM 0 và tiến trình con không còn.
+- **Vấn đề 2, ~40 ms thừa mỗi ảnh qua HTTP** (59 ms so với 17 ms trong tiến trình): header và body là hai lần ghi, Nagle cộng delayed ACK. Sửa: `disable_nagle_algorithm = True`. Sau khi sửa: 18 ms / ảnh, 2 luồng 10 ms / ảnh.
+- **Vấn đề 3:** `--device cpu` trên máy có GPU bị app báo `gpu_fallback` ("thiếu CUDA / cuDNN"). Sửa: status có `deviceSetting`, mã mới `cpu_forced` với lời khuyên bỏ tuỳ chọn.
+- **Kiểm chứng:** `test_model_server` 23 test (thêm tiến trình con: đa luồng, ảnh hỏng, lỗi nạp, tiến trình chết rồi nạp lại, 500 khi model lỗi, tắt thì tiến trình thoát; `cpu_forced`; `deviceSetting`). Bộ test offline có model thật (`LUSTRA_GENDER_MODEL_DIR`): 232 đạt, không bỏ qua test nào. Server systemd thật: `check: gpu`, nạp trên CUDA 0,7 s; `--device cpu` / `--device gpu --preload` trên cổng phụ đúng như mong đợi. Preview Danbooru qua sidecar (`robot rating:g`, `-gender_conf high`): server tự nạp model trên CUDA, model xem 3 post, gán nhãn cả 3. Self-test Electron: `check: gpu`, unload qua main.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-17)
+- Đã xong, không còn là việc tiếp theo: đóng gói app (electron-builder, AppImage, lõi PyInstaller: đợt D), phân trang con trỏ cho Danbooru (đợt C), giai đoạn 2 của plan search-engine (đợt D).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
-- Đóng gói app (electron-builder + Python embed hoặc PyInstaller sidecar).
-- Hook phân trang theo con trỏ cho Danbooru (vượt giới hạn 1000 trang).
+- Còn lại: model server chạy độc lập cho người dùng không có mã nguồn; tập đo độ chính xác của model giới tính; video nhiều khung; index (dọn, nhập thư viện, re-tag, đa site); extension (denylist domain, eval, ký catalog, `lustra.sdk`); build Windows / macOS.

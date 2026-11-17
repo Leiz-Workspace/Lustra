@@ -169,7 +169,7 @@ const S = {
   chips: [], chipSeq: 0, selected: new Set(),
   // moved: the user picked a suggestion with the arrow keys (only then Enter takes a suggestion instead of the typed text)
   ac: { items: [], index: -1, seq: 0, moved: false, fuzzy: false },
-  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', showExcluded: false, seq: 0, hasMore: true },
+  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', showExcluded: false, seq: 0, hasMore: true, kind: 'all' },
   countSeq: 0,
   tagLists: null, // modules that have a local tag list (tags.status), null until known
   jobs: new Map(),
@@ -209,6 +209,7 @@ function showPage(name) {
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${name}`));
   if (name === 'tags') refreshTagStatus();
   if (name === 'settings') refreshIndexStats();
+  if (name === 'library') openLibrary();
   if (name === 'extensions') renderExtensions();
   if (name === 'log') showLogPage();
   if (name === 'downloads') jobViews.forEach((v) => v.logView?.reveal());
@@ -241,6 +242,14 @@ async function loadModules() {
   }
   const installed = S.modules.filter((m) => m.installed);
   if (!installed.some((m) => m.abbr === S.module)) S.module = installed[0]?.abbr || 'rx';
+  const updates = S.modules.filter((m) => m.updateAvailable);
+  setHidden($('#badge-ext'), !updates.length);
+  setText($('#badge-ext'), String(updates.length));
+  const key = updates.map((m) => `${m.id}@${m.catalogVersion}`).join(',');
+  if (key && key !== S.updatesNotified) { // once per set of versions, not on every reload of the list
+    S.updatesNotified = key;
+    toast(`Có bản mới cho ${updates.map((m) => `${m.name} (v${m.catalogVersion})`).join(', ')}: xem trang Extensions`, 'ok');
+  }
   renderModuleButton();
   if (S.settings) { renderApiKeys(); renderTagLimits(); }
 }
@@ -257,6 +266,7 @@ function renderModuleButton() {
   $('#module-abbr').textContent = S.module;
   $('#module-name').textContent = m?.name || S.module;
   $('#f-vformat-wrap').hidden = !hasCap(S.module, 'videoFormat');
+  $('#f-audio-wrap').hidden = !(moduleInfo(S.module)?.media || []).includes('audio');
   $('#f-parchi-wrap').hidden = !hasCap(S.module, 'parchi');
   renderGenderFilter();
 }
@@ -264,18 +274,29 @@ function renderModuleButton() {
 // ---------------- gender filter (tier 0: tags) ----------------
 function genderState() {
   const g = S.settings?.download?.gender || {};
-  return { select: Array.isArray(g.select) ? g.select : [], conf: g.conf || 'medium', strict: !!g.strict };
+  return { select: Array.isArray(g.select) ? g.select : [], conf: g.conf || 'medium', strict: !!g.strict, op: g.op === 'exclude' ? 'exclude' : 'keep',
+    mode: g.mode === 'model' ? 'model' : 'tags' };
 }
 function renderGenderFilter() {
   if (!S.settings) return;
   const g = genderState();
-  $$('#f-gender .pill').forEach((b) => b.classList.toggle('on', g.select.includes(b.dataset.g)));
+  const ex = g.op === 'exclude';
+  $$('#f-gender .pill').forEach((b) => { b.classList.toggle('on', g.select.includes(b.dataset.g)); b.classList.toggle('ex', ex); });
+  $$('#f-gender-op button').forEach((b) => b.classList.toggle('on', b.dataset.op === g.op));
   $('#f-gender-conf').value = g.conf;
+  $('#f-gender-mode').value = g.mode;
   $('#f-gender-strict').checked = g.strict;
   const hint = [];
-  if (g.select.length) hint.push('đang bật: danh sách chặn an toàn cũng được áp dụng');
+  if (g.select.length) hint.push(`${ex ? 'loại' : 'giữ'}: ${genderPicked(g)}`);
+  if (g.select.length) hint.push('danh sách chặn an toàn cũng được áp dụng');
   if (g.select.length && !hasCap(S.module, 'gender')) hint.push(`${S.module.toUpperCase()} ít tag giới tính, phần lớn post sẽ là "Không rõ"`);
   $('#f-gender-hint').textContent = hint.join(' · ');
+}
+// pills as words: 'Không rõ / không có' stands for both 'none' and 'unknown'
+const GENDER_ALL = ['only_female', 'only_male', 'both', 'none', 'unknown'];
+function genderPicked(g) {
+  const names = { only_female: 'chỉ nữ', only_male: 'chỉ nam', both: 'cả hai', unknown: 'không rõ / không có' };
+  return [...new Set(g.select.map((x) => (x === 'none' ? 'unknown' : x)))].map((x) => names[x] || x).join(', ');
 }
 function saveGender(patch) {
   const g = { ...genderState(), ...patch };
@@ -287,12 +308,34 @@ $('#f-gender').addEventListener('click', (e) => {
   const b = e.target.closest('.pill');
   if (!b) return;
   const labels = b.dataset.g === 'unknown' ? ['none', 'unknown'] : [b.dataset.g];
-  const sel = new Set(genderState().select);
+  const g = genderState();
+  const sel = new Set(g.select);
   const on = labels.every((l) => sel.has(l));
   labels.forEach((l) => (on ? sel.delete(l) : sel.add(l)));
+  if (g.op === 'exclude' && sel.size >= GENDER_ALL.length) { toast('Loại bỏ mọi nhóm thì không còn post nào', 'err'); return; }
   saveGender({ select: [...sel] });
 });
+$('#f-gender-op').addEventListener('click', (e) => {
+  const op = e.target.closest('button')?.dataset.op;
+  const g = genderState();
+  if (!op || op === g.op) return;
+  // same filter, other wording: the picked groups become the other groups (none + unknown stay together)
+  const picked = new Set(g.select);
+  const select = g.select.length ? GENDER_ALL.filter((l) => !picked.has(l)) : [];
+  saveGender({ op, select: select.length >= GENDER_ALL.length ? [] : select });
+});
 $('#f-gender-conf').addEventListener('change', (e) => saveGender({ conf: e.target.value }));
+$('#f-gender-mode').addEventListener('change', (e) => {
+  if (e.target.value === 'model' && !gmOn()) {
+    e.target.value = 'tags';
+    toast('Model nhận diện đang tắt: bật ở Cài đặt → Model nhận diện giới tính', 'err');
+    return;
+  }
+  if (e.target.value === 'model' && S.genderModel && !S.genderModel.reachable) {
+    toast(`Model server chưa phản hồi (${S.genderModel.error || S.settings.genderModel.url}): preview và job sẽ báo lỗi cho tới khi server chạy`, 'err');
+  }
+  saveGender({ mode: e.target.value });
+});
 $('#f-gender-strict').addEventListener('change', (e) => saveGender({ strict: e.target.checked }));
 function renderModuleMenu() {
   const menu = $('#module-menu');
@@ -808,9 +851,35 @@ function currentQuery() {
     gender: genderState(),
   };
 }
+// closed filters panel: one line summary of what differs from "everything" (media, dates, limit, gender...)
+function filtersSummary() {
+  const o = downloadOptions();
+  const q = { dateMin: $('#f-datemin').value, dateMax: $('#f-datemax').value };
+  const media = [o.images && 'ảnh', o.videos && 'video', !$('#f-audio-wrap').hidden && o.audio && 'âm thanh'].filter(Boolean);
+  const g = genderState();
+  const fmt = (d) => d.split('-').reverse().join('/');
+  const parts = [
+    media.length ? media.join(' + ') : 'không tải loại nào',
+    q.dateMin || q.dateMax ? `${q.dateMin ? fmt(q.dateMin) : '…'} → ${q.dateMax ? fmt(q.dateMax) : '…'}` : '',
+    o.limit ? `tối đa ${o.limit} post` : '',
+    `${o.threads} luồng`,
+    g.select.length ? `giới tính ${g.op === 'exclude' ? 'bỏ' : 'giữ'}: ${genderPicked(g)}` : '',
+    o.skipKnown ? 'bỏ file đã tải' : '',
+    o.lowRes ? 'ảnh nhẹ' : '',
+  ].filter(Boolean);
+  $('#filters-sum').textContent = `· ${parts.join(' · ')}`;
+}
+$('#filters').addEventListener('toggle', () => {
+  filtersSummary();
+  if (S.settings && S.settings.search.filtersOpen !== $('#filters').open) saveSettings({ search: { filtersOpen: $('#filters').open } });
+});
+$('#filters').addEventListener('change', filtersSummary);
+$('#filters').addEventListener('click', () => requestAnimationFrame(filtersSummary)); // gender pills are buttons
+
 function downloadOptions() {
   return {
-    images: $('#f-images').checked, videos: $('#f-videos').checked, videoFormat: $('#f-vformat').value, lowRes: $('#f-lowres').checked,
+    images: $('#f-images').checked, videos: $('#f-videos').checked, audio: $('#f-audio').checked, videoFormat: $('#f-vformat').value,
+    lowRes: $('#f-lowres').checked,
     threads: Number($('#f-threads').value) || 4, limit: Number($('#f-limit').value) || 0, reverse: $('#f-order').value === 'desc',
     parchi: $('#f-parchi').checked, skipKnown: $('#f-skip-known').checked,
   };
@@ -859,7 +928,7 @@ async function runPreview(page = 0) {
     const r = await L.search.preview(q, page);
     if (seq !== S.preview.seq) return;
     Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, required: r.requiredTags || [], tasks: r.tasks || [],
-      genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled,
+      genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled, genderModel: r.genderModel || {},
       pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean' });
     S.preview.selected.clear();
     renderGrid();
@@ -877,9 +946,29 @@ $('#pg-next').addEventListener('click', () => { if (S.preview.hasMore) runPrevie
 $('#pv-size').addEventListener('change', () => { if (S.preview.tags && S.preview.tags === queryString()) runPreview(0); });
 $('#show-excluded').addEventListener('change', (e) => { S.preview.showExcluded = e.target.checked; renderGrid(); });
 
+// posts of the page shown in the grid: local filters (unless shown) and the kind chip (image / video / audio)
+function visibleItems() {
+  const P = S.preview;
+  return P.items.filter((it) => (P.showExcluded || !it.excluded) && (P.kind === 'all' || (it.mediaKind || (it.isVideo ? 'video' : 'image')) === P.kind));
+}
+const KIND_VI = { all: 'Tất cả', image: 'Ảnh', video: 'Video', audio: 'Âm thanh' };
+function renderKindFilter() {
+  const P = S.preview;
+  const counts = { image: 0, video: 0, audio: 0 };
+  for (const it of P.items) if (P.showExcluded || !it.excluded) counts[it.mediaKind || (it.isVideo ? 'video' : 'image')] += 1;
+  const kinds = Object.keys(counts).filter((k) => counts[k] > 0);
+  if (P.kind !== 'all' && !counts[P.kind]) P.kind = 'all';
+  const box = $('#kind-filter');
+  box.hidden = kinds.length < 2; // one kind only: nothing to choose
+  box.replaceChildren(...['all', ...kinds].map((k) => h('button', {
+    class: P.kind === k ? 'on' : '', title: `Chỉ hiện ${KIND_VI[k].toLowerCase()} trên trang này`,
+    onclick: () => { P.kind = k; renderGrid(); },
+  }, k === 'all' ? KIND_VI.all : `${KIND_VI[k]} ${counts[k]}`)));
+}
 function renderGrid() {
   const P = S.preview;
-  const items = P.items.filter((it) => P.showExcluded || !it.excluded);
+  renderKindFilter();
+  const items = visibleItems();
   const hidden = P.items.length - items.length;
   // merged multi-task pages hold up to pageSize posts of every sub-query
   const size = !P.pageSize ? '' : P.merged && P.tasks?.length > 1 ? ` (${P.pageSize}/trang mỗi truy vấn con)` : ` (tối đa ${P.pageSize}/trang)`;
@@ -893,6 +982,9 @@ function renderGrid() {
     if (unknown) parts.push(`${unknown} không rõ`);
     if (P.blockedCount) parts.push(`${P.blockedCount} bị chặn (an toàn)`);
     if (P.hiddenNoTags) parts.push(`${P.hiddenNoTags} ẩn vì site không trả tag để kiểm tra`);
+    const gm = P.genderModel || {};
+    if (gm.error) parts.push(`model: ${gm.error}`);
+    else if (gm.checked) parts.push(`model xem ${gm.checked} post chưa rõ, gán nhãn ${gm.labeled}${gm.skipped ? `, ${gm.skipped} post còn lại chưa xem` : ''}`);
   }
   if (hidden) parts.push('post bị lọc đang ẩn');
   if (P.required?.length) parts.push(`tag kiểm tra cục bộ: ${P.required.join(', ')}`);
@@ -910,11 +1002,14 @@ function renderGrid() {
   $('#grid-empty').textContent = 'Không có post nào trên trang này.';
   gridCards.clear();
   $('#grid').replaceChildren(...items.map((it) => {
-    const img = h('img', { loading: 'lazy', alt: '', src: it.preview ? L.thumbUrl(it.preview, P.site) : '' });
+    const audio = it.mediaKind === 'audio';
+    const img = it.preview || !audio ? h('img', { loading: 'lazy', alt: '', src: it.preview ? L.thumbUrl(it.preview, P.site) : '' })
+      : h('div', { class: 'audio-ph', 'aria-hidden': 'true' }, '♪');
     const g = it.gender;
     const why = (it.excludedBy || []).includes('gender') ? 'lọc giới tính' : 'lọc cục bộ';
     const gTitle = g ? `Giới tính: ${GENDER_VI[g.label] || g.label}${g.conf ? ` · tin cậy ${CONF_VI[g.conf]}` : ''}`
-      + `${g.evidence?.length ? ` (${g.evidence.join(', ')})` : ''}${g.flags?.length ? ` · cờ: ${g.flags.join(', ')}` : ''}\n` : '';
+      + `${g.evidence?.length ? ` (${g.evidence.join(', ')})` : ''}${g.flags?.length ? ` · cờ: ${g.flags.join(', ')}` : ''}`
+      + `${g.source === 'model' ? ' · từ ảnh (model)' : g.source === 'tags+model' ? ' · tag + ảnh (model)' : ''}${g.modelSkipped ? ' · model chưa xem' : ''}\n` : '';
     const card = h('div', {
       class: `card ${P.selected.has(it.id) ? 'sel' : ''} ${it.excluded ? 'excluded' : ''}`, 'data-why': why,
       title: gTitle + (it.tags || []).slice(0, 40).join(' '),
@@ -923,6 +1018,8 @@ function renderGrid() {
     }, img, h('span', { class: 'tick' }, '✓'),
     h('div', { class: 'badges' },
       it.isVideo ? h('span', { class: 'b vid' }, '▶ video') : null,
+      audio ? h('span', { class: 'b vid' }, '♪ âm thanh') : null,
+      it.downloaded ? h('span', { class: 'b done', title: it.downloaded === 'md5' ? 'Đã tải (cùng file, có thể từ site khác)' : 'Đã tải' }, '✓ đã tải') : null,
       it.ext ? h('span', { class: 'b' }, it.ext) : null,
       it.score !== undefined && it.score !== '' ? h('span', { class: 'b' }, `★ ${it.score}`) : null,
       it.rating ? h('span', { class: 'b' }, it.rating) : null,
@@ -956,7 +1053,7 @@ function updateSelButton() {
   b.disabled = n === 0;
   b.textContent = `Tải đã chọn (${n})`;
 }
-$('#sel-all').addEventListener('click', () => { S.preview.items.filter((i) => !i.excluded).forEach((i) => S.preview.selected.add(i.id)); syncSelection(); });
+$('#sel-all').addEventListener('click', () => { visibleItems().filter((i) => !i.excluded).forEach((i) => S.preview.selected.add(i.id)); syncSelection(); });
 $('#sel-none').addEventListener('click', () => { S.preview.selected.clear(); syncSelection(); });
 $('#sel-invert').addEventListener('click', () => {
   S.preview.items.filter((i) => !i.excluded).forEach((i) => (S.preview.selected.has(i.id) ? S.preview.selected.delete(i.id) : S.preview.selected.add(i.id)));
@@ -977,12 +1074,28 @@ $('#dl-selected').addEventListener('click', () => {
   startDownload({ module, tags, label: `${ids.length} post đã chọn từ: ${S.preview.tags}` });
 });
 
-function openLightbox(it) {
+function lightboxMedia(it) {
+  // video / audio play in the app (streamed through main, see streamMedia); images show the sample
+  const kind = it.mediaKind || (it.isVideo ? 'video' : 'image');
+  const site = S.preview.site;
+  const media = it.file || it.sample;
+  if (kind === 'video' && media && L.mediaUrl) {
+    return h('video', { controls: true, autoplay: true, preload: 'metadata', poster: it.preview ? L.thumbUrl(it.preview, site) : null,
+      src: L.mediaUrl(media, site) });
+  }
+  if (kind === 'audio' && media && L.mediaUrl) {
+    return h('div', { class: 'cover' },
+      it.preview ? h('img', { src: L.thumbUrl(it.preview, site), alt: '' }) : h('div', { class: 'audio-ph' }, '♪'),
+      h('audio', { controls: true, autoplay: true, preload: 'metadata', src: L.mediaUrl(media, site) }));
+  }
   const src = it.sample && !it.isVideo ? it.sample : it.preview;
+  return h('img', { src: src ? L.thumbUrl(src, site) : '', alt: '' });
+}
+function openLightbox(it) {
   const addTag = (t, ex) => { addChip(ex ? `-${t}` : t); toast(`Đã thêm ${ex ? '−' : ''}${t}`); };
   const link = POST_URL[S.preview.module]?.(it.id);
   openModal(h('div', { class: 'lightbox' },
-    h('div', {}, h('img', { src: src ? L.thumbUrl(src, S.preview.site) : '', alt: '' })),
+    h('div', {}, lightboxMedia(it)),
     h('div', {},
       h('h2', {}, `#${it.id} `, h('span', { class: 'muted' }, [it.ext, it.width && `${it.width}×${it.height}`, it.date].filter(Boolean).join(' · '))),
       link ? h('p', {}, h('a', { href: '#', onclick: (e) => { e.preventDefault(); L.app.openExternal(link); } }, 'Mở post trên website ↗')) : null,
@@ -997,6 +1110,85 @@ function openLightbox(it) {
         h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
 }
 
+// ---------------- library: offline search of the download index (index.search, no website request) ----------------
+const LIB = { page: 0, pageSize: 60, total: 0, items: [], seq: 0, ready: false };
+const LIB_KIND = (ext) => (['mp4', 'webm'].includes(ext) ? 'video' : ['mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav'].includes(ext) ? 'audio' : 'image');
+function fileUrl(p) {
+  // local file for <img> / <video> (the renderer is a file:// page, CSP allows file:)
+  const norm = String(p).replace(/\\/g, '/');
+  return `file://${norm.startsWith('/') ? '' : '/'}${norm.split('/').map((seg) => (/^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg))).join('/')}`;
+}
+async function openLibrary() {
+  if (!LIB.ready) {
+    LIB.ready = true;
+    const mods = S.modules.filter((m) => m.installed);
+    $('#lib-module').replaceChildren(h('option', { value: '' }, 'Mọi module'), ...mods.map((m) => h('option', { value: m.abbr }, `${m.abbr} · ${m.name}`)));
+    runLibrary(0);
+  }
+  try {
+    const st = await L.rpc('index.stats');
+    setText($('#lib-stats'), st.exists ? `${nf.format(st.files || 0)} file · ${fmtBytes(st.bytes || 0)}` : 'chưa có file nào trong index');
+  } catch { /* old core: no index */ }
+}
+async function runLibrary(page) {
+  const seq = ++LIB.seq;
+  const params = { tags: $('#lib-q').value.trim(), module: $('#lib-module').value, dateFrom: $('#lib-from').value, dateTo: $('#lib-to').value,
+    order: $('#lib-order').value, page, pageSize: LIB.pageSize };
+  try {
+    const r = await L.rpc('index.search', params);
+    if (seq !== LIB.seq) return;
+    Object.assign(LIB, { page: r.page, total: r.total, items: r.items });
+    renderLibrary();
+  } catch (err) {
+    if (seq === LIB.seq) setText($('#lib-info'), `Không tìm được: ${errMsg(err)}`);
+  }
+}
+function renderLibrary() {
+  const pages = Math.max(1, Math.ceil(LIB.total / LIB.pageSize));
+  const missing = LIB.items.filter((it) => !it.exists).length;
+  setText($('#lib-info'), LIB.total ? `${nf.format(LIB.total)} file${missing ? ` · ${missing} file trên trang này không còn trên đĩa` : ''}`
+    : 'Không có file nào khớp. Index chỉ có những file tải từ khi có tính năng này (và khi đang bật ghi index).');
+  setText($('#lib-page'), `${LIB.page + 1} / ${pages}`);
+  $('#lib-prev').disabled = LIB.page <= 0;
+  $('#lib-next').disabled = LIB.page + 1 >= pages;
+  $('#lib-grid').replaceChildren(...LIB.items.map((it) => {
+    const kind = LIB_KIND(String(it.ext || '').toLowerCase());
+    const thumb = it.exists && kind === 'image'
+      ? h('img', { loading: 'lazy', decoding: 'async', alt: '', src: fileUrl(it.path), onerror: (e) => e.target.replaceWith(h('div', { class: 'ph' }, '🖼')) })
+      : h('div', { class: 'ph' }, it.exists ? (kind === 'video' ? '▶' : '♪') : '✕');
+    return h('div', { class: `card ${it.exists ? '' : 'missing'}`, title: `${it.name}\n${(it.tags || '').slice(0, 400)}`, onclick: () => openLibraryItem(it) },
+      thumb, h('div', { class: 'badges' },
+        h('span', { class: 'b' }, it.module), it.ext ? h('span', { class: 'b' }, it.ext) : null,
+        it.size ? h('span', { class: 'b' }, fmtBytes(it.size)) : null, it.exists ? null : h('span', { class: 'b' }, 'đã mất')));
+  }));
+}
+function openLibraryItem(it) {
+  const kind = LIB_KIND(String(it.ext || '').toLowerCase());
+  const media = !it.exists ? h('div', { class: 'audio-ph' }, 'File không còn trên đĩa')
+    : kind === 'video' ? h('video', { controls: true, autoplay: true, src: fileUrl(it.path) })
+      : kind === 'audio' ? h('div', { class: 'cover' }, h('div', { class: 'audio-ph' }, '♪'), h('audio', { controls: true, autoplay: true, src: fileUrl(it.path) }))
+        : h('img', { src: fileUrl(it.path), alt: '' });
+  const tags = String(it.tags || '').split(' ').filter(Boolean);
+  const searchTag = (t) => { closeModal(); $('#lib-q').value = t; runLibrary(0); };
+  openModal(h('div', { class: 'lightbox' },
+    h('div', {}, media),
+    h('div', {},
+      h('h2', {}, `${it.module} #${it.id} `, h('span', { class: 'muted' }, [it.ext, it.size && fmtBytes(it.size), it.date, it.rating].filter(Boolean).join(' · '))),
+      h('p', { class: 'muted lib-path' }, it.path),
+      it.md5 ? h('p', { class: 'muted lib-path' }, `md5 ${it.md5}`) : null,
+      h('p', { class: 'muted' }, 'Bấm một tag để tìm các file khác có tag đó.'),
+      h('div', { class: 'lb-tags' }, tags.slice(0, 300).map((t) => h('span', { class: 'lb-tag', onclick: () => searchTag(t), style: 'cursor:pointer' }, t))),
+      h('div', { class: 'modal-actions' },
+        it.exists && L.library ? h('button', { class: 'btn', onclick: () => L.library.open(it.path).then((r) => r && toast(r, 'err')) }, 'Mở file') : null,
+        L.library ? h('button', { class: 'btn', onclick: () => L.library.reveal(it.path) }, 'Mở thư mục') : null,
+        h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
+}
+$('#lib-search').addEventListener('click', () => runLibrary(0));
+$('#lib-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') runLibrary(0); });
+['#lib-module', '#lib-order', '#lib-from', '#lib-to'].forEach((id) => $(id).addEventListener('change', () => runLibrary(0)));
+$('#lib-prev').addEventListener('click', () => { if (LIB.page > 0) runLibrary(LIB.page - 1); });
+$('#lib-next').addEventListener('click', () => runLibrary(LIB.page + 1));
+
 // ---------------- downloads ----------------
 async function startDownload(override = null) {
   const q = override ? { ...currentQuery(), ...override } : currentQuery();
@@ -1009,12 +1201,32 @@ async function startDownload(override = null) {
       if (r.nonEmpty && !S.settings.download.subfolderPerQuery
         && !window.confirm(`Thư mục “${path}” không trống, kết quả có thể lẫn với lượt tải khác. Vẫn tiếp tục?`)) return;
     }
-    const job = await L.jobs.start({ ...q, path, options: downloadOptions() });
-    upsertJob(job);
-    toast(`Đã thêm job: ${q.label || q.tags}`, 'ok');
+    const job = await addJob((allowDuplicate) => L.jobs.start({ ...q, path, options: downloadOptions(), allowDuplicate }));
+    if (job) toast(`Đã thêm job: ${q.label || q.tags}`, 'ok');
   } catch (err) {
     toast(`Không tạo được job: ${errMsg(err)}`, 'err');
   }
+}
+// main refuses an identical active job ('DUPLICATE: …'): ask, then retry on purpose
+async function addJob(call) {
+  try {
+    const job = await call(false);
+    upsertJob(job);
+    return job;
+  } catch (err) {
+    const m = /DUPLICATE: (.*)$/.exec(errMsg(err));
+    if (!m) throw err;
+    if (!window.confirm(`${m[1][0].toUpperCase()}${m[1].slice(1)}. Vẫn thêm job này?`)) return null;
+    const job = await call(true);
+    upsertJob(job);
+    return job;
+  }
+}
+async function rerunJob(id) {
+  try {
+    const j = await addJob((allowDuplicate) => L.jobs.rerun(id, allowDuplicate));
+    if (j) toast(`Đã chạy lại: ${j.label || j.tags}`, 'ok');
+  } catch (err) { toast(`Không chạy lại được: ${errMsg(err)}`, 'err'); }
 }
 $('#btn-download').addEventListener('click', () => startDownload());
 
@@ -1057,6 +1269,7 @@ function createJobView(id) {
     scan: h('span', { class: 'hint', title: 'Vẫn đang quét thêm trang kết quả, tổng số file có thể còn tăng' }, 'đang quét thêm…'),
     counts: h('span'), cf: h('span', { class: 'danger' }, 'Bị bot challenge chặn'), error: h('span', { class: 'danger' }),
     partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), known: h('span'),
+    speed: h('span', { class: 'mono' }), eta: h('span'),
     dest: h('span', { class: 'mono' }),
   };
   Object.values(m).forEach((el) => { el.hidden = true; });
@@ -1065,13 +1278,15 @@ function createJobView(id) {
     status: h('span', { class: 'status' }),
     q: h('span', { class: 'job-q' }),
     cancel: h('button', { class: 'btn sm danger', onclick: () => L.jobs.cancel(id) }, 'Huỷ'),
+    rerun: h('button', { class: 'btn sm ghost', title: 'Chạy lại đúng truy vấn và tuỳ chọn của job này', onclick: () => rerunJob(id) }, 'Chạy lại'),
+    samples: [], // [time, bytes] of the last seconds: download speed
     logBtn: h('button', { class: 'btn sm ghost', onclick: () => toggleJobLog(id) }, 'Log'),
     fill: h('i'),
   };
   v.bar = h('div', { class: 'bar' }, v.fill);
   v.root = h('div', { class: 'job glass', dataset: { id } },
     h('div', { class: 'job-head' }, v.status, v.q,
-      h('div', { class: 'job-actions' }, v.cancel,
+      h('div', { class: 'job-actions' }, v.cancel, v.rerun,
         h('button', { class: 'btn sm ghost', onclick: () => { const j = job(); if (j) L.app.openPath(j.dest); } }, 'Mở thư mục'),
         v.logBtn)),
     v.bar, h('div', { class: 'job-meta' }, Object.values(m)));
@@ -1085,6 +1300,7 @@ function updateJobView(v, j) {
   setText(v.q, j.label || j.tags);
   if (v.q.title !== j.tags) v.q.title = j.tags;
   setHidden(v.cancel, !['queued', 'running'].includes(j.status));
+  setHidden(v.rerun, !['done', 'failed', 'cancelled'].includes(j.status) || !L.jobs.rerun);
   setText(v.logBtn, j.showLog ? 'Ẩn log' : 'Log');
   v.bar.classList.toggle('indet', indet);
   const width = indet ? '' : `${pct}%`; // inline width would override the indeterminate animation's width
@@ -1103,7 +1319,32 @@ function updateJobView(v, j) {
   slot(m.gender, p.genderFiltered ? `Lọc giới tính: ${nf.format(p.genderFiltered)}` : null);
   slot(m.blocked, p.blocked ? `Chặn (an toàn): ${nf.format(p.blocked)}` : null);
   slot(m.known, p.known ? `Bỏ qua (đã tải): ${nf.format(p.known)}` : null);
+  const transfer = jobTransfer(v, j, p);
+  slot(m.speed, transfer.speed);
+  slot(m.eta, transfer.eta);
   slot(m.dest, j.dest ? String(j.dest) : null);
+}
+// speed over the last ~6 s of progress samples, size of what this run received, rough time left from the pace per file
+function jobTransfer(v, j, p) {
+  const bytes = Number(p.bytes) || 0;
+  if (j.status !== 'running') {
+    v.samples.length = 0;
+    return { speed: bytes ? `Đã nhận ${fmtBytes(bytes)}` : null, eta: null };
+  }
+  const now = Date.now();
+  const last = v.samples[v.samples.length - 1];
+  if (!last || last[1] !== bytes || now - last[0] > 1000) v.samples.push([now, bytes]);
+  while (v.samples.length > 2 && now - v.samples[0][0] > 6000) v.samples.shift();
+  const [t0, b0] = v.samples[0];
+  const rate = now - t0 > 900 ? ((bytes - b0) * 1000) / (now - t0) : 0;
+  const speed = bytes ? `${fmtBytes(bytes)}${rate > 0 ? ` · ${fmtBytes(rate)}/s` : ''}` : null;
+  let eta = null;
+  const done = p.processed || 0;
+  if (p.stateName === 'DOWNLOADING' && !p.scanning && done > 0 && p.totalAll > done && j.startedAt) {
+    const secs = ((now - j.startedAt) / done) * (p.totalAll - done) / 1000;
+    eta = secs < 60 ? 'còn < 1 phút' : secs < 3600 ? `còn ~${Math.round(secs / 60)} phút` : `còn ~${(secs / 3600).toFixed(1)} giờ`;
+  }
+  return { speed, eta };
 }
 function flushJobs() {
   const host = $('#jobs');
@@ -1301,6 +1542,41 @@ function deleteSaved(e) {
   if (!window.confirm(`Xoá truy vấn đã lưu “${e.name}”?`)) return;
   saveSearchList('saved', searchList('saved').filter((x) => x.name !== e.name));
 }
+// saved query downloaded again on a schedule by main (only newer posts, files already downloaded are skipped)
+const AUTO_VI = { 6: '6 giờ', 12: '12 giờ', 24: 'mỗi ngày', 72: '3 ngày', 168: 'mỗi tuần' };
+function autoTitle(e) {
+  const a = e.auto;
+  if (!a?.every) return 'Tự tải lại định kỳ: tắt';
+  const last = a.lastRun ? `lần cuối ${ago(a.lastRun)}` : 'chưa chạy';
+  const st = { done: `: ${a.lastCount} file mới`, failed: `: lỗi ${a.lastError || ''}`, cancelled: ': đã huỷ', running: ': đang chạy', baseline: ' (mốc bắt đầu)' }[a.lastStatus] || '';
+  return `Tự tải lại ${AUTO_VI[a.every]} · ${last}${st}${a.maxId ? ` · chỉ lấy post có id > ${a.maxId}` : ''}`;
+}
+async function editSavedAuto(e) {
+  if (!L.saved) return;
+  const sel = h('select', {}, h('option', { value: '0' }, 'Tắt'), ...Object.entries(AUTO_VI).map(([v, t]) => h('option', { value: v }, t)));
+  sel.value = String(e.auto?.every || 24);
+  const fromNow = h('input', { type: 'radio', name: 'auto-from', checked: true });
+  const fromAll = h('input', { type: 'radio', name: 'auto-from' });
+  const save = async () => {
+    const every = Number(sel.value);
+    closeModal();
+    try {
+      const r = await L.saved.setAuto(`${e.module}\n${e.tags}`, every, fromNow.checked ? 'now' : 'all');
+      S.settings = r.settings;
+      renderHistory();
+      toast(every ? `“${e.name}” sẽ tự tải lại ${AUTO_VI[every]}` : `Đã tắt tự tải lại “${e.name}”`, 'ok');
+    } catch (err) { toast(`Không đặt được lịch: ${errMsg(err)}`, 'err'); }
+  };
+  openModal(h('div', {},
+    h('h2', {}, `Tự tải lại “${e.name}”`),
+    h('p', { class: 'muted' }, `${e.module}: ${e.tags}`),
+    h('label', { class: 'field' }, h('span', {}, 'Chu kỳ'), sel),
+    e.auto?.every ? h('p', { class: 'muted' }, autoTitle(e)) : h('div', { class: 'radio-list' }, h('span', { class: 'muted' }, 'Lần đầu'),
+      h('label', {}, fromNow, 'Chỉ post mới từ bây giờ'),
+      h('label', {}, fromAll, 'Tải cả kết quả hiện có (bỏ qua file đã tải)')),
+    h('p', { class: 'muted' }, 'Lustra chạy truy vấn khi đang mở, theo thư mục và tuỳ chọn tải mặc định trong Cài đặt; mỗi lần chỉ lấy post mới hơn lần trước.'),
+    h('div', { class: 'modal-actions' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Huỷ'), h('button', { class: 'btn primary', onclick: save }, 'Lưu'))));
+}
 let histTab = 'history';
 function renderHistory() {
   $$('#hist-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === histTab));
@@ -1320,6 +1596,8 @@ function renderHistory() {
     host.replaceChildren(...(list.length ? list.map((e) => h('div', { class: 'hist-row', title: `${e.module}: ${e.tags}`, onclick: () => loadQuery(e) },
       h('span', { class: 'mod-abbr' }, e.module),
       h('div', { class: 'hist-main' }, h('b', {}, e.name), h('code', {}, e.tags)),
+      h('button', { class: `btn sm ${e.auto?.every ? '' : 'ghost'}`, title: autoTitle(e), onclick: stop(() => editSavedAuto(e)) },
+        e.auto?.every ? `⟳ ${AUTO_VI[e.auto.every]}` : '⟳'),
       h('button', { class: 'btn sm ghost', title: 'Đổi tên', onclick: stop(() => renameSaved(e)) }, 'Đổi tên'),
       h('button', { class: 'btn sm ghost danger', title: 'Xoá', onclick: stop(() => deleteSaved(e)) }, 'Xoá')))
       : [h('div', { class: 'empty' }, 'Chưa có truy vấn nào được lưu. Bấm “☆ Lưu truy vấn” để lưu truy vấn hiện tại.')]));
@@ -1328,7 +1606,12 @@ function renderHistory() {
 $('#btn-history').addEventListener('click', () => {
   const d = $('#hist-drawer');
   d.hidden = !d.hidden;
-  if (!d.hidden) { $('#az-drawer').hidden = true; renderHistory(); }
+  if (!d.hidden) {
+    $('#az-drawer').hidden = true;
+    renderHistory();
+    // schedules run in main: refresh their last run / status
+    L.settings.get().then((r) => { S.settings = r.settings; if (!d.hidden) renderHistory(); }).catch(() => {});
+  }
 });
 $('#hist-close').addEventListener('click', () => { $('#hist-drawer').hidden = true; });
 $('#hist-tabs').addEventListener('click', (e) => { const t = e.target.closest('button')?.dataset.tab; if (t) { histTab = t; renderHistory(); } });
@@ -1583,11 +1866,23 @@ function extCard(m, remote) {
     m.source === 'builtin' ? h('span', { class: 'tagpill acc' }, 'built-in') : null,
     m.default ? h('span', { class: 'tagpill acc' }, 'mặc định') : null,
     m.installed ? h('span', { class: 'tagpill ok' }, 'đã cài') : null,
+    m.updateAvailable ? h('span', { class: 'tagpill warn', title: `Catalog có v${m.catalogVersion}` }, `có bản v${m.catalogVersion}`) : null,
+    originBadge(m.generator),
     h('span', { class: 'tagpill' }, `v${m.version}`),
   ];
   let action;
-  if (remote) action = h('button', { class: 'btn sm', onclick: () => installExt({ url: m.url, sha256: m.sha256 }, m.name) }, 'Cài');
-  else if (m.source === 'builtin') action = h('span', { class: 'muted' }, 'Luôn bật');
+  if (remote) {
+    // remote catalog entry: compared with the installed copy of the same extension
+    const local = S.modules.find((x) => x.id === m.id && x.installed);
+    const install = () => installExt({ url: m.url, sha256: m.sha256 }, m.name);
+    if (local && local.source !== 'builtin' && versionNewer(m.version, local.version)) {
+      action = h('button', { class: 'btn sm primary', onclick: install }, `Cập nhật v${local.version} → v${m.version}`);
+    } else if (local) action = h('span', { class: 'muted' }, local.version === m.version ? 'Đã cài bản này' : `Đã cài v${local.version}`);
+    else action = h('button', { class: 'btn sm', onclick: install }, 'Cài');
+  } else if (m.updateAvailable) {
+    action = [h('button', { class: 'btn sm primary', onclick: () => installExt({ id: m.id }, m.name) }, `Cập nhật lên v${m.catalogVersion}`),
+      h('button', { class: 'btn sm danger', onclick: () => uninstallExt(m) }, 'Gỡ')];
+  } else if (m.source === 'builtin') action = h('span', { class: 'muted' }, 'Luôn bật');
   else if (m.installed) action = h('button', { class: 'btn sm danger', onclick: () => uninstallExt(m) }, 'Gỡ');
   else action = h('button', { class: 'btn sm primary', onclick: () => installExt({ id: m.id }, m.name) }, 'Cài đặt');
   return h('div', { class: 'ext glass' },
@@ -1596,6 +1891,31 @@ function extCard(m, remote) {
     h('p', {}, m.description || ''),
     m.site ? h('a', { href: '#', class: 'muted', onclick: (e) => { e.preventDefault(); L.app.openExternal(m.site); } }, m.site) : null,
     h('div', { class: 'row' }, action));
+}
+// '1.10.0' > '1.9.2' (numeric parts; same rule as lustra.extensions.version_newer)
+function versionNewer(a, b) {
+  const key = (v) => String(v || '').split('-')[0].split('.').map((p) => (/^\d+$/.test(p) ? Number(p) : p));
+  const x = key(a);
+  const y = key(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const p = x[i] ?? 0;
+    const q = y[i] ?? 0;
+    if (p === q) continue;
+    if (typeof p === 'number' && typeof q === 'number') return p > q;
+    return String(p) > String(q);
+  }
+  return false;
+}
+// generated extensions ('$generator' of the manifest, rule R13): AI or template, with the details in the tooltip
+function originBadge(g) {
+  if (!g || !g.tool) return null;
+  const ai = g.mode === 'ai' || Boolean(g.model);
+  const template = !ai && g.mode === 'template';
+  const when = g.createdAt ? new Date(g.createdAt).toLocaleDateString('vi-VN') : '';
+  const how = ai ? `Tạo bằng AI (${g.model || 'Claude'})` : template ? 'Tạo từ template có sẵn của Lustra'
+    : 'Tạo bằng công cụ extgen (skill / lập trình viên)';
+  const title = [how, g.engine && `engine ${g.engine}`, when && `ngày ${when}`, g.tool].filter(Boolean).join(' · ');
+  return h('span', { class: `tagpill ${ai ? 'warn' : ''}`, title }, ai ? 'AI' : template ? 'template' : 'extgen');
 }
 async function installExt(params, name) {
   try {
@@ -1664,7 +1984,7 @@ function setGenMode(mode) {
   $('#gen-budget-wrap').hidden = G.mode !== 'ai';
   $('#gen-hint').textContent = G.mode === 'ai'
     ? 'Claude khảo sát site, viết / sửa downloader.py khi site không có template sẵn và chạy thử tới khi đạt. Tính phí Claude API theo lượng dùng, dừng khi chạm mức tối đa.'
-    : 'Miễn phí, không cần khoá: cho site chạy Gelbooru 0.2 (DAPI), Danbooru, e621, Moebooru, Philomena hoặc Szurubooru, dùng template có sẵn của Lustra.';
+    : 'Miễn phí, không cần khoá: cho site chạy Gelbooru 0.2 (DAPI), Danbooru, e621, Moebooru, Philomena, Szurubooru hoặc Shimmie (có API danbooru), dùng template có sẵn của Lustra.';
   renderGenNote();
 }
 function renderGenNote() {
@@ -1672,7 +1992,7 @@ function renderGenNote() {
   if (G.mode === 'ai' && G.key && !G.key.set) {
     note.replaceChildren('Chưa có khoá Claude API. ',
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); showPage('settings'); $('#ai-key').focus(); } }, 'Thêm trong Cài đặt → AI tạo extension'),
-      ', hoặc chọn "Không dùng AI" cho site Gelbooru, Danbooru, e621, Moebooru, Philomena, Szurubooru.');
+      ', hoặc chọn "Không dùng AI" cho site Gelbooru, Danbooru, e621, Moebooru, Philomena, Szurubooru, Shimmie.');
     note.hidden = false;
   } else note.hidden = true;
 }
@@ -1747,7 +2067,7 @@ function genDraftRow(d) {
   const at = d.finishedAt || d.startedAt;
   const when = at ? new Date(at).toLocaleString('vi-VN') : d.session;
   const running = G.running && G.session === d.session;
-  const act = (label, fn, cls = 'btn sm ghost') => h('button', { class: cls, onclick: fn }, label);
+  const act = (label, fn, cls = 'btn sm ghost', title = null) => h('button', { class: cls, onclick: fn, title }, label);
   const meta = [d.site || d.url, when, d.mode === 'ai' ? `$${Number(d.usd || 0).toFixed(2)}` : d.mode === 'template' ? 'không AI' : ''];
   return h('div', { class: 'gen-draft' },
     h('div', { class: 'gen-draft-head' },
@@ -1762,6 +2082,8 @@ function genDraftRow(d) {
       d.draftDir ? act('Mở thư mục', () => L.gen.open(d.session)) : null,
       d.draftDir && !running ? act('Xuất .zip…', () => exportGenDraft(d)) : null,
       d.status === 'ready' && d.draftDir && !running ? act('Cài vào app…', () => installGenDraft(d), 'btn sm primary') : null,
+      d.status !== 'ready' && d.status !== 'refused' && d.draftDir && !running && !G.running
+        ? act('Sửa bằng AI', () => repairGenDraft(d), 'btn sm', 'Claude đọc lỗi lần trước và sửa tiếp bản nháp (bản cũ giữ nguyên)') : null,
       running ? null : act('Xoá', () => removeGenDraft(d), 'btn sm ghost danger')));
 }
 async function exportGenDraft(d) {
@@ -1777,6 +2099,23 @@ async function exportGenDraft(d) {
       h('div', { class: 'modal-actions' }, h('button', { class: 'btn ghost', onclick: copy }, 'Chép SHA-256'),
         h('button', { class: 'btn primary', onclick: closeModal }, 'Đóng'))));
   } catch (err) { toast(`Không xuất được: ${errMsg(err)}`, 'err'); }
+}
+async function repairGenDraft(d) {
+  if (G.key && !G.key.set) { toast('Cần khoá Claude API: thêm trong Cài đặt → AI tạo extension', 'err'); return; }
+  genSetRunning(true);
+  $('#gen-run').hidden = false;
+  $('#gen-log').replaceChildren();
+  $('#gen-usage').textContent = '';
+  $('#gen-phase').textContent = `Đang khởi động sửa bản nháp ${d.name || d.extId}…`;
+  $('#gen-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  try {
+    await L.gen.start({ repair: d.session, maxUsd: Number($('#gen-budget').value) || undefined });
+  } catch (err) {
+    genSetRunning(false);
+    $('#gen-dot').className = 'dot err';
+    $('#gen-phase').textContent = 'Không bắt đầu được';
+    toast(errMsg(err), 'err');
+  }
 }
 async function installGenDraft(d) {
   try {
@@ -1991,6 +2330,225 @@ function bindSetting(id, path, kind = 'checkbox') {
     val = null;
   });
 }
+// gender image model: a model server (lustra/model_server.py) the app calls; address in settings, token kept by main
+function renderGenderModelToken() {
+  const st = S.secrets?.genderModel || { set: false, encrypted: false, encryption: false };
+  $('#gm-token-state').replaceChildren(st.set ? h('span', { class: 'tagpill ok' }, st.encrypted ? 'đã lưu (mã hoá)' : 'đã lưu') : '');
+  $('#gm-token').placeholder = st.set ? 'Token mới (trống = giữ nguyên)' : 'không cần khi server chạy trên máy này';
+  $('#gm-token-clear').hidden = !st.set;
+}
+// on: turned on in Settings (after the GPU / VRAM check) and an address set; off: the gender filter goes by tags
+const gmOn = () => S.settings?.genderModel?.enabled === true && Boolean(S.settings?.genderModel?.url);
+const GM_DEVICE = { cuda: 'GPU (CUDA)', rocm: 'GPU (ROCm)', migraphx: 'GPU (MIGraphX)', directml: 'GPU (DirectML)', cpu: 'CPU' };
+const gmGb = (mib) => `${(Number(mib) / 1024).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} GB`;
+function gmHardwareText(st) {
+  const hw = st?.model?.hardware;
+  if (!hw) return st?.reachable ? 'server không báo phần cứng (bản cũ)' : '—';
+  const gpus = (hw.gpus || []).map((g) => (Number.isInteger(g.vramMiB)
+    ? `${g.name}: VRAM ${gmGb(g.vramMiB)}${Number.isInteger(g.vramFreeMiB) ? `, trống ${gmGb(g.vramFreeMiB)}` : ''}` : `${g.name} (dùng chung RAM)`));
+  const rt = st.check?.runtime;
+  return [gpus.length ? gpus.join(' · ') : 'không có GPU',
+    `onnxruntime ${hw.runtime || '?'} ${rt ? `có ${GM_DEVICE[rt] || rt}` : 'bản CPU'}`,
+    Number.isInteger(hw.ramFreeMiB) ? `RAM trống ${gmGb(hw.ramFreeMiB)}` : ''].filter(Boolean).join(' · ');
+}
+// the hardware check of the server (lustra/model_hw.py hardware_check) as words: null when the model can use a GPU
+function gmWarning(check) {
+  if (!check || check.level === 'ok') return null;
+  const g = check.gpu;
+  const free = g && Number.isInteger(g.vramFreeMiB) ? gmGb(g.vramFreeMiB) : '';
+  const ram = Number.isInteger(check.ramFreeMiB) ? ` (RAM trống ${gmGb(check.ramFreeMiB)})` : '';
+  const cpu = `model sẽ chạy bằng CPU: mỗi ảnh khoảng 0,3–1 giây và chiếm khoảng 550 MB RAM${ram} khi đang nạp.`;
+  switch (check.code) {
+    case 'no_gpu': return { title: 'Máy chạy model không có VRAM', guide: 'hardware',
+      text: `Server không thấy GPU nào có VRAM riêng (từ ${gmGb(check.vramMinMiB || 1536)}), nên ${cpu}`,
+      advice: 'Nên để tắt nếu máy yếu, ít RAM hoặc đang chạy pin. Lọc theo tag vẫn hoạt động bình thường.' };
+    case 'gpu_no_runtime': return { title: 'Có GPU nhưng model chưa dùng được VRAM', guide: 'gpu',
+      text: `Server có ${g?.name || 'GPU'}${free ? ` (${free} VRAM trống)` : ''} nhưng onnxruntime đang cài là bản CPU, nên ${cpu}`,
+      advice: 'Nên để tắt cho tới khi cài onnxruntime-gpu (xem Hướng dẫn → Dùng GPU).' };
+    case 'cpu_forced': return { title: 'Server được đặt chạy bằng CPU', guide: 'gpu',
+      text: `Server có ${g?.name || 'GPU'}${free ? ` (${free} VRAM trống)` : ''} nhưng được chạy với --device cpu (hoặc LUSTRA_GENDER_MODEL_DEVICE=cpu), nên ${cpu}`,
+      advice: 'Bỏ tuỳ chọn này rồi khởi động lại server để dùng GPU, hoặc để tắt.' };
+    case 'vram_low': return { title: 'GPU không đủ VRAM trống', guide: 'hardware',
+      text: `${g?.name || 'GPU'} chỉ còn ${free} VRAM trống, model cần khoảng ${gmGb(check.vramMinMiB || 1536)}.`,
+      advice: 'Đóng bớt ứng dụng đang dùng GPU (game, AI…) rồi bấm Kiểm tra lại, hoặc để tắt.' };
+    case 'gpu_fallback': return { title: 'Model đang chạy bằng CPU dù server có GPU', guide: 'gpu',
+      text: `onnxruntime có GPU nhưng không nạp được (thiếu thư viện CUDA / cuDNN hoặc driver), nên ${cpu}`,
+      advice: 'Xem Hướng dẫn → Dùng GPU, hoặc tắt model.' };
+    default: return { title: 'Không biết phần cứng của server', guide: 'server',
+      text: 'Model server là bản cũ, không báo GPU / VRAM.', advice: 'Cập nhật model server rồi bấm Kiểm tra lại.' };
+  }
+}
+function renderGenderModelStatus(st) {
+  const m = st?.model || {};
+  const loaded = m.loaded ? `model đang nạp trên ${GM_DEVICE[m.device] || m.device || '?'}` : 'model chưa nạp (nạp khi cần)';
+  const text = !st ? 'tắt (chưa có địa chỉ)' : st.reachable
+    ? [`kết nối được · ${m.id} (${m.license}) · ${m.ms} ms`, m.loaded === undefined ? '' : loaded,
+      st.error ? `lỗi: ${st.error}` : '', st.local ? '' : 'ảnh của post được gửi tới máy chủ này'].filter(Boolean).join(' · ')
+    : `không kết nối được: ${st.error}`;
+  setText($('#gm-status'), text);
+  $('#gm-status').classList.toggle('err', Boolean(st && (!st.reachable || st.error)));
+  setText($('#gm-hw'), gmHardwareText(st));
+  const warn = st?.reachable ? gmWarning(st.check) : null;
+  const box = $('#gm-warn');
+  box.hidden = !warn;
+  if (warn) {
+    box.replaceChildren(h('b', {}, warn.title), ' ', warn.text, ' ', gmOn() ? warn.advice : 'Bật model lúc này sẽ cần xác nhận.', ' ',
+      h('button', { class: 'btn sm ghost', onclick: () => openGuide(warn.guide) }, 'Hướng dẫn'));
+  }
+}
+async function refreshGenderModel() {
+  if (!L.genderModel) { $('#gm-url').closest('.panel').hidden = true; return; }
+  const url = S.settings.genderModel?.url || '';
+  if (document.activeElement !== $('#gm-url')) $('#gm-url').value = url;
+  $('#gm-enabled').checked = gmOn();
+  renderGenderModelToken();
+  const opt = $('#f-gender-mode option[value="model"]');
+  opt.disabled = !gmOn();
+  opt.textContent = gmOn() ? 'Tag + model (ảnh)' : 'Tag + model (bật model trong Cài đặt)';
+  if (!gmOn() && genderState().mode === 'model') saveGender({ mode: 'tags' });
+  if (!url) { S.genderModel = null; renderGenderModelStatus(null); return; }
+  setText($('#gm-status'), 'đang kiểm tra…');
+  try {
+    S.genderModel = await L.genderModel.status();
+  } catch (err) {
+    S.genderModel = { reachable: false, error: errMsg(err) };
+  }
+  renderGenderModelStatus(S.genderModel);
+}
+// before the model is turned on: the GPU / VRAM of the server. Without one the user is told to keep it off (with the guide)
+function gmConfirm(warn, reachable) {
+  return new Promise((resolve) => {
+    const done = (v) => { closeModal(); resolve(v); };
+    openModal(h('div', { class: 'qchange gm-dialog' },
+      h('h2', { text: warn.title }),
+      h('p', {}, warn.text),
+      h('p', { class: 'gm-advice' }, warn.advice),
+      h('div', { class: 'modal-actions' },
+        h('button', { class: 'btn ghost', onclick: () => done('guide') }, 'Hướng dẫn'),
+        reachable ? h('button', { class: 'btn ghost danger', onclick: () => done('on') }, 'Vẫn bật (chạy bằng CPU)') : null,
+        h('button', { class: 'btn primary', onclick: () => done('off') }, reachable ? 'Để tắt' : 'Đóng'))));
+    $('#modal-card .btn.primary')?.focus();
+  });
+}
+async function turnGenderModelOn() {
+  if (!S.settings.genderModel?.url) { toast('Nhập địa chỉ model server trước', 'err'); return; }
+  setText($('#gm-status'), 'đang kiểm tra GPU / VRAM của server…');
+  let st;
+  try { st = await L.genderModel.status(); } catch (err) { st = { reachable: false, error: errMsg(err) }; }
+  S.genderModel = st;
+  renderGenderModelStatus(st);
+  if (!st.reachable) {
+    const c = await gmConfirm({ title: 'Không kết nối được model server', text: st.error || '',
+      advice: 'Chạy model server trước (Hướng dẫn → Chạy model server) rồi bật lại.', guide: 'server' }, false);
+    if (c === 'guide') openGuide('server');
+    return;
+  }
+  const warn = gmWarning(st.check);
+  if (warn) {
+    const c = await gmConfirm(warn, true);
+    if (c === 'guide') { openGuide(warn.guide); return; }
+    if (c !== 'on') { toast('Model vẫn tắt', ''); return; }
+  }
+  setText($('#gm-status'), 'đang nạp model trên server…');
+  let r;
+  try { r = await L.genderModel.load(); } catch (err) { r = { reachable: false, error: errMsg(err) }; }
+  S.genderModel = r;
+  if (!r.reachable || r.error) { renderGenderModelStatus(r); toast(`Không nạp được model: ${r.error}`, 'err'); return; }
+  await saveSettings({ genderModel: { enabled: true } });
+  const dev = GM_DEVICE[r.model?.device] || r.model?.device || '?';
+  toast(`Đã bật model · chạy bằng ${dev}. Chọn "Tag + model" ở bộ lọc giới tính để dùng.`, r.check?.level === 'ok' ? 'ok' : '');
+  if (r.check?.code === 'gpu_fallback') toast(gmWarning(r.check).title, 'err');
+}
+async function turnGenderModelOff() {
+  await saveSettings({ genderModel: { enabled: false } });
+  let freed = false;
+  if (S.genderModel?.reachable && S.genderModel.local) { // a server on another computer may serve others: left as it is
+    try { const r = await L.genderModel.unload(); freed = r.reachable && !r.error; } catch { /* the server may be gone already */ }
+  }
+  toast(freed ? 'Đã tắt model, server đã giải phóng bộ nhớ' : 'Đã tắt model: bộ lọc giới tính dùng tag', 'ok');
+}
+$('#gm-enabled').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  e.target.checked = !on; // the switch moves once the check is done
+  e.target.disabled = true;
+  try {
+    await (on ? turnGenderModelOn() : turnGenderModelOff());
+  } catch (err) {
+    toast(errMsg(err), 'err');
+  } finally {
+    e.target.disabled = false;
+    refreshGenderModel();
+  }
+});
+$('#gm-guide').addEventListener('click', () => openGuide());
+// general guide (guide.js): text spans `code` and **bold**, never HTML
+function guideInline(text) {
+  return String(text).split(/(`[^`]+`|\*\*[^*]+\*\*)/).filter(Boolean).map((part) => (part.startsWith('`')
+    ? h('code', {}, part.slice(1, -1)) : part.startsWith('**') ? h('b', {}, part.slice(2, -2)) : part));
+}
+function guideBlock([kind, body]) {
+  if (kind === 'ul') return h('ul', {}, body.map((li) => h('li', {}, guideInline(li))));
+  if (kind === 'note') return h('p', { class: 'guide-note' }, guideInline(body));
+  if (kind === 'code') {
+    const copy = () => navigator.clipboard?.writeText(body).then(() => toast('Đã chép lệnh', 'ok'), () => {});
+    return h('div', { class: 'guide-code' }, h('code', {}, body), h('button', { class: 'btn sm ghost', title: 'Chép lệnh', onclick: copy }, 'Chép'));
+  }
+  return h('p', {}, guideInline(body));
+}
+function openGuide(section) {
+  const g = window.LUSTRA_GUIDE;
+  if (!g) { toast('Không tải được hướng dẫn', 'err'); return; }
+  const go = (id, behavior = 'smooth') => { // below the sticky table of contents
+    const card = $('#modal-card');
+    const sec = $(`#guide-${id}`);
+    if (!sec) return;
+    const top = card.scrollTop + sec.getBoundingClientRect().top - card.getBoundingClientRect().top;
+    card.scrollTo({ top: top - card.querySelector('.guide-toc').offsetHeight - 8, behavior });
+  };
+  openModal(h('div', { class: 'guide' },
+    h('h2', { text: g.title }),
+    h('nav', { class: 'guide-toc' }, g.sections.map((s) => h('button', { class: 'btn sm ghost', onclick: () => go(s.id) }, s.title))),
+    g.sections.map((s) => h('section', { id: `guide-${s.id}` }, h('h3', { text: s.title }), s.blocks.map(guideBlock))),
+    h('div', { class: 'modal-actions' }, h('button', { class: 'btn primary', onclick: closeModal }, 'Đóng'))));
+  if (section) go(section, 'auto');
+  else $('#modal-card .btn.primary')?.focus({ preventScroll: true });
+}
+$('#gm-url').addEventListener('change', async (e) => {
+  try {
+    await saveSettings({ genderModel: { url: e.target.value.trim() } });
+  } catch (err) {
+    toast(errMsg(err), 'err');
+    e.target.value = S.settings.genderModel?.url || '';
+    return;
+  }
+  refreshGenderModel();
+});
+$('#gm-check').addEventListener('click', () => refreshGenderModel());
+$('#gm-token-save').addEventListener('click', async () => {
+  const v = $('#gm-token').value.trim();
+  if (!v) { toast(S.secrets?.genderModel?.set ? 'Ô trống: token đã lưu được giữ nguyên.' : 'Nhập token trước khi lưu.', S.secrets?.genderModel?.set ? '' : 'err'); return; }
+  try {
+    S.secrets = { ...S.secrets, genderModel: await L.genderModel.setToken(v) };
+    $('#gm-token').value = '';
+    toast('Đã lưu token model server', 'ok');
+  } catch (err) { toast(`Không lưu được token: ${errMsg(err)}`, 'err'); }
+  refreshGenderModel();
+});
+$('#gm-token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#gm-token-save').click(); });
+$('#gm-token-clear').addEventListener('click', async () => {
+  try { S.secrets = { ...S.secrets, genderModel: await L.genderModel.clearToken() }; toast('Đã xoá token', 'ok'); } catch (err) { toast(errMsg(err), 'err'); }
+  refreshGenderModel();
+});
+
+// table of contents of the settings page: one button per panel title
+function renderSettingsNav() {
+  const nav = $('#settings-nav');
+  nav.replaceChildren(...$$('#page-settings .settings > .panel').filter((p) => !p.hidden).map((p) => {
+    const title = p.querySelector('h2')?.textContent || '';
+    return h('button', { onclick: () => p.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, title);
+  }));
+}
+
 function renderSettings() {
   const s = S.settings;
   bindSetting('#s-path', 'download.path', 'text');
@@ -2004,6 +2562,7 @@ function renderSettings() {
   bindSetting('#s-dump-hashes', 'download.dumpHashes');
   bindSetting('#s-infomode', 'download.infoMode', 'text');
   bindSetting('#s-warn', 'download.warnNonEmpty');
+  bindSetting('#s-notify', 'download.notify');
   bindSetting('#s-concurrent', 'download.maxConcurrentJobs', 'number');
   bindSetting('#s-skip-known', 'download.skipKnown');
   $('#c-proxy').value = s.connection.proxy || '';
@@ -2023,6 +2582,9 @@ function renderSettings() {
   $('#f-threads').value = s.download.threads;
   $('#f-images').checked = s.download.images;
   $('#f-videos').checked = s.download.videos;
+  $('#f-audio').checked = s.download.audio !== false;
+  $('#filters').open = s.search.filtersOpen !== false;
+  filtersSummary();
   $('#f-lowres').checked = s.download.lowRes;
   $('#f-order').value = s.download.reverse ? 'desc' : 'asc';
   $('#f-limit').value = s.download.limit;
@@ -2182,6 +2744,7 @@ function listen() {
     }
   });
   L.on('appearance:changed', (a) => applyAppearance(a));
+  try { L.on('nav:page', (page) => { if (['downloads', 'search', 'extensions'].includes(page)) showPage(page); }); } catch { /* older preload */ }
   if (L.gen) L.on('gen:event', (ev) => onGenEvent(ev));
 }
 
@@ -2197,6 +2760,8 @@ async function boot() {
   applyAppearance(r.appearance);
   renderSettings();
   renderAiSettings();
+  renderSettingsNav();
+  refreshGenderModel();
   renderModuleButton();
   $('#btn-related').hidden = !relatedSupported();
   await loadModules();
