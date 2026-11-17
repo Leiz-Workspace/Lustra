@@ -144,6 +144,7 @@ The exact test list CI runs, the Electron self-test (`LUSTRA_SELFTEST_DIR`) and 
 | `extensions/` | Optional site extensions and the local catalog |
 | `tools/` | Builds (core, model server), tag list cron, model server packaging (Docker, systemd, launchd, Windows) |
 | `docs/` | Documentation (Vietnamese), plans, reports, release notes |
+| `keys/` | Public keys of the Forgejo release signatures (minisign for the checksum file, cosign for the image) |
 
 ## Branches and releases
 
@@ -160,6 +161,8 @@ the checks `Tests passed` and `Package (linux)`. Open the promotion pull request
 The organization's self-hosted Forgejo mirrors this repository. For every release tag it builds the Linux x64 files
 again (`.deb`, `.AppImage`, standalone model server) and the model server image, and publishes them to its own
 registries with a minisign signature on the checksum file and a cosign signature on the image.
+The public keys are in `keys/`: check the Linux files with `minisign -Vm SHA256SUMS-linux -p keys/minisign.pub`
+and then `sha256sum -c SHA256SUMS-linux`, the image with `cosign verify --key keys/cosign.pub <image>`.
 
 Bump `version` in `app/package.json` and `pyproject.toml` (the workflow checks they agree) before promoting to
 `staging`: a released version cannot get a new candidate. Once a version is released, a push that changes only

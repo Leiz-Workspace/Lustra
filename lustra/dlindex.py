@@ -47,6 +47,8 @@ BUSY_TIMEOUT = 10.0
 '''seconds a connection waits while another process holds the write lock'''
 WRITE_ATTEMPTS = 3
 '''a batch is retried this many times when the database stays locked longer than BUSY_TIMEOUT, then dropped'''
+RETRY_PAUSE = 0.05
+'''seconds between two tries when SQLite reports a lock without waiting (see DownloadIndex._enable_wal)'''
 BATCH_MAX = 200
 FLUSH_INTERVAL = 1.5
 '''seconds a record may wait in the writer queue before its batch is written'''
@@ -187,6 +189,10 @@ def _qs(n: int) -> str:
     return ','.join('?' * n)
 
 
+def _is_busy(err: sqlite3.OperationalError) -> bool:
+    return 'locked' in str(err) or 'busy' in str(err)
+
+
 def file_present(path: str) -> bool:
     """The indexed file is still on disk (regular, not empty). A stat only, the file is not opened"""
     try:
@@ -302,7 +308,7 @@ class DownloadIndex:
             conn = sqlite3.connect(str(self.path), timeout=BUSY_TIMEOUT, isolation_level=None, check_same_thread=False)
             try:
                 conn.execute(f'PRAGMA busy_timeout = {int(BUSY_TIMEOUT * 1000):d}')
-                conn.execute('PRAGMA journal_mode = WAL')
+                self._enable_wal(conn)
                 conn.execute('PRAGMA synchronous = NORMAL')
                 self._ensure_schema(conn)
             except BaseException:
@@ -310,6 +316,22 @@ class DownloadIndex:
                 raise
             self._conn = conn
         return self._conn
+
+    @staticmethod
+    def _enable_wal(conn: sqlite3.Connection) -> None:
+        """While other processes open the same new file, SQLite answers "database is locked" at once instead of waiting
+        BUSY_TIMEOUT (waiting could deadlock), so the switch is tried again until then. WAL is stored in the file: later opens
+        find it set and switch nothing"""
+        deadline = time.monotonic() + BUSY_TIMEOUT
+        while True:
+            try:
+                if str(conn.execute('PRAGMA journal_mode').fetchone()[0]).lower() != 'wal':
+                    conn.execute('PRAGMA journal_mode = WAL')
+                return
+            except sqlite3.OperationalError as err:
+                if not _is_busy(err) or time.monotonic() >= deadline:
+                    raise
+            time.sleep(RETRY_PAUSE)
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -674,10 +696,10 @@ class IndexWriter:
                 self.written += index.add_many(batch)
                 break
             except sqlite3.OperationalError as err:
-                busy = 'locked' in str(err) or 'busy' in str(err)
-                if not busy or attempt == WRITE_ATTEMPTS:
+                if not _is_busy(err) or attempt == WRITE_ATTEMPTS:
                     self._fail(len(batch), err)
                     break
+                time.sleep(RETRY_PAUSE * attempt)
             except Exception as err:
                 self._fail(len(batch), err)
                 break
@@ -687,7 +709,9 @@ class IndexWriter:
         self.failed += count
         if not self.error:
             self.error = f'{type(err).__name__}: {err}'
-            trace(f'Warning (W2): download index: unable to record {count:d} file(s): {self.error}', True)
+            # the report must not stop the thread: outside the app the logger has no window and raises
+            with contextlib.suppress(Exception):
+                trace(f'Warning (W2): download index: unable to record {count:d} file(s): {self.error}', True)
 
 #
 #
