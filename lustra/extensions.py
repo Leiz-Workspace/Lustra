@@ -27,6 +27,7 @@ import zipfile
 from threading import RLock
 
 from .defines import IDVAL_EQ_SEPARATORS, MODULES_BUILTIN, PLATFORM_DARWIN, PLATFORM_WINDOWS, TAG_SEPARATORS, UTF8, ModuleCaps
+from .denylist import denied, denied_in_extension, denied_message
 from .gender import register_rules_file
 from .logger import trace
 from .modspec import MANIFEST_FILE_NAME, ExtensionManifest, ManifestError, re_ext_id
@@ -44,6 +45,7 @@ ARCHIVE_UNPACKED_MAX = 50 * 1024 * 1024
 ARCHIVE_ENTRIES_MAX = 2000
 TREE_SIZE_MAX = ARCHIVE_UNPACKED_MAX
 CATALOG_SIZE_MAX = 1024 * 1024
+CATALOG_SIG_SIZE_MAX = 4096
 re_sha256 = re.compile(r'^[0-9a-fA-F]{64}$')
 SOURCE_BUILTIN, SOURCE_USER, SOURCE_CATALOG = 'builtin', 'user', 'catalog'
 
@@ -163,6 +165,27 @@ class Extensions:
         return cls
 
     @staticmethod
+    def _check_denied(m: ExtensionManifest) -> None:
+        """Extensions for a site of the domain denylist (rules R6 / R7 / R8) are never loaded"""
+        for value in (m.site, m.homepage):
+            if value and (d := denied(value)):
+                raise ExtensionError(denied_message(d))
+
+    @staticmethod
+    def _check_sdk(m: ExtensionManifest) -> None:
+        """minSdkVersion of the manifest against lustra.sdk.SDK_VERSION"""
+        if not m.minSdkVersion:
+            return
+        from .sdk import SDK_VERSION, parse_sdk_version, sdk_satisfies
+        if sdk_satisfies(m.minSdkVersion):
+            return
+        if parse_sdk_version(m.minSdkVersion)[0] < parse_sdk_version(SDK_VERSION)[0]:
+            raise ExtensionError(f'Extension \'{m.id}\' được viết cho Lustra SDK {m.minSdkVersion} (phiên bản chính cũ hơn), bản Lustra '
+                                 f'này có SDK {SDK_VERSION}: cần phiên bản mới của extension.')
+        raise ExtensionError(f'Extension \'{m.id}\' cần Lustra SDK {m.minSdkVersion} trở lên, bản Lustra này có SDK {SDK_VERSION}: '
+                             f'hãy cập nhật Lustra.')
+
+    @staticmethod
     def _register(m: ExtensionManifest) -> None:
         from .downloaders import DOWNLOADERS_BY_PROC_MODULE
         from .file_parser import register_module_prefix
@@ -174,6 +197,9 @@ class Extensions:
                 return
             if other := next((e for e in Extensions.loaded.values() if e.abbr == m.abbr), None):
                 raise ExtensionError(f'{m.id}: abbreviation \'{m.abbr}\' is already used by extension \'{other.id}\'')
+            if m.source != SOURCE_BUILTIN:
+                Extensions._check_denied(m)
+            Extensions._check_sdk(m)
             cls = Extensions._import_entry(m)
             proc_id = ProcModule.register(m.abbr)
             s = m.syntax
@@ -254,6 +280,8 @@ class Extensions:
                     row['updateAvailable'] = version_newer(m.version, row['version'])
                 continue
             rows[m.id] = {**m.to_public_dict(), 'installed': False, 'loaded': False}
+            if d := next((x for x in (denied(m.site), denied(m.homepage)) if x), None):  # shown, never installable (R6 R7 R8)
+                rows[m.id]['denied'] = {'rule': d.rule, 'message': denied_message(d)}
         return sorted(rows.values(), key=lambda r: (not r['default'], r['source'] != SOURCE_BUILTIN, r['name'].lower()))
 
     # ----- install / uninstall -----
@@ -308,17 +336,23 @@ class Extensions:
         return ''
 
     @staticmethod
-    def _install_tree(src: pathlib.Path) -> ExtensionManifest:
-        """Transactional install: validate -> stage (.id.tmp) -> import probe -> swap (old version kept as .id.bak until success)"""
+    def _install_tree(src: pathlib.Path, expect_id: str = '') -> ExtensionManifest:
+        """Transactional install: validate -> stage (.id.tmp) -> import probe -> swap (old version kept as .id.bak until success).
+        expect_id: the id the source announced (catalog entry): another id in the manifest is refused"""
         src = pathlib.Path(src)
         if src.is_symlink() or not src.is_dir():
             raise ExtensionError('extension source must be a folder')
         m = ExtensionManifest.load(src / MANIFEST_FILE_NAME, SOURCE_USER)
+        if expect_id and m.id != expect_id:
+            raise ExtensionError(f'the archive contains extension \'{m.id}\', not \'{expect_id}\' announced by the catalog')
         if Extensions.is_builtin_abbr(m.abbr) or m.id in {e.id for e in Extensions._scan(Extensions.builtin_dir(), SOURCE_BUILTIN)}:
             raise ExtensionError(f'\'{m.id}\' is a builtin extension and cannot be replaced')
         if other := Extensions._abbr_conflict(m):
             raise ExtensionError(f'{m.id}: abbreviation \'{m.abbr}\' is already used by extension \'{other}\'')
         Extensions._check_tree(src)
+        if d := denied_in_extension(src):  # rules R6 / R7 / R8: never installed, whatever the source
+            raise ExtensionError(denied_message(d))
+        Extensions._check_sdk(m)
         dest = Extensions._user_ext_path(m.id)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp, bak = dest.with_name(f'.{m.id}.tmp'), dest.with_name(f'.{m.id}.bak')
@@ -390,7 +424,7 @@ class Extensions:
         return sha256.strip().lower()
 
     @staticmethod
-    def install_from_archive(data: bytes, sha256: str) -> ExtensionManifest:
+    def install_from_archive(data: bytes, sha256: str, expect_id: str = '') -> ExtensionManifest:
         """Installs a zip archive (manifest.json at root or in a single top folder). sha256 of the archive is mandatory"""
         sha256 = Extensions._valid_sha256(sha256)
         if len(data) > ARCHIVE_SIZE_MAX:
@@ -416,7 +450,7 @@ class Extensions:
             if src is None:
                 raise ExtensionError('manifest.json not found in archive')
             with Extensions._lock:
-                return Extensions._install_tree(src)
+                return Extensions._install_tree(src, expect_id)
 
     @staticmethod
     def install_from_archive_file(path: pathlib.Path, sha256: str) -> ExtensionManifest:
@@ -426,13 +460,16 @@ class Extensions:
         return Extensions.install_from_archive(path.read_bytes(), sha256)
 
     @staticmethod
-    def _https_get(url: object, limit: int, timeout: int) -> bytes:
+    def _https_get(url: object, limit: int, timeout: int, missing_ok: bool = False) -> bytes | None:
+        """missing_ok: None for 404 / 410 (an optional file, ex. the signature of a catalog)"""
         import requests
         if not isinstance(url, str) or not url.lower().startswith('https://'):
             raise ExtensionError('only https:// urls are allowed')
         with requests.get(url, timeout=timeout, stream=True, headers={'User-Agent': 'Lustra extension manager'}) as r:
             if not r.url.lower().startswith('https://'):
                 raise ExtensionError('redirect to a non-https url refused')
+            if missing_ok and r.status_code in (404, 410):
+                return None
             r.raise_for_status()
             buf = io.BytesIO()
             for chunk in r.iter_content(64 * 1024):
@@ -443,19 +480,56 @@ class Extensions:
 
     @staticmethod
     def fetch_remote_catalog(url: str | None = None, timeout=15) -> list[dict]:
-        """Remote catalog index (https only): {"extensions": [{"id", "name", "abbr", "version", "url", "sha256", "description"}, ...]}"""
+        """Remote catalog index (https only): {"extensions": [{"id", "name", "abbr", "version", "url", "sha256", "site",
+        "description"}, ...], "expires"?}, signed by the maintainer (<url>.sig, lustra/trust.py). The signature is verified
+        before any entry is read: an untrusted catalog raises ExtensionError. Entries get 'signed' / 'keyId', and 'denied'
+        ({rule, message}) when their site is on the domain denylist"""
+        from .trust import CatalogTrustError, sig_url, verify_catalog
         url = url or os.environ.get(ENV_CATALOG_URL, '')
         if not url:
             return []
-        data = json.loads(Extensions._https_get(url, CATALOG_SIZE_MAX, timeout))
+        raw = Extensions._https_get(url, CATALOG_SIZE_MAX, timeout)
+        sig = Extensions._https_get(sig_url(url), CATALOG_SIG_SIZE_MAX, timeout, missing_ok=True)
+        try:
+            trust = verify_catalog(raw, sig)
+        except CatalogTrustError as err:
+            raise ExtensionError(str(err))
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise ExtensionError('catalog is not valid json')
         items = data.get('extensions', []) if isinstance(data, dict) else []
-        return [i for i in items if isinstance(i, dict) and isinstance(i.get('id'), str) and isinstance(i.get('url'), str)
-                and isinstance(i.get('sha256'), str) and re_sha256.fullmatch(i['sha256'])]
+        out = []
+        for i in items:
+            if not (isinstance(i, dict) and isinstance(i.get('id'), str) and re_ext_id.fullmatch(i['id']) and isinstance(i.get('url'), str)
+                    and i['url'].lower().startswith('https://') and isinstance(i.get('sha256'), str) and re_sha256.fullmatch(i['sha256'])):
+                continue
+            row = {**i, 'signed': trust.signed, 'keyId': trust.key_id}
+            for value in (i.get('site'), i.get('homepage')):
+                if isinstance(value, str) and value and (d := denied(value)):
+                    row['denied'] = {'rule': d.rule, 'message': denied_message(d)}
+                    break
+            out.append(row)
+        return out
 
     @staticmethod
-    def install_from_url(url: str, sha256: str, timeout=30) -> ExtensionManifest:
+    def install_from_url(url: str, sha256: str, timeout=30, expect_id: str = '') -> ExtensionManifest:
         sha256 = Extensions._valid_sha256(sha256)
-        return Extensions.install_from_archive(Extensions._https_get(url, ARCHIVE_SIZE_MAX, timeout), sha256)
+        return Extensions.install_from_archive(Extensions._https_get(url, ARCHIVE_SIZE_MAX, timeout), sha256, expect_id)
+
+    @staticmethod
+    def install_from_remote_catalog(catalog_url: str | None, ext_id: str, sha256: str = '', timeout=30) -> ExtensionManifest:
+        """Installs one entry of the signed remote catalog: the catalog is fetched and verified again, the archive must match
+        the entry's sha256 (and the sha256 the user confirmed, if given) and contain the announced extension id"""
+        ext_id = Extensions._valid_ext_id(ext_id)
+        entry = next((i for i in Extensions.fetch_remote_catalog(catalog_url) if i['id'] == ext_id), None)
+        if entry is None:
+            raise ExtensionError(f'extension \'{ext_id}\' is not in the remote catalog')
+        if entry.get('denied'):
+            raise ExtensionError(entry['denied']['message'])
+        if sha256 and Extensions._valid_sha256(sha256) != entry['sha256'].lower():
+            raise ExtensionError('Catalog đã thay đổi từ lúc bạn xác nhận: tải lại catalog rồi cài lại.')
+        return Extensions.install_from_url(entry['url'], entry['sha256'], timeout, expect_id=ext_id)
 
     @staticmethod
     def uninstall(ext_id: str) -> None:

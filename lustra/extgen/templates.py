@@ -15,6 +15,7 @@ import json
 import re
 
 from lustra.module import ProcModule
+from lustra.sdk import SDK_VERSION
 from lustra.vcs.version import APP_VERSION
 
 from .fetch import host_of
@@ -132,7 +133,7 @@ def make_manifest(*, ext_id: str, abbr: str, name: str, site: str, engine: str, 
     m = {
         'id': ext_id, 'name': name, 'abbr': abbr, 'version': '1.0.0', 'apiVersion': 1, 'kind': 'downloader', 'default': False,
         'site': site, 'media': [x for x in media if x in ('image', 'video', 'audio')] or ['image', 'video'],
-        'entry': f'downloader.py:{class_name(abbr)}', 'description': description[:300],
+        'entry': f'downloader.py:{class_name(abbr)}', 'minSdkVersion': SDK_VERSION, 'description': description[:300],
         'syntax': syntax if syntax is not None else SYNTAX_BY_ENGINE.get(engine, DANBOORU_SYNTAX),
         '$generator': {'tool': 'lustra.extgen', 'toolVersion': APP_VERSION, 'engine': engine, 'sourceUrl': site,
                        'createdAt': datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'), **(generator or {})},
@@ -156,9 +157,7 @@ _GELBOORU = _HEADER + '''
 import re
 from typing import Never, final
 
-from lustra.defines import ModuleCaps
-from lustra.download_gelbooru import DownloaderGelbooru
-from lustra.rex import re_tags_exclude_rx, re_tags_to_process_rx
+from lustra.sdk import DownloaderGelbooru, ModuleCaps, re_tags_exclude_rx, re_tags_to_process_rx
 
 __all__ = ('{cls}',)
 
@@ -234,7 +233,7 @@ _GELBOORU_API_KEY = '''
 _DANBOORU = _HEADER + '''
 from typing import final
 
-from lustra.download_db import DownloaderDb
+from lustra.sdk import DownloaderDb
 
 __all__ = ('{cls}',)
 
@@ -268,8 +267,7 @@ class {cls}(DownloaderDb):
 _JSON = _HEADER + '''
 {imports}from typing import final
 
-from lustra.defines import ModuleCaps
-from lustra.download_json import DownloaderJsonApi, JsonPost
+from lustra.sdk import DownloaderJsonApi, JsonPost, ModuleCaps
 
 __all__ = ('{cls}',)
 
@@ -279,7 +277,7 @@ MODULE_ABBR = {abbr_lit}
 
 @final
 class {cls}(DownloaderJsonApi):
-    \"\"\"{doc}: the shared JSON API downloader (lustra/download_json.py) with the endpoints and fields of this engine\"\"\"
+    \"\"\"{doc}: the shared JSON API downloader (lustra.sdk.DownloaderJsonApi) with the endpoints and fields of this engine\"\"\"
     CAPABILITIES = frozenset((ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.PREVIEW))
     SITE = SITENAME
     ABBR = MODULE_ABBR
@@ -453,8 +451,7 @@ from typing import final
 
 from bs4 import BeautifulSoup
 
-from lustra.defines import ModuleCaps
-from lustra.download_json import DownloaderJsonApi, JsonPost
+from lustra.sdk import DownloaderJsonApi, JsonPost, ModuleCaps
 
 __all__ = ('DownloaderEx',)
 

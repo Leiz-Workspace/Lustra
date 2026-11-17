@@ -39,8 +39,10 @@ from lustra.logger import Logger  # noqa: E402
 
 Logger.init(True, True)
 
+import lustra.sdk  # noqa: E402,F401  the API drafts import (and every base class), loaded before the hook: trusted code
 from lustra.cmdargs import prepare_arglist  # noqa: E402
 from lustra.defines import FMT_DATE, KNOWN_EXTENSIONS, ModuleCaps  # noqa: E402
+from lustra.denylist import default_list  # noqa: E402
 from lustra.download import Downloader  # noqa: E402
 from lustra.downloaders import _make_downloader  # noqa: E402
 from lustra.extensions import Extensions  # noqa: E402
@@ -50,6 +52,7 @@ from lustra.module import ProcModule  # noqa: E402
 from lustra.network import ThreadedHtmlWorker  # noqa: E402
 
 Extensions.ensure_loaded()  # builtin modules, before the hook (trusted code)
+default_list()  # the domain denylist file is read once here (Extensions._register checks the draft's site)
 
 _out = sys.__stdout__
 _in = sys.__stdin__
@@ -121,6 +124,8 @@ def _set_read_roots(draft: str) -> None:
     roots.update(p for p in sys.path if p and os.path.isdir(p))
     READ_ROOTS = tuple(os.path.realpath(r).rstrip(os.sep) + os.sep for r in roots if r)
     READ_FILES.update(os.path.realpath(f) for f in ('/dev/null', '/dev/urandom', *mimetypes.knownfiles))
+    if getattr(sys, 'frozen', False):  # frozen core: python modules not imported yet are read from the executable's archive
+        READ_FILES.add(os.path.realpath(sys.executable))
 
 
 def _readable(path) -> bool:

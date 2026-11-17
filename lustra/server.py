@@ -190,6 +190,8 @@ def m_ext_list(_: dict) -> list[dict]:
 def m_ext_install(p: dict) -> dict:
     if p.get('id'):
         m = Extensions.install_from_catalog(p['id'])
+    elif p.get('remoteId'):  # entry of the signed remote catalog: verified again here, archive pinned by the entry's sha256
+        m = Extensions.install_from_remote_catalog(p.get('catalogUrl') or None, p['remoteId'], p.get('sha256', ''))
     elif p.get('url'):
         m = Extensions.install_from_url(p['url'], p.get('sha256', ''))
     elif p.get('archivePath'):
@@ -197,7 +199,7 @@ def m_ext_install(p: dict) -> dict:
     elif p.get('path'):
         m = Extensions.install_from_dir(pathlib.Path(p['path']))
     else:
-        raise RpcError(-32602, 'id, url, archivePath or path required')
+        raise RpcError(-32602, 'id, remoteId, url, archivePath or path required')
     return {**m.to_public_dict(), 'restartRequired': Extensions.restart_required(m)}
 
 

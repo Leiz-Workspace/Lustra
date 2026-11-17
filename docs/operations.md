@@ -26,6 +26,8 @@ Biến môi trường:
 - `LUSTRA_USER_DATA`: userData của Electron;
 - `LUSTRA_TAGS_DIR`: thư mục tag list ưu tiên;
 - `LUSTRA_CATALOG_DIR`, `LUSTRA_CATALOG_URL`: catalog extension;
+- `LUSTRA_CATALOG_KEYS_FILE`: **chỉ cho nhà phát triển**. File khoá công khai thêm vào danh sách tin cậy của catalog từ xa (cùng định dạng `lustra/safety_data/catalog_keys.json`), dùng để thử catalog tự host (mục 3d);
+- `LUSTRA_CATALOG_ALLOW_UNSIGNED=1`: **chỉ cho nhà phát triển**. Nhận catalog từ xa không có file `.sig`; thẻ hiện "chưa ký", hộp xác nhận cảnh báo. Chữ ký có mà sai thì vẫn bị từ chối. Không bao giờ đặt biến này cho người dùng;
 - `LUSTRA_IPC=1`: CLI chạy ở chế độ báo tiến độ;
 - `LUSTRA_CATALOG_AUTOLOAD=0`: chỉ dùng extension builtin và đã cài (app đặt cho sidecar và job). Mặc định CLI và GUI Tk vẫn nạp extension trong catalog khi cần;
 - `LUSTRA_CORE`: đường dẫn lõi đóng băng (`lustra-core`) cho app dev;
@@ -37,7 +39,7 @@ Biến môi trường:
 - `LUSTRA_SECRET_ARGS`: danh sách JSON các tham số bí mật (`["-api_key", "KEY,USER"]`) do app truyền cho CLI; CLI đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SECRET_MODULE_ARGS`: object JSON `{"db": ["-api_key", "KEY,LOGIN"]}`, khoá API theo module cho job nhập thư viện (`dlindex_tools import`); đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
-- `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron. Bước `generator` kiểm: khoá chỉ ghi (không lộ ra renderer, không có dạng chữ thường), phiên bị từ chối (R10), không cài được bản nháp chưa đạt, cài cần xác nhận, dọn dẹp.
+- `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron. Bước `generator` kiểm: khoá chỉ ghi (không lộ ra renderer, không có dạng chữ thường), phiên bị từ chối (R10), phiên cho site trong danh sách chặn tên miền bị từ chối (R7, lời nhắn tiếng Việt), cài từ catalog từ xa không nhận URL / sha256 từ renderer, không cài được bản nháp chưa đạt, cài cần xác nhận, dọn dẹp.
   Bước `indexTools` kiểm: `index.clean` / `index.cleanCancel` không gọi trực tiếp được qua `rpc`, dọn cần xác nhận (từ chối thì không chạy, chạy thử thì không hỏi), nhập thư viện chỉ với thư mục chọn từ hộp thoại và module hợp lệ, một job nhập chạy thử thật (lõi `index import --dry-run`) và thẻ job của nó, nhóm tải nhiều site (2–8 module, ép `-skip_known` / `-prefix`, site sau chờ site trước, renderer không tự tạo nhóm), giao diện (Kiểm tra / Dọn index ở Cài đặt, hộp nhập thư viện, chọn site thêm, khung nhóm trong hàng đợi; ảnh `20-…` tới `24-…`).
 
 Chế độ AI của trình tạo extension cần gói `anthropic`: `uv pip install --python .venv/bin/python 'anthropic>=2.9'`, hoặc `pip install "lustra[ai]"`. Khoá Claude API nhập trong app (Cài đặt → AI tạo extension). Khoá được mã hoá bằng keyring của hệ điều hành; không có keyring thì app không lưu. Chế độ "Không dùng AI" không cần gói hay khoá này. Bản nháp nằm ở `<data>/extgen/drafts/`.
@@ -138,6 +140,50 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
 - Công cụ: `python -m lustra.gender_model status` (có `LUSTRA_GENDER_MODEL_URL` thì kiểm server), `install`, `remove`, `classify ảnh.jpg …` (in nhãn, độ tin cậy, bằng chứng, safety tag; video / ảnh động thì xét trên nhiều khung; qua server nếu có biến địa chỉ).
 - Kết quả theo post nằm ở `<data>/cache/gender_model.sqlite` của client; xoá file này để model xem lại.
 
+## 3d. Catalog extension từ xa: ký số
+App và CLI chỉ tin catalog từ xa (`Settings → Advanced → Catalog URL`, `LUSTRA_CATALOG_URL`) khi `index.json` có file chữ ký `index.json.sig` cạnh nó, ký bằng Ed25519 với khoá có trong `lustra/safety_data/catalog_keys.json`. Lõi kiểm chữ ký trên đúng các byte của `index.json` trước khi đọc bất kỳ mục nào; mỗi mục ghi sha256 của archive nên chữ ký phủ luôn các archive. Kiểm bằng `lustra/ed25519.py` (Python thuần theo RFC 8032, có test vector), không cần thư viện thêm.
+
+Hiện trạng: `catalog_keys.json` để **danh sách rỗng (khoá giữ chỗ)**, nên mọi catalog từ xa bị từ chối với lời nhắn "chưa có khoá công khai". Người bảo trì giữ khoá bí mật và làm một lần:
+```bash
+python tools/sign_catalog.py genkey --out ~/lustra-keys/signing-key.pem    # file 0600, không ghi đè; giữ offline, có bản sao lưu
+python tools/sign_catalog.py pubkey --key ~/lustra-keys/signing-key.pem    # in mục {keyId, publicKey, comment}
+```
+Dán mục in ra vào `"keys"` của `lustra/safety_data/catalog_keys.json`, commit file đó (chỉ có khoá công khai) rồi phát hành bản Lustra mới. Không bao giờ commit khoá bí mật (`.gitignore` bỏ qua `*.pem`, `*.key`, `signing-key*`); có thể tạo khoá bằng `openssl genpkey -algorithm ed25519 -out signing-key.pem`, cùng định dạng.
+
+Mỗi lần sửa catalog:
+```bash
+python tools/sign_catalog.py sign index.json --key ~/lustra-keys/signing-key.pem --expires-days 180   # ghi index.json.sig
+python tools/sign_catalog.py verify index.json     # kiểm như app, với khoá đi kèm bản Lustra đang chạy
+```
+Đăng cả `index.json` lẫn `index.json.sig` ở cùng thư mục (URL chữ ký = URL index + `.sig`, giữ query). `--expires-days` ghi trường `expires` vào `index.json` rồi mới ký: quá hạn đó app từ chối catalog, nên phải ký lại trước khi hết hạn (chống việc dùng mãi một catalog cũ). Định dạng mục: `{"id", "name", "abbr", "version", "url" (https), "sha256", "site", "description"}`; công cụ từ chối ký nếu có mục app sẽ bỏ qua. Ký dùng gói `cryptography` nếu có (thời gian hằng), không thì dùng `lustra.ed25519`; chữ ký Ed25519 tất định nên hai cách ra cùng kết quả.
+
+Đổi khoá: thêm khoá mới vào `catalog_keys.json` và phát hành, ký catalog bằng khoá mới khi phần lớn người dùng đã cập nhật, rồi bỏ khoá cũ ở bản sau. Lộ khoá: bỏ khoá đó khỏi `catalog_keys.json` và phát hành bản sửa ngay.
+
+Thử catalog tự host khi phát triển: tạo khoá thử trong thư mục tạm, ký, rồi chạy app hoặc lõi với `LUSTRA_CATALOG_KEYS_FILE=<file json có mục khoá thử>`; hoặc `LUSTRA_CATALOG_ALLOW_UNSIGNED=1` cho catalog chưa ký.
+
+## 3e. Danh sách chặn tên miền
+`lustra/safety_data/denied_domains.txt` liệt kê các tên miền không bao giờ được tạo hay cài extension: dịch vụ streaming thương mại / có DRM (R7), site đăng lại nội dung trả phí của người khác (R6), site có nội dung bất hợp pháp (R8). Mỗi dòng: `<tên miền> <R6|R7|R8> [lý do]`; một mục chặn tên miền đó và mọi tên miền con. Với R8, người bảo trì nên ghi dạng băm để file không in tên site:
+```bash
+python -c "import hashlib,sys; print('sha256:' + hashlib.sha256(sys.argv[1].encode()).hexdigest())" ten-mien.example
+```
+Chặn ở: chuẩn hoá link site của trình tạo (`survey`, `fetch`, `new`, phiên AI, trước mọi request và lời gọi model), mọi request của `SafeFetcher` (kể cả redirect và robots.txt), kiểm tra offline bản nháp (`domain:R7`…), mọi đường cài (thư mục, zip, catalog cục bộ, catalog từ xa) và lúc nạp extension. Host được so ở mọi dạng mà thư viện mạng có thể đi tới: chữ thường, bỏ dấu chấm cuối, giải mã `%xx`, ASCII / punycode của tên miền quốc tế (IDNA 2008 / UTS 46 như `requests`, và IDNA 2003: ký tự full-width, dấu chấm kiểu Nhật, ký tự rộng 0). URL có `\`, khoảng trắng hoặc ký tự điều khiển bị từ chối (các thư viện tách host khác nhau). Địa chỉ IP của một tên miền bị chặn không được dò ngược. Thêm dòng không cần sửa code; `lustra.tests.test_extgen.DenylistTests` kiểm file và các cách lách.
+
+## 3f. Đánh giá trình tạo extension (eval)
+`python -m lustra.aigen.eval` chạy trình tạo trên một bộ site (mặc định `lustra/aigen/eval_sites.json`: kết quả mong đợi, engine, rule) và đo tỉ lệ đạt, chi phí (từ `usage` của API), số lượt model, số bước tool, số request tới site, thời gian, lỗi. Báo cáo `report.json` + `report.md` nằm ở `<data>/extgen/eval/<thời điểm>/` (hoặc `--out`). Bản nháp nằm trong thư mục báo cáo, không bao giờ được cài; mỗi site còn kiểm "không cài gì" và "khoá API không có trong file nào".
+```bash
+# 1. Ghi dữ liệu site thật một lần, chế độ không AI (miễn phí; lịch sự: robots.txt, 1 request/giây)
+.venv/bin/python -m lustra.aigen.eval run --mode template --live --record ~/lustra-eval-fixtures
+# 2. Chạy lại offline, không mạng: template, hoặc model giả lập (đo phần tính chi phí, không gọi API)
+.venv/bin/python -m lustra.aigen.eval run --mode template --fixtures ~/lustra-eval-fixtures
+.venv/bin/python -m lustra.aigen.eval run --mode fake --fixtures ~/lustra-eval-fixtures
+# 3. Ước tính chi phí trước khi chạy với Claude thật (không gọi API)
+.venv/bin/python -m lustra.aigen.eval estimate --max-usd 2
+# 4. Chạy với Claude thật: TỐN PHÍ, cần --confirm-cost, khoá từ ANTHROPIC_API_KEY hoặc `ant auth login`
+ANTHROPIC_API_KEY=... .venv/bin/python -m lustra.aigen.eval run --mode ai --live --confirm-cost --max-usd 2
+```
+- `--only a,b` chạy một số site; site có `"modes": ["ai"]` (site HTML tùy biến) chỉ chạy ở chế độ AI. Chạy offline với `--mode ai --fixtures DIR` cũng được, nhưng request nào model gọi mà chưa ghi sẽ nhận 404 và được liệt kê ở `missing`.
+- Ước tính chi phí (`estimate`): (1) **trường hợp xấu nhất** = số site × trần mỗi phiên (`--max-usd`, phiên không bắt đầu lượt mới khi đã chạm trần; lượt cuối có thể vượt một ít); (2) **mô hình**: một phiên `--turns` lượt (mặc định 14), lượt đầu ghi cache tiền tố (system prompt + tool, đếm theo 3,5 ký tự / token), lượt sau đọc cache tiền tố + lịch sử và ghi phần mới (`--out-tokens` 1500 + `--result-tokens` 2500), giá theo `MODELS` trong `lustra/aigen/session.py` (Opus 5.5: 4 / 20 USD mỗi triệu token vào / ra, đọc cache 0,20, ghi cache 5). Với mặc định: ~0,77 USD / phiên, 9 site ~7 USD, xấu nhất 18 USD; (3) **đo được**: trung bình `usd` các phiên AI cũ (báo cáo eval và `report.json` của bản nháp) nếu có. Khi chạy thật, lệnh in ước tính và dừng cả bộ khi tổng chi phí chạm tổng các trần.
+
 ## 4. Test
 ```bash
 .venv/bin/python -m unittest lustra.tests.test_lustra
@@ -146,17 +192,17 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
 cd app && npm run check
 LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -a ./node_modules/.bin/electron . --no-sandbox --ozone-platform=x11
 ```
-`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline; test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói. `lustra.tests.test_dlindex_tools` chạy offline (site giả, thư mục tạm).
+`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline (gồm `DenylistTests`: các cách lách danh sách chặn tên miền; `SdkTests`: `lustra.sdk` và `minSdkVersion`); test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói. `lustra.tests.test_dlindex_tools` chạy offline (site giả, thư mục tạm). `lustra.tests.test_catalog_trust`: test vector RFC 8032, chữ ký catalog (sửa 1 byte, khoá lạ, chưa ký, khoá giữ chỗ, hết hạn, biến môi trường cho nhà phát triển), cài từ catalog từ xa qua transport giả, `tools/sign_catalog.py` (và đối chiếu với `openssl` nếu máy có). `lustra.tests.test_aigen_eval`: harness eval ghi / phát lại fixture (cả qua server HTTP cục bộ với `requests` thật), chế độ template, model giả lập, chế độ AI với client theo kịch bản, trần chi phí, kiểm khoá bị lộ; không gọi API trả phí.
 
 Toàn bộ test offline như CI (`.github/workflows/run-tests.yml`), với thư mục dữ liệu tạm:
 ```bash
-LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify
+LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify lustra.tests.test_catalog_trust lustra.tests.test_aigen_eval
 ```
 
 ## 5. Build
 - CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`, icon `images/lustra.ico`: icon mặt nạ cam của app ở 16–256 px). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.
 - App desktop:
-  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli`, `index` (nhập thư viện chạy thử) và `aigen`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
+  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli`, `index` (nhập thư viện chạy thử), `aigen`, danh sách chặn tên miền (phiên `https://www.youtube.com/` bị từ chối R7) và các file `lustra/safety_data`. Đo ngày 2026-11-17 (có `lustra.sdk`, `lustra.trust`, danh sách chặn): 51,4 MiB khi kèm `anthropic`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
   2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
   3. Model server chạy độc lập (tuỳ chọn, phát hành riêng với app): `python tools/build_model_server.py`, xem mục 3c.
   - App đã đóng gói dùng `<resources>/core/lustra-core`. Biến `LUSTRA_CORE` trỏ app dev sang một lõi đóng băng.

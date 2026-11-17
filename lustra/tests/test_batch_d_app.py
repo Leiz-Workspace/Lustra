@@ -88,7 +88,11 @@ class BuildCoreTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stage = pathlib.Path(tmp)
             data = dict((dest, src) for src, dest in bc._stage_data(stage, 'aliases'))
-            self.assertEqual({'lustra/builtin_ext', 'lustra/gender_rules', 'extensions', '2tags', 'aigen_refs'}, set(data))
+            self.assertEqual({'lustra/builtin_ext', 'lustra/gender_rules', 'lustra/safety_data', 'extensions', '2tags', 'aigen_refs'},
+                             set(data))
+            # domain denylist + trusted catalog keys: read at run time by the core (fail closed when missing)
+            self.assertTrue((data['lustra/safety_data'] / 'denied_domains.txt').is_file())
+            self.assertTrue((data['lustra/safety_data'] / 'catalog_keys.json').is_file())
             self.assertTrue((data['lustra/builtin_ext'] / 'danbooru' / 'manifest.json').is_file())
             from lustra.aigen.tools import REF_FILES  # sources the AI generator shows the model (frozen core: no .py on disk)
             self.assertTrue(all((data['aigen_refs'] / rel).is_file() for rel in REF_FILES))
