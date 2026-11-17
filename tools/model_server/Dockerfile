@@ -4,6 +4,10 @@
 #     -v lustra-model:/models lustra-model-server
 # The model (~380 MB, pinned revision, sha256 checked) is downloaded into the /models volume on the first start.
 # Listening on 0.0.0.0 inside the container needs a token (the server refuses to start without one).
+# NVIDIA GPU (needs the NVIDIA Container Toolkit on the host; CUDA / cuDNN come from pip, ~2.4 GB more):
+#   docker build -f tools/model_server/Dockerfile --build-arg ORT_PACKAGE='onnxruntime-gpu[cuda,cudnn]' -t lustra-model-server:gpu .
+#   docker run -d --gpus all --name lustra-model -e LUSTRA_GENDER_MODEL_TOKEN=<token> -p 127.0.0.1:8765:8765 \
+#     -v lustra-model:/models lustra-model-server:gpu
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,7 +16,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LUSTRA_DATA_DIR=/data
 
 # the server needs only these: the downloader dependencies of requirements.txt are not used
-RUN pip install --no-cache-dir 'requests>=2.31' 'numpy>=1.26' 'onnxruntime>=1.18' 'pillow>=10'
+ARG ORT_PACKAGE=onnxruntime>=1.18
+RUN pip install --no-cache-dir 'requests>=2.31' 'numpy>=1.26' "${ORT_PACKAGE}" 'pillow>=10'
 
 WORKDIR /srv
 COPY lustra ./lustra

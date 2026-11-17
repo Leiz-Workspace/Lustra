@@ -40,5 +40,7 @@ built program under its own license).
 | numpy | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 |
 | onnxruntime (CPU) / onnxruntime-gpu | MIT |
 | Pillow | MIT-CMU |
-| requests and its dependencies | see above |
-| NVIDIA CUDA / cuDNN libraries (`nvidia-*` pip packages, GPU installs only) | NVIDIA software license agreements; installed by the user from PyPI, never bundled by Lustra |
+| requests, yarl and their dependencies (urllib3, idna, certifi, charset-normalizer, multidict, propcache) | see above |
+| Python (CPython runtime in the bundle) | PSF-2.0 |
+| onnxruntime-directml (Windows `directml` bundle) | MIT; `DirectML.dll` inside it comes with Microsoft's own license terms, shipped in the package |
+| NVIDIA CUDA / cuDNN libraries (`nvidia-*` pip packages, GPU installs only) | NVIDIA software license agreements; installed from PyPI by the user into a Python environment or a locally built GPU Docker image; Lustra publishes no bundle or image containing them |

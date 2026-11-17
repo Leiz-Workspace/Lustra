@@ -49,6 +49,13 @@ window.LUSTRA_GUIDE = {
       title: 'Chạy model server',
       blocks: [
         ['p', 'App không kèm model: model chạy trong một **model server** riêng, app chỉ gửi ảnh tới địa chỉ API trong Cài đặt (mặc định `http://127.0.0.1:8765`). Lần đầu chạy, server tự tải model (~380 MB, có kiểm sha256).'],
+        ['p', '**Bản chạy độc lập** (không cần Python): giải nén `lustra-model-server-<phiên bản>-<hệ điều hành>-cpu` vào một thư mục rồi chạy file `lustra-model-server` trong đó. Cho chạy nền mỗi khi đăng nhập:'],
+        ['ul', [
+          'Linux: chép thư mục vào `~/.local/share/lustra-model-server`, rồi dùng file `lustra-model-server-bundle.service` đi kèm (lệnh ở đầu file).',
+          'macOS: trong thư mục đó chạy `sh install-model-server.sh`; gỡ bằng `sh install-model-server.sh --uninstall`.',
+          'Windows: trong thư mục đó chạy `powershell -ExecutionPolicy Bypass -File install-model-server.ps1`; gỡ bằng thêm `-Uninstall`.',
+          'Bản này chạy bằng CPU (Windows có thêm bản DirectML cho GPU). GPU NVIDIA: dùng môi trường Python hoặc image Docker GPU (mục Dùng GPU).',
+        ]],
         ['p', 'Trên máy này, từ thư mục mã nguồn Lustra:'],
         ['code', 'pip install -e ".[model]"'],
         ['code', 'python -m lustra.model_server'],
@@ -75,7 +82,7 @@ window.LUSTRA_GUIDE = {
           '`--device cpu`: luôn chạy CPU, kể cả khi có GPU.',
           '`--device gpu`: chỉ chạy GPU; server báo lỗi thay vì lặng lẽ chạy bằng CPU.',
           'Windows với GPU bất kỳ: `onnxruntime-directml`. AMD trên Linux: onnxruntime bản ROCm. Hai cách này chưa được thử với Lustra.',
-          'Image Docker hiện chỉ dùng CPU.',
+          'Docker có GPU NVIDIA (cần NVIDIA Container Toolkit): build image với `--build-arg ORT_PACKAGE=\'onnxruntime-gpu[cuda,cudnn]\'` rồi chạy với `--gpus all` (lệnh đầy đủ ở đầu `tools/model_server/Dockerfile`).',
         ]],
       ],
     },
