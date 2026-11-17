@@ -205,6 +205,7 @@ class EvaluateTests(TestCase):
             self.assertEqual('silver', r['mode'])
             self.assertEqual({'modelGate': 1}, r['posts']['excluded'])
             self.assertEqual({'loli': 1}, r['posts']['modelGateTags'])
+            self.assertEqual([{'key': 'db:14', 'gateTag': 'loli', 'unblockedTags': ['2girls', 'yuri']}], r['posts']['modelGateDropped'])
             self.assertEqual({'thumb': 1}, r['posts']['noPicture'])
             s = r['systems']['model']['sample']['global']
             self.assertEqual((5, 1.0, 0.8), (s['n'], s['coverage'], s['microPrecision']))
@@ -257,6 +258,37 @@ class EvaluateTests(TestCase):
         m['dropped'] = [{'key': 'db:1', 'reason': 'unsafe'}]
         r3 = ge.evaluate(m, model=StubModel(), fetch=_fetch(), gold=gold, inputs=('sample',), log=lambda _: None)
         self.assertEqual(1, r3['posts']['excluded']['dropped'])
+
+    def test_cli_drops_gated_posts_from_the_manifest(self) -> None:  # §3.2 / §4: like label, the model gate's posts are not kept
+        def fetch(_self, module: str, url: str) -> bytes:  # https://cdn.donmai.us/<sample|180x180>/<id>.jpg
+            kind = 'thumb' if '/180x180/' in url else 'sample'
+            return PNG + f'db:{url.rsplit("/", 1)[1].split(".", maxsplit=1)[0]}|{kind}'.encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = pathlib.Path(tmp)
+            manifest_path = folder / 'manifest.json'
+            ge.write_json(manifest_path, _manifest())
+            logged: list[str] = []
+            with mock.patch.object(ge, '_model_backend', return_value=StubModel()), mock.patch.object(ge.ImageFetcher, 'get', fetch), \
+                    mock.patch.object(ge, '_log', logged.append):
+                self.assertEqual(0, ge.main(['evaluate', '--manifest', str(manifest_path), '--silver', '--image-interval', '0',
+                                             '--out-dir', str(folder / 'report')]))
+                man = ge.read_json(manifest_path)
+                self.assertNotIn('db:14', [p['key'] for p in man['posts']])
+                self.assertEqual(7, len(man['posts']))
+                entry = next(d for d in man['dropped'] if d['key'] == 'db:14')
+                self.assertEqual(('modelGate', 'loli', 'evaluate'), (entry['reason'], entry['gateTag'], entry['by']))
+                self.assertFalse({'tags', 'urls', 'unblockedTags', 'postUrl'} & set(entry))  # the gate tag only
+                self.assertNotIn('14.jpg', json.dumps(man))
+                self.assertTrue(any('db:14' in x and '2girls, yuri' in x and 'safety.py' in x for x in logged))  # tags to review
+                report = ge.read_json(folder / 'report' / 'report.json')
+                self.assertEqual((1, ge.sha256_file(manifest_path)), (report['manifest']['removedFromManifest'], report['manifest']['sha256']))
+                self.assertIn('đã bị xoá khỏi manifest', (folder / 'report' / 'report.md').read_text(encoding='utf-8'))
+                # a second run: the post is gone, nothing is dropped twice
+                self.assertEqual(0, ge.main(['evaluate', '--manifest', str(manifest_path), '--silver', '--image-interval', '0',
+                                             '--out-dir', str(folder / 'report')]))
+                man2 = ge.read_json(manifest_path)
+                self.assertEqual((7, 1), (len(man2['posts']), sum(d['key'] == 'db:14' for d in man2['dropped'])))
+            self.assertEqual([], _no_pictures_in(folder))
 
 
 class AgreeTests(TestCase):

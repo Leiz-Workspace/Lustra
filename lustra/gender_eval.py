@@ -137,6 +137,30 @@ def sha256_file(path: pathlib.Path | str) -> str:
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
 
+def unblocked_tags(tags: Iterable[str]) -> list[str]:
+    """tags of a dropped post that the blacklist does not block: candidates to review for lustra/safety.py (§4.1)"""
+    return sorted({t.strip().lower() for t in tags if t and t.strip() and not blocked_tag([t])})
+
+
+def drop_from_manifest(path: pathlib.Path | str, drops: list[dict], by: str) -> int:
+    """§3.2 / §4: a post found unsafe (by a human or the model gate) is not kept. Removes the posts from the manifest file
+    and records them in its 'dropped' list: key, reason, model gate tag, never the post's urls or tags.
+    drops: [{'key', 'reason', 'gateTag'?}]. Returns the number of posts removed"""
+    keys = {d['key'] for d in drops}
+    manifest = read_json(path)
+    before = len(manifest.get('posts', []))
+    manifest['posts'] = [p for p in manifest.get('posts', []) if p['key'] not in keys]
+    known = {d.get('key') for d in manifest.setdefault('dropped', [])}
+    at = _now()
+    for d in drops:
+        if d['key'] not in known:
+            known.add(d['key'])
+            manifest['dropped'].append({'key': d['key'], 'reason': d['reason'], **({'gateTag': d['gateTag']} if d.get('gateTag') else {}),
+                                        'at': at, 'by': by})
+    write_json(path, manifest)
+    return before - len(manifest['posts'])
+
+
 # ---------------- tags: aliases, exclusions, slices ----------------
 
 _aliases_loaded = False
@@ -770,6 +794,7 @@ def evaluate(manifest: dict, *, model, fetch: Callable[[dict, str], bytes], gold
     gold_labels = {k: v for k, v in _labels_of(gold).items() if v in CLASSES} if gold is not None else {}
     excluded: Counter = Counter()
     gate_tags: Counter = Counter()
+    gate_dropped: list[dict] = []
     no_picture: Counter = Counter()
     ms: dict[str, list[float]] = {k: [] for k in inputs}
     probs_of: dict[tuple[str, str], dict[str, float]] = {}
@@ -833,6 +858,7 @@ def evaluate(manifest: dict, *, model, fetch: Callable[[dict, str], bytes], gold
         if gate := next((v.safety_tag for v, _ in verdicts.values() if v.safety_tag), ''):
             excluded['modelGate'] += 1
             gate_tags[gate] += 1
+            gate_dropped.append({'key': key, 'gateTag': gate, 'unblockedTags': unblocked_tags(post['tags'])})
             continue
         evaluated += 1
         sl = _slice_keys(post, mode, tier0)
@@ -864,7 +890,8 @@ def evaluate(manifest: dict, *, model, fetch: Callable[[dict, str], bytes], gold
                      'sparseShare': manifest.get('sparseShare')},
         'posts': {'candidates': len(posts), 'processed': len(processed), 'evaluated': evaluated,
                   'withReference': len(systems['model'][inputs[0]]) if inputs else 0, 'excluded': dict(excluded),
-                  'modelGateTags': dict(gate_tags), 'noPicture': dict(no_picture), 'stopReason': stop_reason,
+                  'modelGateTags': dict(gate_tags), 'modelGateDropped': gate_dropped, 'noPicture': dict(no_picture),
+                  'stopReason': stop_reason,
                   'incomplete': bool(stop_reason)},
         'systems': {name: {k: _analyze(rows, mode) for k, rows in per.items()} for name, per in systems.items()},
         'inputAgreement': agreement,
@@ -917,6 +944,10 @@ def render_markdown(report: dict) -> str:
     if p.get('modelGateTags'):
         L.append(f'- Safety gate của model loại {sum(p["modelGateTags"].values())} post (tag: '
                  f'{", ".join(f"`{t}` {n}" for t, n in p["modelGateTags"].items())}); các post này không có trong mọi số đo.')
+        if man.get('removedFromManifest'):
+            keys = ', '.join(f'{d["key"]} (`{d["gateTag"]}`)' for d in p.get('modelGateDropped', []))
+            L.append(f'- {man["removedFromManifest"]} post đó đã bị xoá khỏi manifest (ghi trong `dropped` của manifest, chỉ kèm tag '
+                     f'của gate, không có URL hay tag của post): {keys}.')
     if p.get('incomplete'):
         L.append(f'- **Chưa chạy hết**: {p["stopReason"]}.')
     L.append('')
@@ -1184,16 +1215,13 @@ class LabelSession:
                 raise EvalError('unknown post')
             self.doc['labels'].pop(key, None)
             self.order = [k for k in self.order if k != key]
-            tags = sorted({t.lower() for t in post['tags']})
-            entry = {'reason': reason, 'at': _now(), 'tags': tags, 'unblockedTags': [t for t in tags if not blocked_tag([t])]}
+            entry = {'reason': reason, 'at': _now(), 'tags': sorted({t.lower() for t in post['tags']}),
+                     'unblockedTags': unblocked_tags(post['tags'])}
             if gate_tag:
                 entry['gateTag'] = gate_tag
             self.doc['dropped'][key] = entry
             self.save()
-            manifest = read_json(self.manifest_path)
-            manifest['posts'] = [p for p in manifest.get('posts', []) if p['key'] != key]
-            manifest.setdefault('dropped', []).append({'key': key, 'reason': reason, 'at': entry['at'], 'by': self.annotator})
-            write_json(self.manifest_path, manifest)
+            drop_from_manifest(self.manifest_path, [{'key': key, 'reason': reason, 'gateTag': gate_tag}], self.annotator)
         _log(f'dropped {key} ({reason}{f": model gate {gate_tag}" if gate_tag else ""}); tags not covered by the blacklist, '
              f'to review for lustra/safety.py (§4.1): {", ".join(entry["unblockedTags"]) or "-"}')
         return entry
@@ -1416,6 +1444,13 @@ def cmd_evaluate(args) -> int:
                           inputs=inputs, min_conf=GenderConf.parse(args.min_conf), cache=cache, should_stop=should_stop)
     finally:
         fetcher.close()
+    if gated := report['posts'].get('modelGateDropped'):  # like label: posts the model gate trips on are not kept
+        removed = drop_from_manifest(args.manifest, [{'key': d['key'], 'reason': 'modelGate', 'gateTag': d['gateTag']} for d in gated],
+                                     'evaluate')
+        report['manifest']['removedFromManifest'] = removed
+        for d in gated:
+            _log(f'dropped {d["key"]} (model gate {d["gateTag"]}) from {args.manifest}; tags not covered by the blacklist, '
+                 f'to review for lustra/safety.py (§4.1): {", ".join(d["unblockedTags"]) or "-"}')
     report['manifest']['path'] = str(args.manifest)
     report['manifest']['sha256'] = sha256_file(args.manifest)
     report['pictureRequests'] = fetcher.requests
