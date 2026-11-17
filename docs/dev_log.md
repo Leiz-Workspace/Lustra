@@ -592,7 +592,12 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Image công khai (kiểm lại sau khi chủ repo đổi lần nữa):** từ máy đã `docker logout ghcr.io`, registry cấp token kéo ẩn danh; `docker pull ghcr.io/leiz-workspace/lustra-model-server:2.0.1` và `:latest` tải về cùng digest `sha256:99b00e3c…` (1,05 GB), manifest có `linux/amd64` và `linux/arm64`. Chạy image vừa kéo (token, model gắn chỉ đọc): server lên, ffmpeg 7.1.5 cho `/v1/frames`, icon app → `only_female` (1,3 s gồm nạp model), clip `testsrc` 8 khung → `unknown`, thiếu token bị từ chối.
 - **Chỗ hiển thị nhỏ còn lại:** image CPU chạy không có `--gpus` thì trong container không có `nvidia-smi`; card NVIDIA chỉ thấy qua sysfs, không có VRAM, và dòng `hardware:` của log ghi "shared memory". Kết luận `no_gpu` vẫn đúng; sửa câu chữ cần một bản mới.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ad)
+### 7ae. Bản 2.0.2: dòng phần cứng của model server — 2026-11-17
+- **Lỗi:** `describe_hardware` (log của model server) ghi mọi GPU không đọc được VRAM là "shared memory", app ghi "(dùng chung RAM)". Card NVIDIA chỉ thấy qua sysfs (image CPU chạy không có `--gpus`, không có `nvidia-smi`) vì vậy trông như GPU tích hợp; tên đọc từ sysfs còn là "Nvidia GPU …".
+- **Sửa:** chỉ GPU `shared` (Intel, Apple) mới là bộ nhớ chung; card khác không đọc được VRAM ghi "VRAM unknown (no nvidia-smi)" với NVIDIA, "VRAM unknown" với hãng khác; app ghi "không đọc được VRAM: server không có nvidia-smi". Tên hãng theo `VENDOR_NAMES` (NVIDIA, AMD, Intel). `hardware_check` không đổi (`no_gpu`). Test: tên card NVIDIA từ sysfs, dòng log với card NVIDIA không đọc được VRAM, GPU Intel dùng chung, APU AMD.
+- **Phát hành:** version 2.0.2 (`app/package.json`, lock file, `pyproject.toml`; lõi `2.0 r2`), ghi chú `docs/releases/v2.0.2.md`; `develop` → `staging` (rc) → `production`.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ae)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
@@ -605,4 +610,4 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - thử trên máy Windows / macOS thật: app (CI đã self-test cả 6 nền tảng), model server chạy độc lập (CPU, DirectML), script chạy nền;
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
-  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn); dòng `hardware:` gọi card NVIDIA không đọc được VRAM là "shared memory" (nên ghi "không rõ VRAM").
+  - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn).

@@ -2599,7 +2599,9 @@ function gmHardwareText(st) {
   const hw = st?.model?.hardware;
   if (!hw) return st?.reachable ? 'server không báo phần cứng (bản cũ)' : '—';
   const gpus = (hw.gpus || []).map((g) => (Number.isInteger(g.vramMiB)
-    ? `${g.name}: VRAM ${gmGb(g.vramMiB)}${Number.isInteger(g.vramFreeMiB) ? `, trống ${gmGb(g.vramFreeMiB)}` : ''}` : `${g.name} (dùng chung RAM)`));
+    ? `${g.name}: VRAM ${gmGb(g.vramMiB)}${Number.isInteger(g.vramFreeMiB) ? `, trống ${gmGb(g.vramFreeMiB)}` : ''}`
+    : g.shared ? `${g.name} (dùng chung RAM)`
+      : `${g.name} (không đọc được VRAM${g.vendor === 'nvidia' ? ': server không có nvidia-smi' : ''})`));
   const rt = st.check?.runtime;
   return [gpus.length ? gpus.join(' · ') : 'không có GPU',
     `onnxruntime ${hw.runtime || '?'} ${rt ? `có ${GM_DEVICE[rt] || rt}` : 'bản CPU'}`,
