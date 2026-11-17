@@ -43,6 +43,7 @@ from .defines import (
     ModuleConfigType,
     ThreadInterruptException,
 )
+from .dlindex import IndexWriter, indexing_enabled, record_for
 from .download_base import DownloaderBase
 from .file_parser import prepare_item_infos_dict
 from .gender import GenderConf
@@ -116,6 +117,11 @@ class Downloader(DownloaderBase):
         self._file_name_ext_cache: dict[str, tuple[str, str]] = {}
         self.no_conflict_delay: bool = False
         '''interactive frontends (desktop sidecar) skip the 2s pause after argument conflict warnings'''
+        self._index_on: bool = False
+        '''finished files are recorded in the download index (lustra/dlindex.py), set at launch unless LUSTRA_DLINDEX=0'''
+        self._index_writer: IndexWriter | None = None
+        self._index_lock = Lock()
+        self._index_warned: bool = False
 
     @property
     def total_count_all(self) -> int:
@@ -133,6 +139,7 @@ class Downloader(DownloaderBase):
     def __cleanup(self) -> None:
         # self.current_state = DownloaderStates.IDLE
         # self._file_name_ext_cache.clear()  # do not
+        self._close_index()
         self.raw_html_cache.clear()
         self.filtered_out_ids_cache.clear()
         if self.session:
@@ -157,6 +164,7 @@ class Downloader(DownloaderBase):
     def _process_item_safe(self, raw: str) -> None:
         """A failing item is counted as failed, it does not abort the whole run (Ruxx killed every thread)"""
         self._item_tls.active = True
+        self._item_tls.raw = raw
         try:
             self._process_item(raw)
         except DownloadInterruptException:
@@ -174,6 +182,7 @@ class Downloader(DownloaderBase):
             self._inc_proc_count()
         finally:
             self._item_tls.active = False
+            self._item_tls.raw = ''
 
     # threaded
     def _inc_proc_count(self) -> None:
@@ -245,6 +254,8 @@ class Downloader(DownloaderBase):
             result.result_str = f'{result.result_str}done ({result.file_size / Mem.MB:.2f} Mb)'
             with self.item_lock:
                 self.success_count += 1
+            if self._index_on and self.download_mode == DownloadModes.FULL:
+                self._index_file(item_id, dest, result.file_size)
         else:
             result.result_str = f'{result.result_str}failed'
             if result.reason:
@@ -256,6 +267,37 @@ class Downloader(DownloaderBase):
                 self.failed_items.append(item_id)
 
         trace(result.result_str, True)
+
+    # threaded
+    def _index_file(self, item_id: str, dest: pathlib.Path, size: int) -> None:
+        """Queues a finished file for the download index: a background thread writes it with others, the download never waits.
+        The record is built from the post info of the scan (no request, the file is not read)"""
+        try:
+            info = self._item_info_for(item_id)
+            abbrp = self._get_module_abbr_p()
+            post_id = item_id[len(abbrp):] if self.add_filename_prefix and item_id.startswith(abbrp) else item_id
+            record = record_for(self._get_module_abbr(), info, post_id, dest, size, getattr(self._item_tls, 'raw', ''))
+            with self._index_lock:
+                if self._index_writer is None:
+                    self._index_writer = IndexWriter()
+                writer = self._index_writer
+            writer.add(record)
+        except Exception:
+            with self._index_lock:
+                warn, self._index_warned = not self._index_warned, True
+            if warn:
+                trace(f'Warning (W2): download index: unable to record {item_id}: {format_exception("row")}', True)
+
+    def _close_index(self) -> None:
+        """Writes the queued index records (end of a run) and closes the -skip_known reader"""
+        with self._index_lock:
+            writer, self._index_writer = self._index_writer, None
+        if writer is not None:
+            if not writer.close():
+                trace('Warning (W2): download index: the database is busy, some files may not be recorded', True)
+            elif self.verbose and not writer.failed:
+                trace(f'Download index: {writer.written:d} file(s) recorded')
+        self._close_known_db()
 
     @abstractmethod
     def _send_to_download(self, raw: str, item_id: str, is_video: bool) -> None:
@@ -587,8 +629,10 @@ class Downloader(DownloaderBase):
             self._apply_filter(DownloaderStates.FILTERING_ITEMS2, self._filter_first_items)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS3, self._filter_items_by_type)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_existing_items)
+        self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_known_items_by_id)
         task_parents: set[str] = set()
         self._extract_cur_task_infos(task_parents)
+        self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_known_items_by_md5, task_parents)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_safety, task_parents)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_matching_negative_and_groups, task_parents)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_missing_required_tags, task_parents)
@@ -802,11 +846,13 @@ class Downloader(DownloaderBase):
         self._apply_filter(DownloaderStates.FILTERING_ITEMS3, self._filter_items_by_type)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_by_previous_tasks)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_existing_items)
+        self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_known_items_by_id)
 
         # store items info for future processing
         # custom filters may exclude certain items from the infos dict
         task_parents: set[str] = set()
         self._extract_cur_task_infos(task_parents)
+        self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_known_items_by_md5, task_parents)
         # safety blacklist: every task incl. parent tasks, only while the content filter is enabled (no-op otherwise)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_safety, task_parents)
 
@@ -988,6 +1034,7 @@ class Downloader(DownloaderBase):
         self.interrupted = False
         self._streamed = False
         self.streaming_active = False
+        self._index_on = indexing_enabled()
         try:
             self._parse_args(args, enable_preprocessing)
             self._at_launch()
@@ -1008,6 +1055,7 @@ class Downloader(DownloaderBase):
             trace(f'Unhandled exception: {self.launch_error}', True)
         finally:
             self._shutdown_executors()  # in-flight workers see the cancel flag and stop, queued work is dropped
+            self._close_index()  # files finished before a cancel / error are recorded too
             self.current_state = DownloaderStates.IDLE
         if self._thread_exceptions and self.maxthreads_items > 1:
             n = '\n'
@@ -1063,6 +1111,7 @@ class Downloader(DownloaderBase):
         self.gender_min_conf = GenderConf.parse(args.gender_conf) if getattr(args, 'gender_conf', None) else self.gender_min_conf
         self.gender_strict = getattr(args, 'gender_strict', False) or self.gender_strict
         self.tags_limit = getattr(args, 'tags_limit', None) or self.tags_limit
+        self.skip_known = getattr(args, 'skip_known', False) or self.skip_known
         self.tags_str_arr[:] = [] if self.get_max_id else convert_taglist(args.tags)
         self._extract_negative_and_groups()
         self._extract_custom_argument_tags()

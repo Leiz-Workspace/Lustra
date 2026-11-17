@@ -208,6 +208,7 @@ function showPage(name) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === name));
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${name}`));
   if (name === 'tags') refreshTagStatus();
+  if (name === 'settings') refreshIndexStats();
   if (name === 'extensions') renderExtensions();
   if (name === 'log') showLogPage();
   if (name === 'downloads') jobViews.forEach((v) => v.logView?.reveal());
@@ -811,7 +812,7 @@ function downloadOptions() {
   return {
     images: $('#f-images').checked, videos: $('#f-videos').checked, videoFormat: $('#f-vformat').value, lowRes: $('#f-lowres').checked,
     threads: Number($('#f-threads').value) || 4, limit: Number($('#f-limit').value) || 0, reverse: $('#f-order').value === 'desc',
-    parchi: $('#f-parchi').checked,
+    parchi: $('#f-parchi').checked, skipKnown: $('#f-skip-known').checked,
   };
 }
 
@@ -1055,7 +1056,8 @@ function createJobView(id) {
     module: h('span'), state: h('span'), task: h('span'), files: h('span'),
     scan: h('span', { class: 'hint', title: 'Vẫn đang quét thêm trang kết quả, tổng số file có thể còn tăng' }, 'đang quét thêm…'),
     counts: h('span'), cf: h('span', { class: 'danger' }, 'Bị bot challenge chặn'), error: h('span', { class: 'danger' }),
-    partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), dest: h('span', { class: 'mono' }),
+    partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), known: h('span'),
+    dest: h('span', { class: 'mono' }),
   };
   Object.values(m).forEach((el) => { el.hidden = true; });
   const v = {
@@ -1100,6 +1102,7 @@ function updateJobView(v, j) {
   setHidden(m.partial, !(j.status === 'done' && j.exitCode === 3));
   slot(m.gender, p.genderFiltered ? `Lọc giới tính: ${nf.format(p.genderFiltered)}` : null);
   slot(m.blocked, p.blocked ? `Chặn (an toàn): ${nf.format(p.blocked)}` : null);
+  slot(m.known, p.known ? `Bỏ qua (đã tải): ${nf.format(p.known)}` : null);
   slot(m.dest, j.dest ? String(j.dest) : null);
 }
 function flushJobs() {
@@ -1488,6 +1491,50 @@ $('#btn-related').addEventListener('click', () => loadRelated());
 $('#related-refresh').addEventListener('click', () => loadRelated());
 $('#related-meta').addEventListener('change', () => { if (related.tags) renderRelated(); });
 $('#related-close').addEventListener('click', () => { related.seq++; $('#related').hidden = true; });
+
+// ---------------- download index (settings page) ----------------
+// index.stats reads <data dir>/index/downloads.sqlite (lustra/dlindex.py); the full offline search page comes later
+function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v >= 1073741824) return `${(v / 1073741824).toFixed(2)} GB`;
+  if (v >= 1048576) return `${(v / 1048576).toFixed(1)} MB`;
+  return `${nf.format(Math.round(v / 1024))} KB`;
+}
+let indexStatsSeq = 0;
+async function refreshIndexStats() {
+  const seq = ++indexStatsSeq;
+  const table = $('#index-stats');
+  let r;
+  try {
+    r = await L.rpc('index.stats');
+  } catch (err) {
+    if (seq === indexStatsSeq) table.replaceChildren(h('tr', {}, h('td', { class: 'muted' }, `Không đọc được index: ${errMsg(err)}`)));
+    return;
+  }
+  if (seq !== indexStatsSeq) return;
+  const when = (t) => (t ? new Date(t * 1000).toLocaleString('vi-VN') : '—');
+  $('#index-path').textContent = r.path || '';
+  if (!r.exists) {
+    table.replaceChildren(h('tr', {}, h('td', { class: 'muted' }, r.recording === false
+      ? 'Chưa có index; đang tắt ghi (LUSTRA_DLINDEX=0).' : 'Chưa có index: file đầu tiên tải xong sẽ được ghi vào.')));
+    return;
+  }
+  const row = (k, v) => h('tr', {}, h('th', {}, k), h('td', { colspan: 3 }, v));
+  table.replaceChildren(
+    row('File', nf.format(r.files)),
+    row('Post', nf.format(r.posts)),
+    row('Có md5', nf.format(r.withMd5)),
+    row('Tag khác nhau', nf.format(r.tags)),
+    row('Dung lượng file', fmtBytes(r.bytes)),
+    row('Dung lượng index', fmtBytes(r.dbBytes)),
+    row('Lần tải gần nhất', when(r.last)),
+    ...(r.recording === false ? [row('Ghi index', 'đang tắt (LUSTRA_DLINDEX=0)')] : []),
+    ...(r.modules?.length ? [h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Gần nhất')),
+      ...r.modules.map((m) => h('tr', {}, h('td', {}, h('span', { class: 'mod-abbr' }, m.module)), h('td', {}, nf.format(m.files)),
+        h('td', {}, fmtBytes(m.bytes)), h('td', {}, when(m.last))))] : []));
+}
+$('#index-refresh').addEventListener('click', () => refreshIndexStats());
+$('#s-skip-known').addEventListener('change', (e) => { $('#f-skip-known').checked = e.target.checked; });
 
 // ---------------- tag lists status / update ----------------
 const UPDATABLE = ['rx', 'db', 'xb', 'bb', 'en'];
@@ -1958,6 +2005,7 @@ function renderSettings() {
   bindSetting('#s-infomode', 'download.infoMode', 'text');
   bindSetting('#s-warn', 'download.warnNonEmpty');
   bindSetting('#s-concurrent', 'download.maxConcurrentJobs', 'number');
+  bindSetting('#s-skip-known', 'download.skipKnown');
   $('#c-proxy').value = s.connection.proxy || '';
   $('#c-ignore').checked = !!s.connection.ignoreProxy;
   $('#c-nodown').checked = !!s.connection.proxyNoDownload;
@@ -1979,6 +2027,7 @@ function renderSettings() {
   $('#f-order').value = s.download.reverse ? 'desc' : 'asc';
   $('#f-limit').value = s.download.limit;
   $('#f-parchi').checked = s.download.parchi;
+  $('#f-skip-known').checked = !!s.download.skipKnown;
   renderApiKeys();
   renderTagLimits();
 }

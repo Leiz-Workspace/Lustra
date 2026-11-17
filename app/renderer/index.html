@@ -92,6 +92,7 @@
             <label class="field"><span>Giới hạn (0 = không)</span><input type="number" id="f-limit" min="0" value="0"></label>
             <label class="field"><span>Thứ tự</span><select id="f-order"><option value="asc">ID tăng dần</option><option value="desc">ID giảm dần</option></select></label>
             <label class="field" id="f-parchi-wrap"><span>Kèm post cha/con</span><input type="checkbox" id="f-parchi"></label>
+            <label class="field" title="Bỏ qua post đã có trong index các lần tải (cùng md5, hoặc cùng module và id) khi file vẫn còn trên đĩa, kể cả file ở thư mục khác hoặc tải từ site khác"><span>Bỏ qua file đã tải</span><input type="checkbox" id="f-skip-known"></label>
             <div class="field wide gender-field" id="f-gender">
               <span>Giới tính nhân vật <em class="gender-hint" id="f-gender-hint"></em></span>
               <div class="row">
@@ -238,6 +239,15 @@
             <div class="setting"><span>Chế độ file info</span><select id="s-infomode"><option value="run">Mỗi lượt tải</option><option value="item">Mỗi file</option><option value="merge">Gộp danh sách</option></select></div>
             <div class="setting"><span>Cảnh báo khi thư mục không trống</span><input type="checkbox" id="s-warn"></div>
             <div class="setting"><span>Số job chạy song song</span><input type="number" id="s-concurrent" min="1" max="4" class="tiny"></div>
+          </div>
+
+          <div class="glass panel">
+            <h2>Index các lần tải</h2>
+            <p class="muted">Mỗi file tải xong được ghi vào một CSDL cục bộ (chỉ metadata: tag, điểm, rating, md5, ngày post, đường dẫn; không đọc nội dung file, không gửi đi đâu). Index giúp tìm lại file offline và bỏ qua file trùng giữa các module.</p>
+            <div class="setting"><span>Mặc định bỏ qua file đã tải</span><input type="checkbox" id="s-skip-known"></div>
+            <table class="table" id="index-stats"></table>
+            <p class="muted mono" id="index-path"></p>
+            <div class="setting"><span></span><button class="btn sm" id="index-refresh">Làm mới</button></div>
           </div>
 
           <div class="glass panel">

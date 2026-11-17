@@ -647,6 +647,43 @@ def m_files_nonempty(p: dict) -> dict:
     return {'exists': path.is_dir(), 'nonEmpty': path.is_dir() and next(path.iterdir(), None) is not None}
 
 
+# ----- local download index (lustra/dlindex.py) -----
+
+INDEX_QUERY_MAX_LEN = 2000
+re_index_module = re.compile(r'[a-z][a-z\d]{1,3}')
+'''module abbreviation (see modspec.re_abbr)'''
+
+
+def _int_param(p: dict, key: str, default: int) -> int:
+    try:
+        return int(p.get(key, default) or default)
+    except (TypeError, ValueError):
+        raise RpcError(-32602, f'invalid \'{key}\'') from None
+
+
+def m_index_search(p: dict) -> dict:
+    """{tags, module, dateFrom, dateTo, page, pageSize, order} -> {total, page, pageSize, items: [...], terms}.
+    tags: 'tag -tag pre* rating:e md5:<hash> id:<n>' (all must match); dates: post date 'YYYY-MM-DD' (inclusive); pages from 0.
+    Reads only the index: no request to any website. Each call has its own connection (the rpc pool is multi-threaded)"""
+    from .dlindex import DownloadIndex
+    tags = p.get('tags') or ''
+    tags = ' '.join(str(t) for t in tags) if isinstance(tags, list) else str(tags)
+    module = str(p.get('module') or '').strip().lower()
+    if module and not re_index_module.fullmatch(module):
+        raise RpcError(-32602, 'invalid module')
+    with DownloadIndex() as index:
+        return index.search(tags[:INDEX_QUERY_MAX_LEN], module=module, date_from=str(p.get('dateFrom') or ''),
+                            date_to=str(p.get('dateTo') or ''), page=_int_param(p, 'page', 0), page_size=_int_param(p, 'pageSize', 50),
+                            order=str(p.get('order') or 'downloaded'))
+
+
+def m_index_stats(_: dict) -> dict:
+    """Totals of the download index (files, posts, tags, sizes, per module), exists: False until the first file is recorded"""
+    from .dlindex import DownloadIndex
+    with DownloadIndex() as index:
+        return index.stats()
+
+
 METHODS: dict[str, Callable[[dict], Any]] = {
     'app.info': m_app_info,
     'ext.list': m_ext_list,
@@ -665,6 +702,8 @@ METHODS: dict[str, Callable[[dict], Any]] = {
     'search.related': m_search_related,
     'files.nonEmpty': m_files_nonempty,
     'files.identify': m_files_identify,
+    'index.search': m_index_search,
+    'index.stats': m_index_stats,
 }
 
 
