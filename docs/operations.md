@@ -141,6 +141,7 @@ Công cụ đo độ chính xác của tầng 0 (tag) và tầng 1 (model) theo 
    - Có tập vàng: đo tầng 0, model (chỉ ảnh) và tầng 0 + model (`combine`) so với nhãn của người. `--silver` (chưa có nhãn của người): tham chiếu là nhãn tầng 0 mức high, model chỉ nhận ảnh; đây là độ đồng ý với tag mạnh, không phải precision thật.
    - Đầu vào `--inputs sample,thumb` (mặc định cả hai), điểm vận hành `--min-conf medium`. Ảnh cách nhau `--image-interval` giây (mặc định 1). Site trả bot challenge thì lệnh dừng và vẫn ghi báo cáo (đánh dấu chưa chạy hết); tag đoán ra được cache ở `<out-dir>/predictions.jsonl` nên chạy lại sẽ tiếp tục, không tải lại ảnh đã xem. `--max-minutes` giới hạn thời gian.
    - Ra `report.json` và `report.md`: precision theo lớp, độ phủ, macro-F1 4 lớp, ma trận nhầm lẫn 4×4 + cột unknown, ECE (15 bin) trên xác suất mà nhãn dựa vào, các điểm risk–coverage, mọi slice kèm n, thumbnail so với sample, cờ thiên lệch (slice n ≥ 150 có precision thấp hơn toàn cục > 5 điểm), số post trap bị gán only_female.
+   - Post mà safety gate của model chặn (tag cấm ≥ 0,15 trên ảnh sample hoặc thumbnail) bị loại khỏi mọi số đo và bị xoá khỏi file manifest như ở `label`: `dropped` của manifest chỉ ghi khoá và tag của gate; các tag mà danh sách chặn chưa bắt được in ra và ghi trong `posts.modelGateDropped` của `report.json` để xem lại `lustra/safety.py`.
 
 ## 4. Test
 ```bash

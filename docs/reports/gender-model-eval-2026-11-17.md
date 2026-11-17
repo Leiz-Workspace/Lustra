@@ -20,21 +20,21 @@ Plan: [gender-filter-model.md](../plans/gender-filter-model.md) §3.2, §3.7. C�
   - tham chiếu `both` nhưng model thấy một giới: `chibi`, `out_of_frame`, nhóm đông người;
   - tham chiếu `only_male` nhưng model ra `none`: `robot` / `mecha` (post có cả `6+boys` lẫn `no_humans`);
   - một post `trap` + `crossdressing` bị model gán `only_female`. Trong sản phẩm, `combine()` không cho model đổi post có tag trap thành nữ, nhưng trap không được tag thì vẫn là rủi ro (plan §1.2, §3.7).
-- **Safety gate của model** loại 5 / 328 post `rating:g` mà tag của chúng không bị danh sách chặn bắt (model đoán `aged_down` 2, `child` 2, `randoseru` 1). Các post này không có trong số đo nào.
+- **Safety gate của model** loại 5 / 328 post `rating:g` mà tag của chúng không bị danh sách chặn bắt (model đoán `aged_down` 2, `child` 2, `randoseru` 1). Các post này không có trong số đo nào và **đã bị xoá khỏi manifest** (§3.2 / §4: không giữ): manifest còn 323 post, danh sách `dropped` của manifest chỉ ghi khoá và tag của gate. Tag của chúng mà danh sách chặn chưa bắt (để xem lại `lustra/safety.py`) nằm trong `posts.modelGateDropped` của file JSON. Ngưỡng gate 0,15 thấp có chủ ý, nên có thể có chặn nhầm.
 - **Luật thiên lệch** (§3.7): chỉ 4 slice có n ≥ 150 (`site=db`, `style=2d_anime`, `density=full`, `media=image`), không slice nào bị cờ. Các slice còn lại có n từ 2 đến 75 (3D 5, furry 5, đơn sắc 34, trap 2, POV 5, đông người 7, thiếu tag 75, video 2), chưa đủ để kết luận; mẫu không có post futa.
 - **Độ trễ** (RTX 4070 Ti SUPER, CUDA, qua HTTP tới model server trên máy này, không tính thời gian tải ảnh): sample trung bình 29,9 ms (p95 38,7 ms), thumbnail 18,8 ms. 654 request ảnh, cách nhau 1,2 s, không bị bot challenge.
 
 ## Thiết lập
 
 - Lấy mẫu (`sample`, 7 truy vấn × 1 trang × 100 post, `random:` để không lệch về post mới): `random:100 rating:g`, `1girl random:100 rating:g`, `1boy random:100 rating:g`, `male_focus random:100 rating:g`, `hetero random:100 rating:g`, `no_humans random:100 rating:g`, `gentags:<=8 random:100 rating:g`. Quota: 60 post cho mỗi nhãn tầng 0 mức high, 80 "thiếu tag", 20 nhãn yếu (chỉ có 8). Seed 17.
-- Loại theo §3.2: 700 post → 26 bị danh sách chặn (gồm cả false positive đã chấp nhận như `kid_icarus`, `eustass_kid`, `baby_animal`), 52 thuộc danh sách loại bổ sung (`school_uniform` 50), 4 ảnh thật, 0 trùng md5, 29 không có file → 589 → chọn 328 theo quota. Safety gate của model loại thêm 5 lúc đánh giá.
+- Loại theo §3.2: 700 post → 26 bị danh sách chặn (gồm cả false positive đã chấp nhận như `kid_icarus`, `eustass_kid`, `baby_animal`), 52 thuộc danh sách loại bổ sung (`school_uniform` 50), 4 ảnh thật, 0 trùng md5, 29 không có file → 589 → chọn 328 theo quota. Safety gate của model loại thêm 5 lúc đánh giá; `evaluate` xoá 5 post này khỏi manifest (còn 323; `strata` trong manifest vẫn ghi số lúc chọn mẫu). Số đo trong báo cáo không đổi vì 5 post này vốn đã bị loại khỏi mọi số đo.
 - Model: `wd-vit-tagger-v3` (revision `7f6b584d`), model server `http://127.0.0.1:8765` chạy trên CUDA; tag đoán ra đi qua bộ luật `db` (`classify`), điểm vận hành `medium`.
 - Lệnh:
   ```bash
   LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -m lustra.gender_eval sample --module db --pages 1 --query "random:100 rating:g" --query "1girl random:100 rating:g" --query "1boy random:100 rating:g" --query "male_focus random:100 rating:g" --query "hetero random:100 rating:g" --query "no_humans random:100 rating:g" --query "gentags:<=8 random:100 rating:g" --quota only_female=60,only_male=60,both=60,none=60,sparse=80,weak=20 --seed 17 --out eval/manifest.json
   .venv/bin/python -m lustra.gender_eval evaluate --manifest eval/manifest.json --silver --inputs sample,thumb --model-url http://127.0.0.1:8765 --image-interval 1.2 --out-dir eval/report
   ```
-  `random:` cho mỗi lần chạy một tập post khác; dùng lại manifest trong `tools/gender/` để có đúng các post của báo cáo này.
+  `random:` cho mỗi lần chạy một tập post khác; dùng lại manifest trong `tools/gender/` để có đúng các post của báo cáo này (trừ 5 post safety gate đã loại). `evaluate` ghi lại file manifest khi gate loại post.
 
 ## Giới hạn
 
@@ -75,6 +75,7 @@ AC-G08: ≥ 3.000 post (1.000 db, 1.000 rx, 1.000 en, cộng 300 rp / xb), ≥ 3
 - Manifest: 328 post, tạo lúc 2026-11-17T14:56:07; truy vấn: `random:100 rating:g`, `1girl random:100 rating:g`, `1boy random:100 rating:g`, `male_focus random:100 rating:g`, `hetero random:100 rating:g`, `no_humans random:100 rating:g`, `gentags:<=8 random:100 rating:g`.
 - Post: 328 ứng viên, 328 đã xử lý, 323 được đánh giá, 311 có tham chiếu. Loại khi đánh giá: {"modelGate": 5}; không lấy được ảnh: {}.
 - Safety gate của model loại 5 post (tag: `aged_down` 2, `randoseru` 1, `child` 2); các post này không có trong mọi số đo.
+- 5 post đó đã bị xoá khỏi manifest (ghi trong `dropped` của manifest, chỉ kèm tag của gate, không có URL hay tag của post): db:9019708 (`aged_down`), db:10453505 (`aged_down`), db:7804235 (`randoseru`), db:8263106 (`child`), db:201251 (`child`).
 
 ### Loại trừ khi lấy mẫu (§3.2)
 
