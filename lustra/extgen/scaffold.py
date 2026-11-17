@@ -12,7 +12,7 @@ import json
 import pathlib
 
 from .engines import ENGINES, detect_engine
-from .fetch import FetchPolicyError, SafeFetcher, host_of, normalize_site
+from .fetch import FetchPolicyError, SafeFetcher, check_denied, host_of, normalize_site
 from .templates import TEMPLATE_ENGINES, existing_extensions, make_manifest, render_downloader, suggest_names, validate_names
 
 __all__ = ('create_draft', 'fetcher_for', 'survey')
@@ -48,6 +48,7 @@ def fetcher_for(site: str, *, budget: int = 40, allow_local: bool = False) -> Sa
 
 def survey(site_url: str, fetcher: SafeFetcher | None = None) -> dict:
     site = normalize_site(site_url) if not (fetcher and fetcher.allow_local) else site_url.rstrip('/') + '/'
+    check_denied(site)  # also with a test fetcher (normalize_site checks it otherwise)
     fetcher = fetcher or fetcher_for(site)
     robots = fetcher.robots_info(site)
     if robots['status'].startswith('unreachable'):

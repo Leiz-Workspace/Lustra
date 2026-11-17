@@ -11,7 +11,7 @@ Mọi bước dùng `python -m lustra.extgen` (dùng `.venv/bin/python` nếu c�
 
 ## Quy tắc cứng
 
-Đọc `reference/safety-rules.md` trước khi bắt đầu. Tóm tắt: chỉ truy cập công khai hoặc API chính thức bằng key của chính người dùng (R1); robots.txt (R2); ToS cấm tải tự động thì dừng (R3); interval ≥ 0,5 s cho API, ≥ 1 s cho HTML (R4); không vượt CAPTCHA / bot-detection / Cloudflare (R5); không dựng URL cho bài site ẩn hoặc giới hạn (R6); không DRM, không HLS / DASH mã hóa (R7); từ chối nội dung bất hợp pháp (R8); giữ nguyên bộ lọc an toàn của lõi (R9); code chỉ dùng import cho phép, không eval / exec / file / socket (R10); không bao giờ cài tự động (R11); không xin hay lưu mật khẩu, key, cookie (R12); giữ khóa `$generator` trong manifest (R13).
+Đọc `reference/safety-rules.md` trước khi bắt đầu. Tóm tắt: chỉ truy cập công khai hoặc API chính thức bằng key của chính người dùng (R1); robots.txt (R2); ToS cấm tải tự động thì dừng (R3); interval ≥ 0,5 s cho API, ≥ 1 s cho HTML (R4); không vượt CAPTCHA / bot-detection / Cloudflare (R5); không dựng URL cho bài site ẩn hoặc giới hạn (R6); không DRM, không HLS / DASH mã hóa, không dịch vụ streaming thương mại (R7); từ chối nội dung bất hợp pháp (R8). Tên miền trong danh sách chặn (`lustra/safety_data/denied_domains.txt`, R6 / R7 / R8) bị công cụ từ chối ngay, kể cả tên miền con, chữ hoa, dấu chấm cuối, dạng punycode hay ký tự full-width; giữ nguyên bộ lọc an toàn của lõi (R9); code chỉ dùng import cho phép, không eval / exec / file / socket (R10); không bao giờ cài tự động (R11); không xin hay lưu mật khẩu, key, cookie (R12); giữ khóa `$generator` trong manifest (R13).
 
 Vi phạm → DỪNG, nêu mã rule, không sinh code. Lệnh nào trả `"refused": true` (exit 2) thì báo lại `rule` và `message` cho người dùng rồi dừng; đừng thử đường khác để lách.
 
@@ -30,6 +30,7 @@ Vi phạm → DỪNG, nêu mã rule, không sinh code. Lệnh nào trả `"refus
 
 Kết quả JSON gồm `robots` (status, crawlDelay), `engine` (engine, confidence, evidence, notes, auth_required), `names` (id / abbr / name đề xuất) và `requests`.
 
+- Lệnh trả `"refused": true` với `rule` là R6 / R7 / R8 và lời nhắn "danh sách chặn" → site nằm trong danh sách chặn tên miền của Lustra. DỪNG, báo lại lời nhắn; không thử tên miền khác của cùng dịch vụ.
 - `robots.status` là `unreachable` (5xx), hoặc trang chủ bị cấm → R2, DỪNG.
 - Tìm ToS / API docs nếu cần (`/terms`, `/tos`, `/help/api`, `/wiki/api`) bằng lệnh `fetch` ở dưới. Ghi URL cùng tóm tắt ngắn vào `specs.md`, không chép nguyên văn dài. Cấm rõ ràng → R3, DỪNG. Không rõ → hỏi người dùng và ghi lại câu trả lời.
 - Xem phản hồi một trang hoặc API, mỗi lần 1 request:
@@ -50,17 +51,18 @@ Dùng `engine.engine` khi `confidence` là `high`. Nếu không chắc, xem bả
 .venv/bin/python -m lustra.extgen new https://example-booru.com --out .extgen-drafts --media image,video [--id ID --abbr AB --name "Name" --engine ENGINE]
 ```
 
-Lệnh tạo `.extgen-drafts/<id>/` với `manifest.json` (có `$generator`), `specs.md` (bằng chứng khảo sát) và, cho engine có template, `downloader.py`. `.extgen-drafts/` bị git bỏ qua. Không tạo bản nháp trong `extensions/`: CLI và GUI cũ tự nạp catalog đó, nên bản nháp chưa duyệt sẽ chạy được ngay.
+Lệnh tạo `.extgen-drafts/<id>/` với `manifest.json` (có `$generator` và `minSdkVersion`), `specs.md` (bằng chứng khảo sát) và, cho engine có template, `downloader.py` (chỉ import từ `lustra.sdk`). `.extgen-drafts/` bị git bỏ qua. Không tạo bản nháp trong `extensions/`: CLI và GUI cũ tự nạp catalog đó, nên bản nháp chưa duyệt sẽ chạy được ngay.
 
 ## B4 — Viết `downloader.py` (engine không có template)
 
-- Site có JSON API: kế thừa `lustra.download_json.DownloaderJsonApi`. Khai báo `SITE`, `ABBR`, `ITEMS_PER_PAGE`, `MAX_PAGES`, rồi viết `_search_url`, `_posts`, `_post` (một post → `JsonPost`), và `_count` hoặc `_count_url` + `_count_from` nếu API đếm được. Lớp nền lo phần còn lại. Bốn template JSON (`python -m lustra.extgen new … --engine e621_json` …) là ví dụ hoàn chỉnh.
+- Mọi tên của Lustra lấy từ `lustra.sdk`, API ổn định cho extension (`from lustra.sdk import DownloaderJsonApi, JsonPost, ModuleCaps`; xem `lustra/sdk.py`). Giữ `minSdkVersion` của manifest bằng giá trị `new` đã ghi; chỉ nâng khi dùng tên mới hơn của SDK.
+- Site có JSON API: kế thừa `DownloaderJsonApi`. Khai báo `SITE`, `ABBR`, `ITEMS_PER_PAGE`, `MAX_PAGES`, rồi viết `_search_url`, `_posts`, `_post` (một post → `JsonPost`), và `_count` hoặc `_count_url` + `_count_from` nếu API đếm được. Lớp nền lo phần còn lại. Bốn template JSON (`python -m lustra.extgen new … --engine e621_json` …) là ví dụ hoàn chỉnh.
 - Site HTML mà trang danh sách đã có đủ link file, tag và ngày của từng post: vẫn kế thừa `DownloaderJsonApi`, override `_parse` để đọc HTML bằng BeautifulSoup. Mẫu là `HTML_EXAMPLE` trong `lustra/extgen/templates.py`. Nếu phải mở trang từng post mới có link file hoặc tag, theo `extensions/rule34us`. Hook của `DownloaderBase` nằm trong `lustra/download_base.py`.
 - Site có âm thanh: khai báo `"media": [..., "audio"]` trong manifest. Lõi phân loại theo đuôi file (`mp3`, `ogg`, `oga`, `opus`, `flac`, `m4a`, `wav`), có `-skip_aud` / `-audsub`, và tải file gốc (không lấy ảnh bìa).
 - Class chỉ dựng URL và parse phản hồi. Lõi lo mọi request (`self.fetch_html`), tải file, retry, rate limit, bộ lọc ngày / tag / an toàn. Không override `fetch_html`, `wrap_request`, `download_file`, `_download`, `_respect_rate_limit`, `_parse_args` hay các filter.
 - Hằng số và regex đặt trong file. Không sửa `lustra/defines.py` hay `lustra/rex.py`. `CAPABILITIES` chỉ khai báo tính năng có thật. `_get_min_request_interval()` trả về một hằng số ≥ 0,5 (API) hoặc ≥ 1,0 (HTML), cao hơn nếu site yêu cầu (Crawl-delay).
 - Mỗi post phải mang tag (`ItemInfo.tags`), vì bộ lọc an toàn cần nó (R9).
-- Cập nhật `manifest.json` (`syntax`, `media`, `auth` nếu cần) nhưng giữ nguyên `id`, `abbr`, `$generator`.
+- Cập nhật `manifest.json` (`syntax`, `media`, `auth` nếu cần) nhưng giữ nguyên `id`, `abbr`, `$generator`, `minSdkVersion`.
 
 ## B5 — Chạy thử (live, ghi fixture)
 

@@ -9,6 +9,7 @@ Run: python -m unittest lustra.tests.test_extgen
 #
 #
 
+import hashlib
 import json
 import os
 import pathlib
@@ -794,6 +795,222 @@ class RedTeamTests(TestCase):
         results = [box.run('http_fetch', {'url': f'{SITE}index.php?page=dapi&s=post&q=index&pid={i}', 'accept': ''}) for i in range(5)]
         self.assertTrue(results[-1][1])
         self.assertIn('R4', results[-1][0])
+
+
+DENIED_FORMS = [  # every form below reaches youtube.com through some parser / network library: all refused with R7
+    'https://youtube.com/', 'https://www.youtube.com/watch?v=1', 'https://m.youtube.com', 'youtube.com', 'www.youtube.com/x',
+    'https://YOUTUBE.COM/', 'https://WwW.YouTube.Com/', 'https://youtube.com./', 'https://youtube.com../', 'https://.youtube.com/',
+    'https://youtube.com:443/', 'https://youtube.com:8443/', 'http://youtube.com/', 'https://user@youtube.com/',
+    'https://ｙｏｕｔｕｂｅ．ｃｏｍ/', 'https://ＷＷＷ.ＹＯＵＴＵＢＥ.ＣＯＭ/', 'https://youtube\u3002com/', 'https://youtube\uff61com/',
+    'https://you\u00adtube.com/', 'https://you\u200btube.com/', 'https://you%74ube.com/', 'https://%79outube.com/', 'https://youtu.be/x',
+    'https://music.apple.com/', 'https://kemono.su/', 'https://coomer.party/',
+]
+NOT_DENIED = ['https://notyoutube.com/', 'https://youtube.com.evil.example/', 'https://youtube-dl.example/',
+              'https://apple.com/', 'https://tv.apple.com.example/', f'https://{HOST}/']
+
+
+class DenylistTests(TestCase):
+    """Domain denylist (lustra/safety_data/denied_domains.txt, rules R6 / R7 / R8): red-team bypass attempts"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_list_file_is_valid(self) -> None:
+        from lustra.denylist import RULES, default_list
+        deny = default_list()
+        self.assertGreater(len(deny), 10)
+        self.assertEqual('R7', deny.entries['youtube.com'][0])
+        self.assertTrue(all(rule in RULES for rule, _ in [*deny.entries.values(), *deny.hashed.values()]))
+
+    def test_bypass_forms_are_refused(self) -> None:
+        for url in DENIED_FORMS:
+            with self.subTest(url=url), self.assertRaises(FetchPolicyError) as ctx:
+                normalize_site(url)
+            self.assertIn(ctx.exception.rule, ('R6', 'R7', 'R8'), f'{url}: {ctx.exception}')
+            self.assertIn('danh sách chặn', ctx.exception.message)
+        for url in NOT_DENIED:
+            with self.subTest(url=url):
+                self.assertTrue(normalize_site(url).startswith('https://'))
+        for url in ('https://evil.example\\@youtube.com/', 'https://youtube.com\\.evil.example/', 'https://you tube.com/'):
+            with self.subTest(url=url), self.assertRaises(FetchPolicyError):  # parser differential tricks: refused outright
+                normalize_site(url)
+
+    def test_idn_punycode_and_hashed_entries(self) -> None:
+        from lustra.denylist import DenyList, denied_message
+        secret = 'secret-bad.example'
+        deny = DenyList.from_text(f'中文.example R8 idn entry\nsha256:{hashlib.sha256(secret.encode()).hexdigest()} R8 do not print\n')
+        for host in ('xn--fiq228c.example', 'https://中文.example/', 'https://WWW.XN--FIQ228C.EXAMPLE./', 'https://cdn.中文．example'):
+            with self.subTest(host=host):
+                self.assertEqual('xn--fiq228c.example', deny.match(host).entry)
+        hit = deny.match('https://cdn.SECRET-BAD.example./x')
+        self.assertEqual('R8', hit.rule)
+        self.assertTrue(hit.entry.startswith('sha256:'))
+        self.assertNotIn('do not print', denied_message(hit))  # the reason of a hashed entry stays private
+        self.assertIsNone(deny.match('https://not-secret-bad.example/'))
+        with self.assertRaises(ValueError):
+            DenyList.from_text('example.com R99\n')
+
+    def test_fetcher_never_contacts_a_denied_host(self) -> None:
+        f = SafeFetcher(allowed_hosts={HOST, 'youtube.com'}, min_interval=0.0, allow_local=True)
+        f._session = FakeSession(fake_gelbooru)
+        with self.assertRaises(FetchPolicyError) as ctx:
+            f.fetch('https://www.youtube.com/feed')
+        self.assertEqual('R7', ctx.exception.rule)
+        self.assertEqual([], f._session.calls)  # not even robots.txt
+
+        def redirect(u: str):
+            return (302, b'', {'location': 'https://m.youtube.com/watch'}) if u.endswith('/go') else fake_gelbooru(u)
+        f = fake_fetcher(redirect)
+        with self.assertRaises(FetchPolicyError) as ctx:
+            f.fetch(f'{SITE}go')
+        self.assertEqual('R7', ctx.exception.rule)
+        self.assertFalse(any('youtube' in c[1] for c in f._session.calls))
+        f = fake_fetcher()
+        for url in (f'https://youtube.com\\@{HOST}/x', f'https://youtube.com\\.{HOST}/x'):  # requests would connect to youtube.com
+            with self.subTest(url=url), self.assertRaises(FetchPolicyError):
+                f.fetch(url)
+        self.assertFalse(any('youtube' in c[1] for c in f._session.calls))
+
+    def test_sessions_refused_before_any_request(self) -> None:
+        for mode, url in (('template', 'https://www.youtube.com/'), ('template', 'ｙｏｕｔｕｂｅ．ｃｏｍ'), ('ai', 'https://kemono.su/')):
+            with self.subTest(url=url):
+                fetcher = fake_fetcher()
+                client = ScriptedClient([])
+                report = GenSession(GenRequest(url=url, mode=mode), drafts_root=self.root / mode, client=client, fetcher=fetcher).run()
+                self.assertEqual('refused', report['status'])
+                self.assertIn(report['ruleIds'][0], ('R6', 'R7'))
+                self.assertIn('danh sách chặn', report['summary'])
+                self.assertEqual([], fetcher._session.calls)
+                self.assertEqual([], client.requests)  # no model call (no cost)
+                self.assertEqual('', report['draftDir'])
+
+    def test_cli_refuses(self) -> None:
+        import contextlib
+        import io
+
+        from lustra.extgen.__main__ import main as extgen_main
+        for cmd in (['survey', 'https://www.youtube.com/'], ['fetch', 'https://youtu.be/abc'], ['new', 'https://youtube.com', '--out', str(self.root)]):
+            out = io.StringIO()
+            with self.subTest(cmd=cmd), contextlib.redirect_stdout(out):
+                code = extgen_main(cmd)
+            res = json.loads(out.getvalue())
+            self.assertEqual((2, True, 'R7'), (code, res.get('refused'), res.get('rule')), res)
+
+    def _draft(self, ext_id: str = 'denytest', abbr: str = 'zd1') -> pathlib.Path:
+        return create_draft(self.root / 'drafts', survey(SITE, fake_fetcher()), ext_id=ext_id, abbr=abbr, engine='gelbooru_dapi')
+
+    def test_draft_check_and_every_install_path_refuse(self) -> None:
+        from lustra.extensions import ExtensionError, Extensions
+        draft = self._draft()
+        m = json.loads((draft / 'manifest.json').read_text())
+        (draft / 'manifest.json').write_text(json.dumps({**m, 'site': 'https://www.youtube.com/'}), encoding='utf-8')
+        res = check_draft(draft)
+        self.assertIn('domain:R7', res['failed'])
+        self.assertIn('danh sách chặn', next(c['detail'] for c in res['checks'] if c['id'] == 'domain:R7'))
+        hidden = self._draft('denytest2', 'zd2')  # manifest of a normal site, but the code reaches a denied host
+        src = (hidden / 'downloader.py').read_text()
+        (hidden / 'downloader.py').write_text(src + '\nEXTRA = "https://rr1---sn-abc.googlevideo.com/videoplayback"\n', encoding='utf-8')
+        self.assertIn('domain:R7', check_draft(hidden)['failed'])
+        z = pack(hidden, self.root / 'hidden.zip')
+        archive = (self.root / 'hidden.zip').read_bytes()
+        with mock.patch.object(Extensions, 'user_dir', return_value=self.root / 'user'), \
+                mock.patch.object(Extensions, 'catalog_dir', return_value=self.root / 'catalog'):
+            for install in (lambda: Extensions.install_from_dir(draft), lambda: Extensions.install_from_dir(hidden),
+                            lambda: Extensions.install_from_archive(archive, z['sha256'])):
+                with self.assertRaises(ExtensionError) as ctx:
+                    install()
+                self.assertIn('danh sách chặn', str(ctx.exception))
+            self.assertFalse((self.root / 'user' / 'denytest').exists())
+            self.assertFalse((self.root / 'user' / 'denytest2').exists())
+
+    def test_installed_extension_of_a_denied_site_is_not_loaded(self) -> None:
+        from lustra.extensions import ExtensionError, Extensions
+        from lustra.modspec import ExtensionManifest
+        m = ExtensionManifest.from_dict({'id': 'oldyt', 'name': 'Old', 'abbr': 'zd3', 'version': '1.0.0', 'entry': 'downloader.py:X',
+                                         'site': 'https://www.youtube.com/'}, self.root / 'oldyt', 'user')
+        with mock.patch.object(Extensions, '_import_entry', side_effect=AssertionError('code of a denied extension imported')):
+            with self.assertRaises(ExtensionError):
+                Extensions._register(m)
+        self.assertNotIn('oldyt', Extensions.loaded)
+
+
+class SdkTests(TestCase):
+    """lustra.sdk: stable API of extensions, minSdkVersion of the manifest"""
+
+    def test_exports_and_versions(self) -> None:
+        import lustra.sdk as sdk
+        self.assertTrue(all(hasattr(sdk, n) for n in sdk.__all__))
+        from lustra.download import Downloader
+        from lustra.download_json import DownloaderJsonApi
+        self.assertIs(Downloader, sdk.Downloader)
+        self.assertIs(DownloaderJsonApi, sdk.DownloaderJsonApi)
+        self.assertRegex(sdk.SDK_VERSION, r'^\d+\.\d+$')
+        major, minor = sdk.parse_sdk_version(sdk.SDK_VERSION)
+        self.assertTrue(sdk.sdk_satisfies(f'{major}.0'))
+        self.assertTrue(sdk.sdk_satisfies(sdk.SDK_VERSION))
+        self.assertFalse(sdk.sdk_satisfies(f'{major}.{minor + 1}'))
+        self.assertFalse(sdk.sdk_satisfies(f'{major + 1}.0'))
+        self.assertTrue(sdk.sdk_satisfies('1.2', '1.10'))
+        with self.assertRaises(ValueError):
+            sdk.parse_sdk_version('1.x')
+
+    def test_templates_use_only_the_sdk(self) -> None:
+        import ast
+
+        from lustra.extgen.templates import HTML_EXAMPLE, TEMPLATE_ENGINES, make_manifest
+        from lustra.sdk import SDK_VERSION
+        for engine in TEMPLATE_ENGINES:
+            src = render_downloader(engine, ext_id='example', abbr='zq9', site='https://example.com/')
+            mods = {n.module for n in ast.walk(ast.parse(src)) if isinstance(n, ast.ImportFrom)}
+            self.assertEqual({'lustra.sdk'}, {m for m in mods if m and m.startswith('lustra')}, engine)
+        mods = {n.module for n in ast.walk(ast.parse(HTML_EXAMPLE)) if isinstance(n, ast.ImportFrom)}
+        self.assertEqual({'lustra.sdk'}, {m for m in mods if m and m.startswith('lustra')})
+        m = make_manifest(ext_id='example', abbr='zq9', name='Ex', site='https://example.com/', engine='e621_json', media=['image'])
+        self.assertEqual(SDK_VERSION, m['minSdkVersion'])
+
+    def test_min_sdk_version_checked_at_install_and_load(self) -> None:
+        from lustra.extensions import ExtensionError, Extensions
+        from lustra.modspec import ExtensionManifest, ManifestError
+        from lustra.sdk import SDK_VERSION, parse_sdk_version
+        major, minor = parse_sdk_version(SDK_VERSION)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft = create_draft(root / 'drafts', survey(SITE, fake_fetcher()), ext_id='sdktest', abbr='zs1', engine='e621_json')
+            m = json.loads((draft / 'manifest.json').read_text())
+            with mock.patch.object(Extensions, 'user_dir', return_value=root / 'user'), \
+                    mock.patch.object(Extensions, 'catalog_dir', return_value=root / 'catalog'):
+                for need, words in ((f'{major}.{minor + 1}', 'cập nhật Lustra'), (f'{major + 1}.0', 'cập nhật Lustra'),
+                                    (f'{major - 1}.0', 'phiên bản chính cũ')):
+                    (draft / 'manifest.json').write_text(json.dumps({**m, 'minSdkVersion': need}), encoding='utf-8')
+                    with self.subTest(need=need), self.assertRaises(ExtensionError) as ctx:
+                        Extensions.install_from_dir(draft)
+                    self.assertIn(words, str(ctx.exception))
+                    self.assertFalse((root / 'user' / 'sdktest').exists())
+                (draft / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+                try:
+                    installed = Extensions.install_from_dir(draft)  # the template itself: SDK_VERSION, loads and registers
+                    self.assertEqual(SDK_VERSION, installed.minSdkVersion)
+                    self.assertIn('sdktest', Extensions.loaded)
+                finally:
+                    Extensions.uninstall('sdktest')
+        with self.assertRaises(ManifestError):
+            ExtensionManifest.from_dict({'id': 'abc', 'name': 'A', 'abbr': 'zq2', 'version': '1.0.0', 'entry': 'downloader.py:X',
+                                         'minSdkVersion': 'latest'}, None, 'user')
+        future = ExtensionManifest.from_dict({'id': 'abcd', 'name': 'A', 'abbr': 'zq2', 'version': '1.0.0', 'entry': 'downloader.py:X',
+                                              'minSdkVersion': f'{major}.{minor + 1}'}, None, 'user')
+        with mock.patch.object(Extensions, '_import_entry', side_effect=AssertionError('imported')), self.assertRaises(ExtensionError):
+            Extensions._register(future)
+
+    def test_catalog_extensions_without_sdk_still_load(self) -> None:
+        from lustra.extensions import Extensions
+        Extensions.ensure_loaded(include_catalog=True)
+        catalog = sorted(p.name for p in (ROOT / 'extensions').iterdir() if (p / 'manifest.json').is_file())
+        self.assertTrue(catalog)
+        self.assertEqual(catalog, sorted(i for i in catalog if i in Extensions.loaded), Extensions.errors)
 
 
 def _sse(events: list[dict]) -> bytes:

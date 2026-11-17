@@ -2110,12 +2110,17 @@ function extCard(m, remote) {
     m.updateAvailable ? h('span', { class: 'tagpill warn', title: `Catalog có v${m.catalogVersion}` }, `có bản v${m.catalogVersion}`) : null,
     originBadge(m.generator),
     h('span', { class: 'tagpill' }, `v${m.version}`),
+    ...trustBadges(m, remote),
   ];
   let action;
-  if (remote) {
-    // remote catalog entry: compared with the installed copy of the same extension
+  if (m.denied) {
+    // domain denylist (rules R6 / R7 / R8): shown with the reason, never installable
+    action = h('span', { class: 'muted', title: m.denied.message || '' }, `Không cài được (${m.denied.rule || 'bị chặn'})`);
+  } else if (remote) {
+    // remote catalog entry: compared with the installed copy of the same extension. Main takes the archive url and sha256 from
+    // the catalog the core verified, not from this card
     const local = S.modules.find((x) => x.id === m.id && x.installed);
-    const install = () => installExt({ url: m.url, sha256: m.sha256 }, m.name);
+    const install = () => installExt({ remoteId: m.id }, m.name);
     if (local && local.source !== 'builtin' && versionNewer(m.version, local.version)) {
       action = h('button', { class: 'btn sm primary', onclick: install }, `Cập nhật v${local.version} → v${m.version}`);
     } else if (local) action = h('span', { class: 'muted' }, local.version === m.version ? 'Đã cài bản này' : `Đã cài v${local.version}`);
@@ -2132,6 +2137,14 @@ function extCard(m, remote) {
     h('p', {}, m.description || ''),
     m.site ? h('a', { href: '#', class: 'muted', onclick: (e) => { e.preventDefault(); L.app.openExternal(m.site); } }, m.site) : null,
     h('div', { class: 'row' }, action));
+}
+// signed remote catalog (lustra/trust.py) and domain denylist badges of an extension card
+function trustBadges(m, remote) {
+  const out = [];
+  if (m.denied) out.push(h('span', { class: 'tagpill err', title: m.denied.message || '' }, 'bị chặn'));
+  if (remote && m.signed) out.push(h('span', { class: 'tagpill ok', title: `Catalog có chữ ký hợp lệ, khoá ${m.keyId || '?'}` }, 'đã ký'));
+  else if (remote) out.push(h('span', { class: 'tagpill warn', title: 'Catalog chưa ký: chỉ nhận ở chế độ nhà phát triển (LUSTRA_CATALOG_ALLOW_UNSIGNED)' }, 'chưa ký'));
+  return out;
 }
 // '1.10.0' > '1.9.2' (numeric parts; same rule as lustra.extensions.version_newer)
 function versionNewer(a, b) {
@@ -2160,7 +2173,7 @@ function originBadge(g) {
 }
 async function installExt(params, name) {
   try {
-    const r = params.id ? await L.ext.installCatalog(params.id) : await L.ext.installRemote({ ...params, name });
+    const r = params.id ? await L.ext.installCatalog(params.id) : await L.ext.installRemote({ id: params.remoteId, name });
     toast(r?.restartRequired ? `Đã cài ${name}. Khởi động lại app để dùng phiên bản mới.` : `Đã cài ${name}`, 'ok');
     renderExtensions();
   } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Cài thất bại: ${errMsg(err)}`, 'err'); }

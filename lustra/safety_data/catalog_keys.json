@@ -1,0 +1,4 @@
+{
+  "_comment": "Khoá công khai Ed25519 dùng để kiểm chữ ký catalog extension từ xa (lustra/trust.py). Danh sách rỗng là trạng thái giữ chỗ: mọi catalog từ xa bị từ chối cho tới khi người bảo trì thêm khoá thật. Thêm khoá: python tools/sign_catalog.py pubkey --key <file khoá bí mật> rồi dán mục in ra vào 'keys'. Xem docs/operations.md, mục Ký catalog extension.",
+  "keys": []
+}
