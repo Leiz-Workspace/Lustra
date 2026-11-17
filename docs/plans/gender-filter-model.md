@@ -1,6 +1,6 @@
 # Plan — Gán nhãn & lọc theo giới tính nhân vật (`only_female` / `only_male` / `both`)
 
-> 2026-11-16 · Trạng thái (cập nhật 2026-11-17): tầng 0, tầng 1 phương án A0 và P4 (video nhiều khung, trừ đánh giá 300 clip) **đã làm**, xem [Trạng thái triển khai](#trạng-thái-triển-khai). User story: US-21 ([user-stories.md](../user-stories.md)). Liên quan: [search-engine.md](search-engine.md) (Giai đoạn 3).
+> 2026-11-16 · Trạng thái (cập nhật 2026-11-17): tầng 0, tầng 1 phương án A0 và P4 (video nhiều khung, trừ đánh giá 300 clip) **đã làm**; công cụ đánh giá P1 đã có, tập vàng chưa được gán. Xem [Trạng thái triển khai](#trạng-thái-triển-khai). User story: US-21 ([user-stories.md](../user-stories.md)). Liên quan: [search-engine.md](search-engine.md) (Giai đoạn 3).
 > Mục tiêu: người dùng chọn "chỉ nữ", "chỉ nam" hoặc "cả hai" và Lustra tự loại post không khớp **trước khi tải**.
 > Hướng đi gồm hai tầng:
 > - **Tầng 0** suy nhãn từ tag sẵn có. Không cần ML, không tải ảnh, ra mắt được ngay.
@@ -24,6 +24,11 @@
 
 ## Trạng thái triển khai
 
+- **P1, công cụ đánh giá (2026-11-17, dev log "Công cụ đánh giá model giới tính")**: `lustra/gender_eval.py` (`python -m lustra.gender_eval`, cách chạy ở operations.md mục 3g).
+  - `sample`: lấy post qua downloader (chỉ metadata), loại theo thứ tự §3.2 có đếm từng bước, nhãn tầng 0 + slice §3.7, phân tầng (nhãn high, "thiếu tag", nhãn yếu) → manifest JSON. `label`: trang gán nhãn cục bộ (127.0.0.1, phím tắt, người gán không thấy tag), ảnh chỉ nằm trong RAM, safety gate của model chạy trước khi người xem, nút "không an toàn" xoá post khỏi manifest và báo tag. `agree`: Cohen's κ, danh sách cho trọng tài, tập vàng. `evaluate`: tầng 0 / model / tầng 0 + model với tập vàng, hoặc silver; ra `report.json` + `report.md` theo §3.7.
+  - Đã chạy **silver** trên Danbooru `rating:g`: [docs/reports/gender-model-eval-2026-11-17.md](../reports/gender-model-eval-2026-11-17.md). Silver đo mức đồng ý của model với tag mạnh, **không** thay cho tập vàng.
+  - **Khác plan**: không tính embedding và không có `meta.parquet` (A0 không train head; manifest JSON thay thế, version ở `tools/gender/`); chưa khử trùng theo pHash (cần giữ ảnh); split theo artist chưa làm (chỉ cần khi train A1 / B).
+  - **Còn cần người**: tập vàng (AC-G08: ≥ 3.000 post, ≥ 30 % thiếu tag, hai người gán độc lập, κ ≥ 0,8, trọng tài), sau đó mới đo được precision của tầng 0 (AC-G07) và model (AC-G09, AC-G10). Lệnh ở operations.md mục 3g.
 - **Model server (2026-11-17, dev log 7u)**: model chạy ở `lustra/model_server.py` (HTTP API, Docker, systemd), app và CLI chỉ gọi API; bản app không kèm onnxruntime / numpy / Pillow / model (lõi đóng băng 51,4 MiB). Khác §3.6 / §4.4 / §5.4: suy luận không bắt buộc trên máy người dùng, ảnh được gửi tới model server mà người dùng cấu hình (mặc định 127.0.0.1); http chỉ cho máy này / mạng nội bộ, ngoài ra phải https + token. Bộ luật, safety gate và cache vẫn ở client. Nút tải / xoá model trong app được bỏ (server tự tải).
 - **Bật / tắt và phần cứng (2026-11-17, dev log 7v)**: app có công tắc Dùng model (mặc định tắt), kiểm tra GPU / VRAM của server trước khi bật và cảnh báo khi model sẽ chạy bằng CPU, kèm hướng dẫn chung. Server chạy model trên GPU khi onnxruntime có provider GPU, nạp lười và tự giải phóng sau 15 phút không dùng.
 - **Tầng 1, phương án A0 đã làm (2026-11-17, dev log 7t)**: `lustra/gender_model.py`, `-gender_mode model`, RPC `gender.modelStatus` / `gender.modelInstall` / `gender.modelRemove`, Cài đặt → Model nhận diện giới tính, lựa chọn "Tag + model (ảnh)" trong bộ lọc. Đo thử: 20/20 ảnh mẫu khớp nhãn tag (sample), 18/20 với thumbnail (2 ca lệch đều ở độ tin cậy low, nên thành unknown với ngưỡng mặc định medium); ~0,4 s/ảnh trên CPU; Xbooru `scenery` chỉ nữ / cả hai: model xem 4/42 post thiếu tag, gán nhãn cả 4. **Khác plan**:
@@ -39,12 +44,12 @@
   - Chỉ file của post mà tag chưa đủ kết luận (`needs_model`) mới được xem lại: tag đủ tin cậy vẫn thắng như §3.4. File đã có trước lượt tải và post của task parent không bị đụng tới.
   - Safety gate trên một khung cũng chuyển file vào `_gender_mismatch/` (không xoá: file nằm trong thư mục người dùng, gate có ngưỡng thấp nên có chặn nhầm).
   - **Chưa làm**: đánh giá trên 300 clip gán tay (AC-G17), cần người gán nhãn; badge riêng cho kết quả nhiều khung trong app (card job chỉ có số file đã chuyển).
-- Còn lại của tầng 1: tập vàng và đo precision / thiên lệch (P1, §3.7), head A1 / phương án B, int8, catalog model, DirectML / CoreML, đánh giá video (AC-G17).
+- Còn lại của tầng 1: gán tập vàng rồi đo precision / thiên lệch (P1, §3.7; công cụ đã có, cần hai người gán), head A1 / phương án B, int8, catalog model, DirectML / CoreML, đánh giá video (AC-G17).
 - **Bổ sung 2026-11-17 (dev log 7s)**: chế độ loại bỏ: `-gender_exclude` ở lõi / CLI, nút gạt Giữ / Loại bỏ trong app.
 - **P0 đã làm (2026-11-16)**: `lustra/gender.py`, `lustra/gender_rules/{db,rx,en,gelbooru_generic}.json`, `lustra/safety.py`, hai filter trong `_process_tags`, CLI `-gender/-gender_conf/-gender_strict/-gender_mode`, RPC `search.preview` (`gender`, `excludedBy`, `genderStats`, `blockedCount`), IPC (`genderFiltered`, `blocked`, `genderStats`), UI (chip, badge, thống kê, lightbox, card job), manifest `genderRules`/`safetyTags`, `tools/gender_coverage.py`, test `lustra/tests/test_gender.py`.
 - **Khác plan**: không chuẩn hoá qua `all_tag_aliases.json`. File đó là alias dùng để đặt tên file (ví dụ `male` → `1+boys`), dùng để suy nhãn sẽ sai. Mỗi bộ luật mang khoá `aliases` riêng (rx: `hetero`, `hetero_sex` → `straight`). Chưa có `-dump_gender` (câu hỏi mở §8.5).
 - **Độ phủ đo được** (≥ medium): db 95,9 % (mới nhất) / 99,5 % (ngẫu nhiên, `random:200` vì `order:random` timeout trên toàn DB); rx 85,8 % / 94,6 %. Xem `docs/reports/`.
-- Chưa làm (tầng 0): tập vàng và đo precision (P1), đo độ phủ e621.
+- Chưa làm (tầng 0): gán tập vàng và đo precision (P1, công cụ `lustra/gender_eval.py` đã có), đo độ phủ e621.
 
 ## 0. Tóm tắt & quyết định chính
 
