@@ -105,6 +105,7 @@ def build_exe() -> None:
         '--collect-datas=fake_useragent',
         # builtin extensions: manifests are data, downloader modules are imported dynamically
         '--add-data', f'{ROOT_DIR.joinpath("lustra/builtin_ext").as_posix()}:lustra/builtin_ext',
+        '--add-data', f'{ROOT_DIR.joinpath("lustra/gender_rules").as_posix()}:lustra/gender_rules',
         '--hidden-import', 'lustra.download_rx', '--hidden-import', 'lustra.download_db',
         '--version-file=version_info.txt',
     ))

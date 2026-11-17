@@ -182,6 +182,10 @@ def infer_from_tags(tags: Iterable[str], rules: GenderRules) -> GenderResult:
                     continue
                 evidence.append(tag)
 
+    # 'futa_only' must mark the post as futa BEFORE body part tags are read: its penis is not a male character
+    excl_futa = sorted(t & rules.exclusive_futa)
+    if excl_futa:
+        flags.add('futa')
     futa = 'futa' in flags or 'futaMale' in flags
     # futanari & co: drawn as female, penis does not count as a male character
     if 'futa' in flags and F is None:
@@ -202,10 +206,9 @@ def infer_from_tags(tags: Iterable[str], rules: GenderRules) -> GenderResult:
 
     conflict = False
     exclusive: GenderLabel | None = None
-    if excl := sorted(t & rules.exclusive_futa):
+    if excl_futa:
         exclusive = GenderLabel.ONLY_FEMALE
-        flags.add('futa')
-        evidence += excl
+        evidence += excl_futa
     elif excl := sorted(t & rules.exclusive_female):
         exclusive = GenderLabel.ONLY_FEMALE
         evidence += excl

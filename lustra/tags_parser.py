@@ -18,9 +18,9 @@ __all__ = ('convert_taglist', 'parse_tags', 'register_module_syntax', 'reset_las
 DEFAULT_TAGS = ('sfw',)
 
 # language=PythonRegExp
-TAG_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:]'
+TAG_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:&#;?@$^]'
 # language=PythonRegExp
-ANDGR_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:|?]'
+ANDGR_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:|?&#;@$^]'
 # language=PythonRegExp
 SYMBOL_CHAR = r'[!@#$%^&*()\-_=+\[\]{}\\|\'";:,.<>/?`~]'
 # language=PythonRegExp
@@ -247,8 +247,17 @@ def split_or_group(gr: str) -> str:
     return f'( {" ~ ".join(part for part in orgr_parts)} )'
 
 
+URL_ESCAPES = (('%', '%25'), ('+', '%2b'), ('&', '%26'), ('#', '%23'), (';', '%3b'))
+'''task strings are inserted into urls as is: characters with a meaning in a query string are escaped ('%' first).
+Logical tags (local filters, tag lists) are recovered with urllib.parse.unquote()'''
+
+
 def normalize_tag(tag: str) -> str:
-    return tag.replace('+', '%2b').replace(' ', '+')
+    if tag.startswith('-(') and tag.endswith(')'):
+        return tag  # negative group: a local-only pattern, never sent to the website
+    for raw, escaped in URL_ESCAPES:
+        tag = tag.replace(raw, escaped)
+    return tag.replace(' ', '+')
 
 
 def convert_taglist(taglist: Sequence[str]) -> list[str]:

@@ -36,9 +36,8 @@ from .defines import (
     ModuleCaps,
 )
 from .download import Downloader
-from .help import APP_ADDRESS
 from .logger import trace
-from .network import thread_exit
+from .network import LUSTRA_USER_AGENT, thread_exit
 from .rex import (
     re_favorited_by_tag,
     re_item_info_part_xml,
@@ -47,7 +46,6 @@ from .rex import (
     re_tags_to_process_rx,
 )
 from .utils import as_date
-from .vcs.version import APP_VERSION
 
 __all__ = ('DownloaderDb',)
 
@@ -73,7 +71,8 @@ class DownloaderDb(Downloader):
 
     def __init__(self) -> None:
         super().__init__()
-        self._base_headers = {'User-Agent': f'Lustra/{APP_VERSION} (based on Ruxx <{APP_ADDRESS}>)'}
+        # descriptive client name asked by danbooru; Lustra has no public contact address (Ruxx's repository is not one)
+        self._base_headers = {'User-Agent': LUSTRA_USER_AGENT}
         self._base_cookies = {}
         self._last_query_tags = ''
 
@@ -165,6 +164,27 @@ class DownloaderDb(Downloader):
     def _form_page_num_address(self, n: int) -> str:
         return f'{self.url}&page={n + 1:d}'
 
+    def _supports_id_cursor(self) -> bool:
+        return True
+
+    def _form_cursor_page_address(self, cursor: int | None, ascending: bool) -> str:
+        # 'a<id>': the posts right above id, 'b<id>': below id; both in descending order (checked 2026-11-16)
+        if cursor is None:
+            return f'{self.url}&page=a0' if ascending else f'{self.url}&page=1'
+        return f'{self.url}&page={"a" if ascending else "b"}{cursor:d}'
+
+    def _get_query_size_or_none(self, url: str) -> int | None:
+        raw_count = self.fetch_html(self._form_count_address(self._last_query_tags))
+        if raw_count is None:
+            thread_exit('ERROR: GetItemsQueSize: unable to retreive post count', code=-444)
+        if err := self._api_error(raw_count.raw):
+            thread_exit(f'ERROR: [{MODULE_ABBR_DB.upper()}] {err}', code=-447)
+        count = (json.loads(raw_count.raw).get('counts') or {}).get('posts')
+        return count if isinstance(count, int) else None
+
+    def _page_error(self, raw: bytes) -> str:
+        return self._api_error(raw)
+
     def _form_count_address(self, tags: str) -> str:
         return f'{self._get_sitename()}counts/posts.json?tags={tags}{self._auth_str()}'
 
@@ -204,18 +224,36 @@ class DownloaderDb(Downloader):
         count = (json.loads(raw_count.raw).get('counts') or {}).get('posts')
         if isinstance(count, int):
             return count
-        # count may be unavailable for heavy queries (timeout), check first page at least
-        raw_page = self.fetch_html(self._form_page_num_address(0), tries=tries, do_cache=True)
-        if raw_page is None:
-            thread_exit('ERROR: GetItemsQueSize: unable to retreive html', code=-445)
-        if err := self._api_error(raw_page.raw):
-            thread_exit(f'ERROR: [{MODULE_ABBR_DB.upper()}] {err}', code=-447)
-        first_count = len(json.loads(raw_page.raw))
-        trace(f'Warning (W2): [{MODULE_ABBR_DB.upper()}] post count is unavailable, assuming maximum search depth')
-        return MAX_SEARCH_DEPTH if first_count >= ITEMS_PER_PAGE else first_count
+        # count is unavailable for heavy queries (database timeout): binary search for the last non-empty page (~11 requests)
+        trace(f'Info: [{MODULE_ABBR_DB.upper()}] post count is unavailable, looking for the last page...')
+
+        def page_len(p: int) -> int:
+            raw_page = self.fetch_html(self._form_page_num_address(p), tries=tries, do_cache=True)
+            if raw_page is None:
+                thread_exit('ERROR: GetItemsQueSize: unable to retreive html', code=-445)
+            if err := self._api_error(raw_page.raw):
+                thread_exit(f'ERROR: [{MODULE_ABBR_DB.upper()}] {err}', code=-447)
+            return len(json.loads(raw_page.raw))
+
+        if (first := page_len(0)) < ITEMS_PER_PAGE:
+            return first
+        lo, hi = 0, MAX_SEARCH_DEPTH_PAGES - 1
+        if page_len(hi) >= ITEMS_PER_PAGE:
+            return MAX_SEARCH_DEPTH
+        while hi - lo > 1:  # page lo is full, page hi is not
+            mid = (lo + hi) // 2
+            if page_len(mid) >= ITEMS_PER_PAGE:
+                lo = mid
+            else:
+                hi = mid
+        return hi * ITEMS_PER_PAGE + page_len(hi)
 
     def _get_all_post_tags(self, raw_html_page: bytes) -> list:
-        parsed = json.loads(raw_html_page)
+        try:
+            parsed = json.loads(raw_html_page)
+        except ValueError:
+            trace(f'ERROR: [{MODULE_ABBR_DB.upper()}] invalid json page (bot challenge or truncated response?)', True)
+            return []
         if not isinstance(parsed, list):
             trace(f'ERROR: [{MODULE_ABBR_DB.upper()}] {self._api_error(raw_html_page)}', True)
             return []

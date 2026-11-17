@@ -54,6 +54,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         # config
         self.hide_personal_info: bool = False
         self.add_filename_prefix: bool = False
+        self._existing_ids_cache: set[str] | None = None
         self.dump_tags: bool = False
         self.dump_sources: bool = False
         self.dump_comments: bool = False
@@ -234,6 +235,16 @@ class DownloaderBase(ThreadedHtmlWorker):
                 return f'{self._get_sitename().rstrip("/")}{url}' if url.startswith('/') and not url.startswith('//') else url
         return ''
 
+    def _item_info_for(self, full_item_id: str) -> ItemInfo:
+        """Info of an item while it is being downloaded: in item_info_dict_all once its task is done (always with the streaming
+        pipeline, which clears the per task dict after each batch), else in the per task dict. A throwaway ItemInfo if there is none
+        (Ruxx raised KeyError for items of earlier tasks, ex. '-dump_comments' with OR groups)"""
+        return self.item_info_dict_all.get(full_item_id) or self.item_info_dict_per_task.get(full_item_id) or ItemInfo()
+
+    def _item_idstring(self, item_id: str) -> str:
+        """Key of item infos / filtered ids caches (prefixed only when file names are prefixed). Ruxx mixed both forms"""
+        return f'{(self._get_module_abbr_p() if self.add_filename_prefix else "")}{item_id}'
+
     def _has_capability(self, cap: str) -> bool:
         return cap in self.CAPABILITIES
 
@@ -251,6 +262,31 @@ class DownloaderBase(ThreadedHtmlWorker):
 
     def _get_page_scan_threads_divisor(self) -> int:
         return 2
+
+    def _supports_id_cursor(self) -> bool:
+        """Module can page by id cursor (see _form_cursor_page_address): used by the streaming pipeline with default sorting"""
+        return False
+
+    def _form_cursor_page_address(self, cursor: int | None, ascending: bool) -> str:
+        """Search page right above (ascending) / below the cursor id, posts in descending id order. None: the first page"""
+        raise NotImplementedError
+
+    def _prefer_id_cursor(self, count: int | None) -> bool:
+        """Cursor pages are fetched one after another, page numbers in parallel: modules may keep page numbers for small results"""
+        return True
+
+    def _cursor_first_page_ok(self, ids: list[int], ascending: bool) -> bool:
+        """Module check of the first cursor page (ex. the website really sorted by id), False: use page numbers"""
+        return True
+
+    def _get_query_size_or_none(self, url: str) -> int | None:
+        """Posts count for the cursor pipeline, None when the website cannot count (the scan does not need it)"""
+        res = self._get_items_query_size_or_html(url)
+        return res if isinstance(res, int) else None
+
+    def _page_error(self, raw: bytes) -> str:
+        """Module hook: api error message carried by a search page, '' if none"""
+        return ''
 
     def _solve_module_specific_conflicts(self) -> bool:
         """Module hook for argument conflicts not covered by capabilities, returns True if something was changed"""
@@ -411,122 +447,79 @@ class DownloaderBase(ThreadedHtmlWorker):
 
         return pnum
 
+    def _page_edge_date(self, pnum: int, first: bool) -> str | None:
+        """Date of the first (newest) or last (oldest) item of a search page, None if the page is empty"""
+        raw_html_page = self.fetch_html(self._form_page_num_address(pnum), do_cache=True)
+        if raw_html_page is None:
+            thread_exit(f'ERROR: ProcPage: unable to retreive html for page {pnum + 1:d}!', -16)
+        items_raw = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, self._parses_raw_pages())
+        if len(items_raw) == 0:
+            return None
+        h = self._local_addr_from_string(str(items_raw[0 if first else -1]))
+        raw_html_item = self._get_item_html(h)
+        if raw_html_item is None:
+            thread_exit(f'ERROR: TagProc: unable to retreive html for {self._extract_id(h)}! Stopping search', -18)
+        return self._extract_post_date(raw_html_item)
+
     def _get_page_boundary_by_date(self, minpage: bool) -> int:
+        """Binary search over result pages (newest first, dates non-increasing with page index).
+        minpage: first page holding an item <= date_max (its last item is <= date_max);
+        maxpage: last page holding an item >= date_min (its first item is >= date_min).
+        Replaces Ruxx bisection which could stop one page off when pages count is not a power of 2"""
         if 1 <= self._num_pages() <= 2:
             trace('Only a page or two! Skipping')
-            pnum = self.minpage if minpage else self.maxpage
-        elif minpage is True and as_date(self.date_max) >= LAUCH_DATE:
+            return self.minpage if minpage else self.maxpage
+        if minpage is True and as_date(self.date_max) >= LAUCH_DATE:
             trace('Min page: max date irrelevant! Skipping')
-            pnum = self.minpage
-        elif minpage is False and as_date(self.date_min) <= as_date(DATE_MIN_DEFAULT):
+            return self.minpage
+        if minpage is False and as_date(self.date_min) <= as_date(DATE_MIN_DEFAULT):
             trace('Max page: min date irrelevant! Skipping')
-            pnum = self.maxpage
-        else:
-            p_chks = [PageCheck() for _ in range(self.maxpage + 3)]
-
-            lim_backw = self.minpage - 1
-            lim_forw = self.maxpage + 1
-
-            dofinal = False
-            cur_step = 0
-            pdivider = 1
-            step_dir = 1  # forward
-            pnum = self.minpage
-
-            while True:
+            return self.maxpage
+        lo, hi = self.minpage, self.maxpage
+        if minpage:
+            limit, answer = as_date(self.date_max), self.maxpage
+            while lo <= hi:
                 self.catch_cancel_or_ctrl_c()
-
-                if dofinal is True:
-                    trace(f'{"min" if minpage else "max"} page reached: {pnum + 1:d}')
-                    break
-
-                cur_step += 1
-                trace(f'step {cur_step:d}')
-
-                pdivider = min(pdivider * 2, self._num_pages())
-                pnum += (self._num_pages() // pdivider) * step_dir
-                trace(f'page {pnum + 1:d} (div {pdivider:d}, step {step_dir:d})')
-
-                half_div = pdivider > self._num_pages() // 2
-
-                if pnum < self.minpage:
-                    trace('Page < minpage, returning minpage!')
-                    pnum = self.minpage
-                    break
-                if pnum > self.maxpage:
-                    trace('Page > maxpage, returning maxpage!')
-                    pnum = self.maxpage
-                    break
-
-                items_per_page = self._get_items_per_page()
-
-                prev = pnum * items_per_page
-                curmax = min((pnum + 1) * items_per_page, self.total_count)
-                i_count = curmax - prev
-
-                raw_html_page = self.fetch_html(self._form_page_num_address(pnum), do_cache=True)
-                if raw_html_page is None:
-                    thread_exit(f'ERROR: ProcPage: unable to retreive html for page {pnum + 1:d}!', -16)
-
-                items_raw = self._argswitch2(self._get_all_post_tags, raw_html_page.raw, raw_html_page.html, self._parses_raw_pages())
-                if len(items_raw) == 0:
-                    reason = str((raw_html_page.html.find('response') or {}).get('reason', 'Unknown reason'))
-                    thread_exit(f'ERROR: ProcPage: cannot find picture or video on page {pnum + 1:d}! Reason: \'{reason}\'', -17)
-
-                # check first item if moving forward and last item if backwards
-                h = self._local_addr_from_string(str(items_raw[0 if step_dir == 1 else i_count - 1]))
-                item_id = self._extract_id(h)
-
-                # trace(f'checking id {item_id}')
-
-                def forward() -> tuple[int, int]:
-                    return pnum, 1
-
-                def backward() -> tuple[int, int]:
-                    return pnum, -1
-
-                cur_step_dir = step_dir
-
-                raw_html_item = self._get_item_html(h)
-                if raw_html_item is None:
-                    thread_exit(f'ERROR: TagProc: unable to retreive html for {item_id}! Stopping search', -18)
-
-                if minpage is True:
-                    if as_date(self._extract_post_date(raw_html_item)) > as_date(self.date_max):
-                        if half_div and (p_chks[lim_forw + 1].first or p_chks[pnum + 1].last):
-                            dofinal = True
-                        else:
-                            trace(f'Info: TagProc: > maxdate at {item_id} - stepping forward...')
-                            lim_backw, step_dir = forward()
-                    else:
-                        if half_div and (p_chks[lim_backw + 1].last or p_chks[pnum + 1].first):
-                            dofinal = True
-                        else:
-                            trace(f'Info: TagProc: <= maxdate at {item_id} - stepping backwards...')
-                            lim_forw, step_dir = backward()
+                mid = (lo + hi) // 2
+                date = self._page_edge_date(mid, first=False)
+                trace(f'page {mid + 1:d}: last item date {date}')
+                if date is None or as_date(date) <= limit:
+                    answer, hi = mid, mid - 1
                 else:
-                    if as_date(self._extract_post_date(raw_html_item)) < as_date(self.date_min):
-                        if half_div and (p_chks[lim_backw + 1].last or p_chks[pnum + 1].first):
-                            dofinal = True
-                        else:
-                            trace(f'Info: TagProc: < mindate at {item_id} - stepping backwards...')
-                            lim_forw, step_dir = backward()
-                    else:
-                        if half_div and (p_chks[lim_forw + 1].first or p_chks[pnum + 1].last):
-                            dofinal = True
-                        else:
-                            trace(f'Info: TagProc: >= mindate at {item_id} - stepping forward...')
-                            lim_backw, step_dir = forward()
-
-                if cur_step_dir == 1:
-                    p_chks[pnum + 1].first = True
+                    lo = mid + 1
+        else:
+            limit, answer = as_date(self.date_min), self.minpage
+            while lo <= hi:
+                self.catch_cancel_or_ctrl_c()
+                mid = (lo + hi) // 2
+                date = self._page_edge_date(mid, first=True)
+                trace(f'page {mid + 1:d}: first item date {date}')
+                if date is not None and as_date(date) >= limit:
+                    answer, lo = mid, mid + 1
                 else:
-                    p_chks[pnum + 1].last = True
+                    hi = mid - 1
+        trace(f'{"min" if minpage else "max"} page reached: {answer + 1:d}')
+        return answer
 
-        return pnum
+    def _single_item_date(self, item_raw: str) -> str | None:
+        raw_html_item = self._get_item_html(self._local_addr_from_string(str(item_raw)))
+        return self._extract_post_date(raw_html_item) if raw_html_item is not None else None
+
+    def _first_index_by_date(self, items_raw_list: list[str], lo: int, hi: int, pred: Callable[[str | None], bool]) -> int:
+        """Binary search over items sorted newest first: first index in [lo, hi) where pred(item date) is True (hi if none).
+        pred must be monotonic over the range (False... True). One item page is fetched per step"""
+        while lo < hi:
+            self.catch_cancel_or_ctrl_c()
+            mid = (lo + hi) // 2
+            if pred(self._single_item_date(items_raw_list[mid])):
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
 
     def _filter_last_items(self) -> None:
-        # Filter out all trailing items if needed (last page)
+        """Removes trailing items older than date_min. Only the last 2 pages worth of items can be out of range
+        (page boundaries are found by date first). Replaces Ruxx bisection which stopped one step off and skipped single items"""
         trace('Filtering trailing back items...')
 
         if as_date(self.date_min) <= as_date(DATE_MIN_DEFAULT):
@@ -535,75 +528,19 @@ class DownloaderBase(ThreadedHtmlWorker):
 
         items_raw_list = self.items_raw_all if self.current_state == DownloaderStates.DOWNLOADING else self.items_raw_per_task
         orig_len = len(items_raw_list)
-        if orig_len < 2:
-            trace('less than 2 items: skipping!')
+        if orig_len == 0:
             return
 
         trace(f'mindate at {self.date_min}, filtering...')
+        date_min = as_date(self.date_min)
         boundary = orig_len - min(orig_len, self._get_items_per_page() * 2)
-
-        divider = 1
-        dofinal = False
-        step_direction = 1
-        cur_step = 0
-        f_total = orig_len - boundary
-        cur_index = boundary
-        forward_lim = orig_len
-        backward_lim = boundary - 1
-        while True and f_total > 0:  # while True
-            cur_step += 1
-            trace(f'step {cur_step:d}')
-
-            self.catch_cancel_or_ctrl_c()
-
-            divider = min(divider * 2, f_total)
-            cur_index += (f_total // divider) * step_direction
-            trace(f'index {cur_index:d} (div {divider:d}, step {step_direction:d})')
-
-            if cur_index < backward_lim:
-                trace('Error: cur_index < backward_lim, aborting filter!')
-                break
-            if cur_index > forward_lim:
-                trace('Error: cur_index > forward_lim, aborting filter!')
-                break
-
-            # last steps
-            if cur_index == backward_lim:
-                cur_index = backward_lim + 1
-                trace(f'End: reached back lim at {backward_lim:d}!')
-                dofinal = True
-            elif cur_index == forward_lim:
-                cur_index = forward_lim
-                trace(f'End: reached forw lim at {forward_lim:d}!')
-                dofinal = True
-
-            if dofinal is True:
-                trace(f'Filtered out {orig_len - cur_index:d} / {orig_len:d} items')
-                del items_raw_list[cur_index:]
-                break
-
-            h = self._local_addr_from_string(str(items_raw_list[cur_index]))
-            item_id = self._extract_id(h)
-
-            def forward() -> tuple[int, int]:
-                return cur_index, 1
-
-            def backward() -> tuple[int, int]:
-                return cur_index, -1
-
-            raw_html_item = self._get_item_html(h) if as_date(self.date_min) > as_date(DATE_MIN_DEFAULT) else None
-            post_date = self._extract_post_date(raw_html_item) if raw_html_item is not None else None
-            exceed_date = (as_date(post_date) < as_date(self.date_min)) if post_date is not None else False
-
-            if exceed_date:
-                trace(f'Info: TagProc_filter: {item_id} exceeds min date ({post_date} < {self.date_min}), shuffling backwards...')
-                forward_lim, step_direction = backward()
-            else:
-                trace(f'Info: TagProc_filter: {item_id} does not exceed min date ({post_date} >= {self.date_min}) - stepping forward...')
-                backward_lim, step_direction = forward()
+        # items without a date are kept (Ruxx behavior)
+        cut = self._first_index_by_date(items_raw_list, boundary, orig_len, lambda d: d is not None and as_date(d) < date_min)
+        trace(f'Filtered out {orig_len - cut:d} / {orig_len:d} items')
+        del items_raw_list[cut:]
 
     def _filter_first_items(self) -> None:
-        # Filter out all trailing items if needed (front page)
+        """Removes leading items newer than date_max (see _filter_last_items)"""
         trace('Filtering trailing front items...')
 
         if as_date(self.date_max) >= LAUCH_DATE:
@@ -612,72 +549,15 @@ class DownloaderBase(ThreadedHtmlWorker):
 
         items_raw_list = self.items_raw_all if self.current_state == DownloaderStates.DOWNLOADING else self.items_raw_per_task
         orig_len = len(items_raw_list)
-        if orig_len < 2:
-            trace('less than 2 items: skipping!')
+        if orig_len == 0:
             return
 
         trace(f'maxdate at {self.date_max}, filtering...')
+        date_max = as_date(self.date_max)
         boundary = min(orig_len, self._get_items_per_page() * 2)
-
-        divider = 1
-        dofinal = False
-        step_direction = 1
-        cur_step = 0
-        f_total = boundary
-        cur_index = 0
-        forward_lim = boundary
-        backward_lim = -1
-        while True and f_total > 0:  # while True
-            cur_step += 1
-            trace(f'step {cur_step:d}')
-
-            self.catch_cancel_or_ctrl_c()
-
-            divider = min(divider * 2, f_total)
-            cur_index += (f_total // divider) * step_direction
-            trace(f'index {cur_index:d} (div {divider:d}, step {step_direction:d})')
-
-            if cur_index < backward_lim:
-                trace('Error: cur_index < backward_lim, aborting filter!')
-                break
-            if cur_index > forward_lim:
-                trace('Error: cur_index > forward_lim, aborting filter!')
-                break
-
-            # last steps
-            if cur_index == backward_lim:
-                cur_index = backward_lim + 1
-                trace(f'End: reached back lim at {backward_lim:d}!')
-                dofinal = True
-            elif cur_index == forward_lim:
-                cur_index = forward_lim
-                trace(f'End: reached forw lim at {forward_lim:d}!')
-                dofinal = True
-
-            if dofinal is True:
-                trace(f'Filtered out {cur_index:d} / {orig_len:d} items')
-                del items_raw_list[:cur_index]
-                break
-
-            h = self._local_addr_from_string(str(items_raw_list[cur_index]))
-            item_id = self._extract_id(h)
-
-            def forward() -> tuple[int, int]:
-                return cur_index, 1
-
-            def backward() -> tuple[int, int]:
-                return cur_index, -1
-
-            raw_html_item = self._get_item_html(h) if as_date(self.date_max) < LAUCH_DATE else None
-            post_date = self._extract_post_date(raw_html_item) if raw_html_item is not None else None
-            exceed_date = (as_date(post_date) > as_date(self.date_max)) if post_date is not None else False
-
-            if exceed_date:
-                trace(f'Info: TagProc_filter: {item_id} exceeds max date ({post_date} > {self.date_max}), stepping forward...')
-                backward_lim, step_direction = forward()
-            else:
-                trace(f'Info: TagProc_filter: {item_id} does not exceed max date ({post_date} <= {self.date_max}) - stepping backwards...')
-                forward_lim, step_direction = backward()
+        cut = self._first_index_by_date(items_raw_list, 0, boundary, lambda d: d is None or as_date(d) <= date_max)
+        trace(f'Filtered out {cut:d} / {orig_len:d} items')
+        del items_raw_list[:cut]
 
     def _filter_items_by_type(self) -> None:
         trace('Filtering items by type...')
@@ -711,7 +591,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         idx: int
         for idx in reversed(range(len(self.items_raw_per_task))):
             self.catch_cancel_or_ctrl_c()
-            full_itemid = f'{self._get_module_abbr_p()}{self._extract_id(self.items_raw_per_task[idx])}'
+            full_itemid = self._item_idstring(self._extract_id(self._local_addr_from_string(str(self.items_raw_per_task[idx]))))
             if full_itemid in self.item_info_dict_all or full_itemid in self.filtered_out_ids_cache:
                 del self.items_raw_per_task[idx]
                 self.total_count -= 1
@@ -726,6 +606,8 @@ class DownloaderBase(ThreadedHtmlWorker):
         abbrp = self._get_module_abbr_p()
         re_owned_file = re.compile(fr'^(?:{re.escape(abbrp)})?(\d+)[._]')
         existing_ids: set[str] = set()
+        if self._existing_ids_cache is not None:  # streaming: the folders are listed once per task, not per batch
+            folders, existing_ids = [], self._existing_ids_cache
         for folder in folders:
             if not folder.is_dir():
                 continue
@@ -736,6 +618,8 @@ class DownloaderBase(ThreadedHtmlWorker):
                         continue
                     if m := re_owned_file.match(f.name):
                         existing_ids.add(m.group(1))
+        if self.streaming_active and self._existing_ids_cache is None:
+            self._existing_ids_cache = existing_ids
 
         if not existing_ids:
             return

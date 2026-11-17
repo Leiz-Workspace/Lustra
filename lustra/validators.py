@@ -49,6 +49,7 @@ __all__ = (
     'Validator',
     'VideosCBValidator',
     'WindowPosValidator',
+    'module_id_from_setting',
     'valid_api_key',
     'valid_date',
     'valid_download_mode',
@@ -118,8 +119,20 @@ def valid_date(date: str) -> str:
 
 
 def valid_json(json_str: str) -> dict[str, str]:
+    """-headers / -cookies: a JSON object of strings. Ruxx removed every backslash before parsing: escaped quotes were rejected,
+    '\\\\' was lost and '\\u00e9' became 'u00e9'. Shell quoted input ('{...}' / "{...}") is still accepted"""
     try:
-        return json.loads(json_str.strip('\'"').replace('\\', ''))
+        s = json_str.strip()
+        try:
+            val = json.loads(s)
+        except ValueError:
+            val = None
+        if val is None and len(s) >= 2 and s[0] == s[-1] and s[0] in '\'"':
+            val = json.loads(s[1:-1])
+        elif isinstance(val, str):  # a json string holding the object
+            val = json.loads(val)
+        assert isinstance(val, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in val.items())
+        return val
     except Exception:
         raise ArgumentTypeError('invalid JSON object')
 
@@ -244,9 +257,23 @@ class DummyValidator(IntValidator, StrValidator):
         return str
 
 
-class ModuleValidator(IntValidator):
-    def __call__(self, val: int) -> bool:
-        return ProcModule.PROC_MODULE_MIN - 1 <= val <= ProcModule.PROC_MODULE_MAX - 1
+def module_id_from_setting(val: str | int) -> int:
+    """Module setting: abbreviation ('db'), or the legacy 0-based integer of Ruxx configs (builtin modules only)"""
+    s = str(val).strip().lower()
+    if s in ProcModule.PROC_MODULES_BY_NAME:
+        return ProcModule.PROC_MODULES_BY_NAME[s]
+    if s.isdigit() and ProcModule.PROC_MODULE_MIN <= int(s) + 1 <= ProcModule.PROC_MODULE_MAX:
+        return int(s) + 1
+    raise ValueError(f'unknown module \'{val}\'')
+
+
+class ModuleValidator(StrValidator):
+    def __call__(self, val: str) -> bool:
+        try:
+            module_id_from_setting(val)
+            return True
+        except Exception:
+            return False
 
 
 class FolderPathValidator(StrValidator):

@@ -20,8 +20,8 @@ DOWNLOADERS_BY_PROC_MODULE: dict[int, type[Downloader]] = {}
 
 def _make_downloader(proc_module: int) -> Downloader:
     from .extensions import Extensions
-    if proc_module not in DOWNLOADERS_BY_PROC_MODULE:
-        # legacy behavior: cli / tk gui / tests can use any locally available extension
+    if proc_module not in DOWNLOADERS_BY_PROC_MODULE and Extensions.catalog_autoload():
+        # legacy behavior: cli / tk gui / tests can use any locally available extension (the desktop app disables it)
         Extensions.ensure_loaded(include_catalog=True)
     if proc_module not in DOWNLOADERS_BY_PROC_MODULE:
         name = ProcModule.PROC_MODULES_NAMES_BY_ID.get(proc_module, str(proc_module))

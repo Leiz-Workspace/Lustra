@@ -51,6 +51,7 @@ from .gui_defines import (
     OPTION_CMD_SAVE_HASHES,
     OPTION_CMD_SAVE_SOURCES,
     OPTION_CMD_SAVE_TAGS,
+    OPTION_CMD_TAGS_LIMIT_CMD,
     OPTION_CMD_THREADING_CMD,
     OPTION_CMD_TIMEOUT_CMD,
     OPTION_CMD_VERBOSE,
@@ -100,6 +101,7 @@ from .help import (
     HELP_ARG_SUBFOLDER_IMAGES,
     HELP_ARG_SUBFOLDER_VIDEOS,
     HELP_ARG_TAGS,
+    HELP_ARG_TAGS_LIMIT,
     HELP_ARG_THREADS,
     HELP_ARG_VERBOSE,
     HELP_ARG_VERSION,
@@ -139,10 +141,12 @@ DEFAULT_PATH = valid_folder_path('.')
 def _create_parsers() -> dict[str, ArgumentParser]:
     def create_parser(sub, name: str, description: str) -> ArgumentParser:
         if sub:
-            parser: ArgumentParser = sub.add_parser(PARSER_TITLE_NAMES_REMAP.get(name, name), description=description, add_help=False)
+            parser: ArgumentParser = sub.add_parser(PARSER_TITLE_NAMES_REMAP.get(name, name), description=description, add_help=False,
+                                                    allow_abbrev=False)
             parser.set_defaults(**{PARSER_PARAM_PARSER_TITLE: name})
         else:
-            parser = ArgumentParser(add_help=False, prog=MODULE)
+            # no abbreviations: negative tags like '-web' or '-v' must never be taken for options (tags also follow '--')
+            parser = ArgumentParser(add_help=False, prog=MODULE, allow_abbrev=False)
         parser.set_defaults(**{PARSER_PARAM_PARSER_TYPE: parser})
         assert name not in parsers
         parsers[name] = parser
@@ -203,6 +207,7 @@ def _add_common_args(par: ArgumentParser) -> None:
     dofi = par.add_argument_group(title='filtering options')
     dofi.add_argument(OPTION_CMD_DATEAFTER_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MINDATE, type=valid_date)
     dofi.add_argument(OPTION_CMD_DATEBEFORE_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MAXDATE, type=valid_date)
+    dofi.add_argument(OPTION_CMD_TAGS_LIMIT_CMD, metavar='#NUMBER', help=HELP_ARG_TAGS_LIMIT, type=valid_positive_int)
     dofi.add_argument(OPTION_CMD_GENDER_CMD, metavar='#LABEL[,LABEL...]', help=HELP_ARG_GENDER, type=valid_gender_list)
     dofi.add_argument(OPTION_CMD_GENDER_MODE_CMD, choices=GENDER_MODES, help=HELP_ARG_GENDER_MODE)
     dofi.add_argument(OPTION_CMD_GENDER_CONF_CMD, choices=GENDER_CONFS, help=HELP_ARG_GENDER_CONF)
@@ -245,8 +250,9 @@ def _validate_parsed(parser: ArgumentParser, args: list[str] | tuple[str, ...]) 
 
 
 def prepare_arglist(args: list[str] | tuple[str, ...]) -> Namespace:
+    """Tags should follow '--' (options after it are tags: '-webm' means 'exclude tag webm')"""
     from .extensions import Extensions
-    Extensions.ensure_loaded(include_catalog=True)  # extensions may add module abbreviations
+    Extensions.ensure_loaded(include_catalog=Extensions.catalog_autoload())  # extensions may add module abbreviations
     parsers = _create_parsers()
     parser_root = parsers[PARSER_TITLE_NONE]
     pcmd = parsers[PARSER_TITLE_CMD]
