@@ -17,7 +17,7 @@
     search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {} },
     download: { path: '/home/user/Downloads/Lustra', threads: 4, images: true, videos: true, videoFormat: '', lowRes: false, prefix: true,
       gender: { select: [], conf: 'medium', strict: false },
-      appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, subfolderPerQuery: false, dumpTags: false,
+      appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },
     tags: { autoUpdate: false, autoUpdateDays: 7 },
@@ -175,6 +175,13 @@
       if (method === 'tags.validate') return { valid: !/[\s]{2,}|\(\)/.test(p.tags), tags: p.tags.split(' ') };
       if (method === 'tags.status') return [{ module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
+      if (method === 'index.stats') {
+        const now = Date.now() / 1000;
+        return { path: '~/.config/Lustra/index/downloads.sqlite', exists: true, schema: 1, files: 1834, posts: 1801, withMd5: 1790, tags: 9412,
+          bytes: 2.9e9, dbBytes: 3.1e6, first: now - 86400 * 40, last: now - 3600, recording: true,
+          modules: [{ module: 'rx', files: 1210, bytes: 2.1e9, last: now - 3600 }, { module: 'db', files: 624, bytes: 0.8e9, last: now - 86400 * 3 }] };
+      }
+      if (method === 'index.search') return { total: 0, page: p.page || 0, pageSize: p.pageSize || 50, items: [], terms: [] };
       throw new Error(`mock: ${method}`);
     },
     tags: { update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; } },

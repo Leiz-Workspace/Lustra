@@ -54,7 +54,7 @@ def _start_ipc_threads(dwn) -> None:
                 'total': dwn.total_count, 'totalAll': dwn.total_count_all, 'processed': dwn.processed_count,
                 'success': dwn.success_count, 'failed': dwn.fail_count, 'pages': dwn.total_pages if dwn.maxpage else 0,
                 'cfChallenge': dwn.cf_challenge_hit, 'genderFiltered': dwn.gender_filtered_count, 'blocked': dwn.safety_blocked_count,
-                'streaming': dwn.streaming_active, 'scanning': dwn.stream_scanning,
+                'known': dwn.known_skipped_count, 'streaming': dwn.streaming_active, 'scanning': dwn.stream_scanning,
             }
             line = json.dumps(state, separators=(',', ':'))
             if line != last:
@@ -127,7 +127,8 @@ def run_cmd(args: list[str]) -> int:
             final = {'state': 0, 'stateName': 'DONE', 'success': cdwn.success_count, 'failed': cdwn.fail_count,
                      'totalAll': cdwn.total_count_all, 'processed': cdwn.processed_count, 'failedItems': cdwn.failed_items[:200],
                      'cfChallenge': cdwn.cf_challenge_hit, 'genderStats': cdwn.gender_stats, 'genderFiltered': cdwn.gender_filtered_count,
-                     'blocked': cdwn.safety_blocked_count, 'ok': code in (EXIT_OK, EXIT_PARTIAL), 'exitCode': code, 'error': error,
+                     'blocked': cdwn.safety_blocked_count, 'known': cdwn.known_skipped_count, 'ok': code in (EXIT_OK, EXIT_PARTIAL),
+                     'exitCode': code, 'error': error,
                      'cancelled': code == EXIT_CANCELLED, 'streaming': cdwn.streaming_active, 'scanning': False}
             with Logger.print_lock:
                 print(f'{IPC_PROGRESS_PREFIX}{json.dumps(final, separators=(",", ":"))}', flush=True)
