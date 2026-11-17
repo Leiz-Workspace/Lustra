@@ -1,6 +1,6 @@
 # coding=UTF-8
 """
-Lustra extension 'rule34us' (rs). Originally part of Ruxx core.
+Lustra extension 'rule34us' (rs). Originally part of the core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################
@@ -296,7 +296,7 @@ class DownloaderRs(Downloader):
                 f'{self._get_sitename()}index.php?r=posts/index&q={tags}')
 
     def _extract_comments(self, raw_html: BeautifulSoup, item_id: str) -> None:
-        """Ruxx crashed on posts with 2+ comment pages (fetch_html returns HTMLContent, not soup; page links are not all numbers)
+        """The original code crashed on posts with 2+ comment pages (fetch_html returns HTMLContent, not soup; page links are not all numbers)
         and on items of earlier tasks (their info is in item_info_dict_all only)"""
         full_item_id = self._item_idstring(item_id)
         info = self.item_info_dict_all.get(full_item_id) or self.item_info_dict_per_task.get(full_item_id)

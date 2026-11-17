@@ -111,7 +111,7 @@ AUTOCOMPLETE_SCAN_MAX = 50000
 
 
 TAG_TYPES_BY_NAME: dict[str, TagTypes] = {**{str(v): k for k, v in TAG_NAMES_BY_TYPE.items()}, 'meta': TagTypes.TAG_TYPE_META}
-'''UI type names ('metadata', 'species'...) -> tag types. Ruxx enum names differ ('TAG_TYPE_META'): metadata filter did nothing'''
+'''UI type names ('metadata', 'species'...) -> tag types. The original enum names differ ('TAG_TYPE_META'): metadata filter did nothing'''
 
 
 def _tag_row(name: str, info) -> dict:
@@ -247,7 +247,7 @@ def m_tags_validate(p: dict) -> dict:
 
 def m_tags_resolve(p: dict) -> dict:
     """Alias, existence, posts count and type of each tag (one item per input tag, same order, at most RESOLVE_TAGS_MAX).
-    all_tag_aliases.json is a cross-site normalization map (Ruxx file tagging: 'oral_sex' -> 'oral', 'male' -> '1+boys'), not the
+    all_tag_aliases.json is a cross-site normalization map (the original file tagging: 'oral_sex' -> 'oral', 'male' -> '1+boys'), not the
     site's own aliases: a tag present in the module list is never rewritten, the alias is used only when it leads to a listed tag.
     Wildcard patterns: type 'wildcard', known when some listed tag matches. Same locking as tags.autocomplete"""
     module = p.get('module', 'rx')

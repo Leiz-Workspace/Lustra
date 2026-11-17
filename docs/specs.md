@@ -8,7 +8,7 @@ Lustra tải ảnh và video từ các trang booru dựa trên truy vấn tag, v
 Ngoài phạm vi:
 - vượt qua cơ chế chống bot, CAPTCHA, paywall;
 - tải nội dung có DRM;
-- crawl hàng loạt không giới hạn ("Lustra is not a scraping tool", kế thừa từ Ruxx).
+- crawl hàng loạt không giới hạn ("Lustra is not a scraping tool", kế thừa từ bản gốc).
 
 ## 2. Yêu cầu chức năng
 

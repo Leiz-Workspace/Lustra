@@ -4,14 +4,14 @@ build-backend = 'setuptools.build_meta'
 
 [project]
 name = 'Lustra'
-version = '2.0.2'
+version = '2.0.3'
 authors = [
     {name = 'trickerer01'},
 ]
 maintainers = [
     {name = 'DungeonLeiz'},
 ]
-description = 'Lustra - advanced booru downloader with extension-based site support (derived from Ruxx)'
+description = 'Lustra - advanced booru downloader with extension-based site support (based on the original work of trickerer01)'
 keywords = [
     'python',
     'downloader',
@@ -67,7 +67,7 @@ model-gpu = [  # instead of 'model' (both install the onnxruntime package): the 
 ]
 
 [project.urls]
-Upstream = 'https://github.com/trickerer01/Ruxx'
+Homepage = 'https://github.com/Leiz-Workspace/Lustra'
 
 [project.scripts]
 Lustra = 'lustra:main'

@@ -454,7 +454,7 @@ function migrateSettings(from) {
 
 function loadSettings() {
   const { raw, error, recovered } = readSettingsFile();
-  // the file version, not the merged default: a v1 file has no "version" key (Ruxx-era code read 3 from the defaults)
+  // the file version, not the merged default: a v1 file has no "version" key (the original code read 3 from the defaults)
   const fileVersion = raw ? (Number.isInteger(raw.version) && raw.version > 0 ? raw.version : 1) : SETTINGS_VERSION;
   secrets = raw ? sanitizeSecrets(raw.secrets) : (recovered || {});
   if (raw) delete raw.secrets;
@@ -949,7 +949,7 @@ class Sidecar {
 
   async call(method, params = {}, timeoutMs = 120000) {
     const deadline = Date.now() + timeoutMs;
-    // the timeout also covers waiting for the sidecar to start (Ruxx-era code could wait forever)
+    // the timeout also covers waiting for the sidecar to start (the original code could wait forever)
     let waitTimer;
     await Promise.race([
       this.ready,
@@ -1053,7 +1053,7 @@ function resolveUserPath(p) {
 function downloadArgs(q) {
   const d = { ...settings.download, ...(q.options || {}) };
   let dest = resolveUserPath(q.path || d.path);
-  // the renderer always sends the path field: Ruxx-era '!q.path' made this option a no-op
+  // the renderer always sends the path field: the original '!q.path' made this option a no-op
   if (d.subfolderPerQuery) dest = path.join(dest, `${q.module}_${sanitizeFolderName(q.tags)}`);
   const a = ['-path', dest];
   if (!d.images) a.push('-skip_img');
@@ -1254,7 +1254,7 @@ class Jobs {
         proc = spawn(job.testCommand.cmd, job.testCommand.args, { env: { ...process.env, ...job.testCommand.env }, stdio: ['pipe', 'pipe', 'pipe'] });
       } else proc = spawnCore(job.coreKind || 'cli', job.args, env);
     } catch (err) {
-      // a failed job must not block the queue (Ruxx-era code threw here and the queue stalled forever)
+      // a failed job must not block the queue (the original code threw here and the queue stalled forever)
       this._fail(job, err.message);
       setImmediate(() => this.pump());
       return;

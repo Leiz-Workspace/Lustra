@@ -1,6 +1,6 @@
 # coding=UTF-8
 """
-Lustra extension 'xbooru' (xb). Originally part of Ruxx core.
+Lustra extension 'xbooru' (xb). Originally part of the core.
 Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 """
 #########################################

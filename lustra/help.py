@@ -12,8 +12,7 @@ from .vcs import __LUSTRA_DEBUG__, APP_NAME, APP_REV_DATE, APP_VERSION
 
 APP_AUTHOR_NICKNAME = 'trickerer'
 APP_AUTHOR = f'Dmitriy \'{APP_AUTHOR_NICKNAME}\' Komardin'
-APP_ADDRESS = 'github.com/trickerer01/Ruxx'  # upstream project (MIT), Lustra is a derivative work
-APP_UPSTREAM_NAME = 'Ruxx'
+APP_ADDRESS = 'github.com/trickerer01'  # author of the original work (MIT), Lustra is a derivative work
 APP_YEARS = f'2020-{datetime.date.today().year}'
 APP_BUILD_TYPE_STR = 'Debug' if __LUSTRA_DEBUG__ else 'Release'
 
@@ -127,7 +126,7 @@ HELP_TAGS_MSG_DB = (
     'Free metatags (do not count): rating:, id:, date:, score:, status:, parent:.\n'
     'Extra positive tags are checked locally (rarest tags are sent to the website), extra -tags become a local negative group.\n'
     'Meta syntax: id:>X, id:X..Y, score:>=X, date:2024-01-01..2024-02-01, rating:g,s, order:score.\n'
-    'Ruxx syntax for OR groups (a~b) and negative groups -(a,b) is supported as usual.'
+    'The usual syntax for OR groups (a~b) and negative groups -(a,b) is supported.'
 )
 ABOUT_MSG = (f'{APP_NAME} version {APP_VERSION} ({APP_REV_DATE}) {APP_BUILD_TYPE_STR}\n'
              f'\N{copyright sign} {APP_YEARS} {APP_AUTHOR}\n<{APP_ADDRESS}>')

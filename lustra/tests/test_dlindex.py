@@ -100,6 +100,32 @@ class IndexDbTests(_TempDir):
             item = index.search('b')['items'][0]
         self.assertEqual(('rx', '1', 'b c', '1.jpg', True), (item['module'], item['id'], item['tags'], item['name'], item['exists']))
 
+    def test_wal_switch_tries_again_while_locked(self) -> None:
+        class Conn:  # SQLite reports the lock at once (no busy wait) while another process switches the same new file
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def execute(self, sql: str) -> mock.Mock:
+                self.calls.append(sql)
+                if sql == 'PRAGMA journal_mode = WAL' and self.calls.count(sql) < 3:
+                    raise sqlite3.OperationalError('database is locked')
+                return mock.Mock(fetchone=mock.Mock(return_value=('delete',)))
+
+        conn = Conn()
+        with mock.patch('lustra.dlindex.time.sleep') as sleep:
+            dlindex.DownloadIndex._enable_wal(conn)
+        self.assertEqual(3, conn.calls.count('PRAGMA journal_mode = WAL'))
+        self.assertEqual(2, sleep.call_count)
+        # other errors and a lock that outlasts BUSY_TIMEOUT are raised
+        conn = Conn()
+        conn.execute = mock.Mock(side_effect=sqlite3.OperationalError('disk I/O error'))
+        with self.assertRaises(sqlite3.OperationalError):
+            dlindex.DownloadIndex._enable_wal(conn)
+        conn.execute = mock.Mock(side_effect=sqlite3.OperationalError('database is locked'))
+        with mock.patch('lustra.dlindex.time.sleep'), mock.patch('lustra.dlindex.time.monotonic', side_effect=[0.0, 1.0, 99.0]), \
+                self.assertRaises(sqlite3.OperationalError):
+            dlindex.DownloadIndex._enable_wal(conn)
+
     def test_search(self) -> None:
         recs = [
             _rec('rx', 1, self._file('1.jpg'), md5=_md5(1), tags='a b solo', score=10, rating='e', date='2020-01-01', at=100),
@@ -237,6 +263,16 @@ class IndexWriterTests(_TempDir):
         self.assertTrue(writer.error)
         self.assertEqual(1, trace.call_count)  # reported once
 
+    def test_a_failing_report_does_not_stop_the_writer(self) -> None:
+        # outside the app the logger has no window and raises: the thread still counts every record and finishes
+        not_a_dir = self._file('plain-file')
+        writer = dlindex.IndexWriter(not_a_dir / 'index' / 'downloads.sqlite', interval=0)
+        with mock.patch('lustra.dlindex.trace', side_effect=AssertionError('Logger window is uninitialized!')):
+            for i in range(3):
+                writer.add(_rec('rx', i, self.tmp / f'{i}.jpg'))
+            self.assertTrue(writer.close(10))
+        self.assertEqual((0, 3), (writer.written, writer.failed))
+
 
 WRITER_SCRIPT = r'''
 import sys, time
@@ -254,7 +290,33 @@ sys.exit(0 if ok and w.written == count and not w.failed else 1)
 '''
 
 
+OPEN_SCRIPT = r'''
+import sys, time
+from lustra import dlindex
+start = float(sys.argv[2])
+while time.time() < start:
+    time.sleep(0.001)
+with dlindex.DownloadIndex(sys.argv[1], create=True) as index:
+    print(index.stats()['files'])
+'''
+
+
 class MultiProcessTests(_TempDir):
+    def test_concurrent_first_open(self) -> None:
+        # several processes open a new index at the same moment: every one switches it to WAL or finds it switched
+        env = {**os.environ, 'PYTHONPATH': str(ROOT), 'LUSTRA_DATA_DIR': str(self.tmp)}
+        start = time.time() + 1.5
+        procs = [subprocess.Popen((sys.executable, '-c', OPEN_SCRIPT, str(self.db_path), str(start)), cwd=ROOT, env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(8)]
+        for p in procs:
+            out, err = p.communicate(timeout=120)
+            self.assertEqual((0, '0'), (p.returncode, out.strip()), err[-2000:])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual('wal', conn.execute('PRAGMA journal_mode').fetchone()[0])
+        finally:
+            conn.close()
+
     def test_concurrent_writers(self) -> None:
         count, modules = 150, ('p1', 'p2', 'p3', 'p4')
         env = {**os.environ, 'PYTHONPATH': str(ROOT), 'LUSTRA_DATA_DIR': str(self.tmp)}

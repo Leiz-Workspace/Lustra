@@ -143,7 +143,7 @@ def valid_date(date: str) -> str:
 
 
 def valid_json(json_str: str) -> dict[str, str]:
-    """-headers / -cookies: a JSON object of strings. Ruxx removed every backslash before parsing: escaped quotes were rejected,
+    """-headers / -cookies: a JSON object of strings. The original code removed every backslash before parsing: escaped quotes were rejected,
     '\\\\' was lost and '\\u00e9' became 'u00e9'. Shell quoted input ('{...}' / "{...}") is still accepted"""
     try:
         s = json_str.strip()
@@ -282,7 +282,7 @@ class DummyValidator(IntValidator, StrValidator):
 
 
 def module_id_from_setting(val: str | int) -> int:
-    """Module setting: abbreviation ('db'), or the legacy 0-based integer of Ruxx configs (builtin modules only)"""
+    """Module setting: abbreviation ('db'), or the legacy 0-based integer of the original configs (builtin modules only)"""
     s = str(val).strip().lower()
     if s in ProcModule.PROC_MODULES_BY_NAME:
         return ProcModule.PROC_MODULES_BY_NAME[s]

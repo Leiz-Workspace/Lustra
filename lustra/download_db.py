@@ -71,7 +71,7 @@ class DownloaderDb(Downloader):
 
     def __init__(self) -> None:
         super().__init__()
-        # descriptive client name asked by danbooru; Lustra has no public contact address (Ruxx's repository is not one)
+        # descriptive client name asked by danbooru; Lustra has no public contact address (the original project's repository is not one)
         self._base_headers = {'User-Agent': LUSTRA_USER_AGENT}
         self._base_cookies = {}
         self._last_query_tags = ''

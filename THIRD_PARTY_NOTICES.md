@@ -1,6 +1,6 @@
 # Third party notices
 
-Lustra itself is under the MIT License (see `LICENSE`: original work Ruxx by trickerer01, derivative work Lustra).
+Lustra itself is under the MIT License (see `LICENSE`: original work by trickerer01, derivative work Lustra).
 The release bundles contain or download the components below. Licenses were read from the installed package metadata
 (2026-11-17); the full license texts ship inside each package (`*.dist-info/licenses`, `node_modules/*/LICENSE`).
 
