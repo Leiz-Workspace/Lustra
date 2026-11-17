@@ -13,14 +13,14 @@ from .module import ProcModule
 from .rex import re_favorited_by_tag, re_pool_tag, re_space_mult
 from .utils import startsendswith, unique_ordered
 
-__all__ = ('convert_taglist', 'parse_tags', 'reset_last_tags')
+__all__ = ('convert_taglist', 'parse_tags', 'register_module_syntax', 'reset_last_tags')
 
 DEFAULT_TAGS = ('sfw',)
 
 # language=PythonRegExp
-TAG_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:]'
+TAG_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:&#;?@$^]'
 # language=PythonRegExp
-ANDGR_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:|?]'
+ANDGR_CHAR = r'[a-zÀ-ʯА-яぁ-㋾･-ﾟ一-鿿\d_%+\-/!()*\'.`~:|?&#;@$^]'
 # language=PythonRegExp
 SYMBOL_CHAR = r'[!@#$%^&*()\-_=+\[\]{}\\|\'";:,.<>/?`~]'
 # language=PythonRegExp
@@ -39,6 +39,7 @@ META_COUNT_EN = r':(?:[<>]=?|!)?[a-z\d\-_.]+?'
 META_COUNT_XB = r':(?:(?:[<>]=?|=)?[a-z\d\-_]+?|[a-z\d_]+:[a-z\d_]+?)'
 # language=PythonRegExp
 META_COUNT_BB = r':(?:(?:[<>]=?|=)?[a-z\d\-_]+?|[a-z\d_]+:[a-z\d_]+?)'
+META_COUNT_DB = r':(?:[<>]=?|!)?[a-z\d\-_.,]+?'
 # language=PythonRegExp
 META_SORT_RX = r'sort(?::[^:]+?){1,2}'
 # language=PythonRegExp
@@ -53,6 +54,7 @@ META_SORT_EN = r'order:[^:]+(?:_(?:a|de)sc)?'
 META_SORT_XB = r'sort(?::[^:]+?){1,2}'
 # language=PythonRegExp
 META_SORT_BB = r'sort(?::[^:]+?){1,2}'
+META_SORT_DB = r'order:[a-z_]+'
 # language=PythonRegExp
 META_FAV_RX = r'favorited_by:\d+?'
 # language=PythonRegExp
@@ -67,6 +69,7 @@ META_FAV_EN = r'favorited_by:(?:!\d+?|[^!][^:]+?)'
 META_FAV_XB = r'favorited_by:\d+?'
 # language=PythonRegExp
 META_FAV_BB = r'favorited_by:\d+?'
+META_FAV_DB = r'favorited_by:[^:]+?'
 # language=PythonRegExp
 META_POOL_RX = r'pool:\d+?'
 # language=PythonRegExp
@@ -84,6 +87,7 @@ META_POOL_EN = r'(?:pool|set):[^:]+?'
 META_POOL_XB = r'pool:\d+?'
 # language=PythonRegExp
 META_POOL_BB = r'pool:\d+?'
+META_POOL_DB = r'pool:[^:]+?'
 # language=PythonRegExp
 RE_ORGR_PART_RX = fr'{TAG_CHAR}+?(?:{META_COUNT_RX})?'
 # language=PythonRegExp
@@ -98,6 +102,7 @@ RE_ORGR_PART_EN = fr'{TAG_CHAR}+?(?:{META_COUNT_EN})?'
 RE_ORGR_PART_XB = fr'{TAG_CHAR}+?(?:{META_COUNT_XB})?'
 # language=PythonRegExp
 RE_ORGR_PART_BB = fr'{TAG_CHAR}+?(?:{META_COUNT_XB})?'
+RE_ORGR_PART_DB = fr'{TAG_CHAR}+?(?:{META_COUNT_DB})?'
 # language=PythonRegExp
 RE_ANDGR_PART_U = fr'{ANDGR_CHAR}+?'
 
@@ -109,6 +114,7 @@ RE_PLAINS = {
     ProcModule.EN: re.compile(fr'^-?{TAG_CHAR}+?$'),
     ProcModule.XB: re.compile(fr'^-?{TAG_CHAR}+?$'),
     ProcModule.BB: re.compile(fr'^-?{TAG_CHAR}+?$'),
+    ProcModule.DB: re.compile(fr'^-?{TAG_CHAR}+?$'),
 }
 RE_SYMBOLS = {
     ProcModule.RX: re.compile(fr'^-?{SYMBOL_CHAR}+?$'),
@@ -118,6 +124,7 @@ RE_SYMBOLS = {
     ProcModule.EN: re.compile(fr'^-?{SYMBOL_CHAR}+?$'),
     ProcModule.XB: re.compile(fr'^-?{SYMBOL_CHAR}+?$'),
     ProcModule.BB: re.compile(fr'^-?{SYMBOL_CHAR}+?$'),
+    ProcModule.DB: re.compile(fr'^-?{SYMBOL_CHAR}+?$'),
 }
 RE_METAS = {
     ProcModule.RX: re.compile(fr'^{META_CHAR}+?{META_COUNT_RX}$'),
@@ -127,6 +134,7 @@ RE_METAS = {
     ProcModule.EN: re.compile(fr'^{META_CHAR}+?{META_COUNT_EN}$'),
     ProcModule.XB: re.compile(fr'^{META_CHAR}+?{META_COUNT_XB}$'),
     ProcModule.BB: re.compile(fr'^{META_CHAR}+?{META_COUNT_BB}$'),
+    ProcModule.DB: re.compile(fr'^{META_CHAR}+?{META_COUNT_DB}$'),
 }
 RE_SORTS = {
     ProcModule.RX: re.compile(fr'^{META_SORT_RX}$'),
@@ -136,6 +144,7 @@ RE_SORTS = {
     ProcModule.EN: re.compile(fr'^{META_SORT_EN}$'),
     ProcModule.XB: re.compile(fr'^{META_SORT_XB}$'),
     ProcModule.BB: re.compile(fr'^{META_SORT_BB}$'),
+    ProcModule.DB: re.compile(fr'^{META_SORT_DB}$'),
 }
 RE_FAVS = {
     ProcModule.RX: re.compile(fr'^{META_FAV_RX}$'),
@@ -145,6 +154,7 @@ RE_FAVS = {
     ProcModule.EN: re.compile(fr'^{META_FAV_EN}$'),
     ProcModule.XB: re.compile(fr'^{META_FAV_XB}$'),
     ProcModule.BB: re.compile(fr'^{META_FAV_BB}$'),
+    ProcModule.DB: re.compile(fr'^{META_FAV_DB}$'),
 }
 RE_POOLS = {
     ProcModule.RX: re.compile(fr'^{META_POOL_RX}$'),
@@ -154,6 +164,7 @@ RE_POOLS = {
     ProcModule.EN: re.compile(fr'^{META_POOL_EN}$'),
     ProcModule.XB: re.compile(fr'^{META_POOL_XB}$'),
     ProcModule.BB: re.compile(fr'^{META_POOL_BB}$'),
+    ProcModule.DB: re.compile(fr'^{META_POOL_DB}$'),
 }
 RE_ORGRS_FULL = {
     ProcModule.RX: re.compile(fr'^\((?:{RE_ORGR_PART_RX})(?:~{RE_ORGR_PART_RX})+?\)$'),
@@ -163,6 +174,7 @@ RE_ORGRS_FULL = {
     ProcModule.EN: re.compile(fr'^\((?:{RE_ORGR_PART_EN})(?:~{RE_ORGR_PART_EN})+?\)$'),
     ProcModule.XB: re.compile(fr'^\((?:{RE_ORGR_PART_XB})(?:~{RE_ORGR_PART_XB})+?\)$'),
     ProcModule.BB: re.compile(fr'^\((?:{RE_ORGR_PART_BB})(?:~{RE_ORGR_PART_BB})+?\)$'),
+    ProcModule.DB: re.compile(fr'^\((?:{RE_ORGR_PART_DB})(?:~{RE_ORGR_PART_DB})+?\)$'),
 }
 RE_ORGRS_FULL_S = {
     ProcModule.RX: re.compile(fr'^\( (?:{RE_ORGR_PART_RX})(?: ~ {RE_ORGR_PART_RX})+? \)$'),
@@ -172,6 +184,7 @@ RE_ORGRS_FULL_S = {
     ProcModule.EN: re.compile(fr'^\( (?:{RE_ORGR_PART_EN})(?: ~ {RE_ORGR_PART_EN})+? \)$'),
     ProcModule.XB: re.compile(fr'^\( (?:{RE_ORGR_PART_XB})(?: ~ {RE_ORGR_PART_XB})+? \)$'),
     ProcModule.BB: re.compile(fr'^\( (?:{RE_ORGR_PART_BB})(?: ~ {RE_ORGR_PART_BB})+? \)$'),
+    ProcModule.DB: re.compile(fr'^\( (?:{RE_ORGR_PART_DB})(?: ~ {RE_ORGR_PART_DB})+? \)$'),
 }
 RE_ANDGR_FULL = {
     ProcModule.RX: re.compile(fr'^-\((?:{RE_ANDGR_PART_U})(?:,{RE_ANDGR_PART_U})+?\)$'),
@@ -181,6 +194,7 @@ RE_ANDGR_FULL = {
     ProcModule.EN: re.compile(fr'^-\((?:{RE_ANDGR_PART_U})(?:,{RE_ANDGR_PART_U})+?\)$'),
     ProcModule.XB: re.compile(fr'^-\((?:{RE_ANDGR_PART_U})(?:,{RE_ANDGR_PART_U})+?\)$'),
     ProcModule.BB: re.compile(fr'^-\((?:{RE_ANDGR_PART_U})(?:,{RE_ANDGR_PART_U})+?\)$'),
+    ProcModule.DB: re.compile(fr'^-\((?:{RE_ANDGR_PART_U})(?:,{RE_ANDGR_PART_U})+?\)$'),
 }
 RE_NEGATIVE_META = re.compile(r'^-[^:]+:.+?$')
 
@@ -233,8 +247,17 @@ def split_or_group(gr: str) -> str:
     return f'( {" ~ ".join(part for part in orgr_parts)} )'
 
 
+URL_ESCAPES = (('%', '%25'), ('+', '%2b'), ('&', '%26'), ('#', '%23'), (';', '%3b'))
+'''task strings are inserted into urls as is: characters with a meaning in a query string are escaped ('%' first).
+Logical tags (local filters, tag lists) are recovered with urllib.parse.unquote()'''
+
+
 def normalize_tag(tag: str) -> str:
-    return tag.replace('+', '%2b').replace(' ', '+')
+    if tag.startswith('-(') and tag.endswith(')'):
+        return tag  # negative group: a local-only pattern, never sent to the website
+    for raw, escaped in URL_ESCAPES:
+        tag = tag.replace(raw, escaped)
+    return tag.replace(' ', '+')
 
 
 def convert_taglist(taglist: Sequence[str]) -> list[str]:
@@ -314,6 +337,22 @@ def parse_tags(tags: str) -> tuple[bool, Sequence[str]]:
 
 def reset_last_tags() -> None:
     parse_tags.last_tags = ''
+
+
+def register_module_syntax(proc_id: int, meta_count: str, sort: str, fav: str, pool: str) -> None:
+    """Registers tag syntax of a module provided by an extension (modules known to the core keep their predefined syntax)"""
+    if proc_id in RE_PLAINS:
+        return
+    orgr_part = fr'{TAG_CHAR}+?(?:{meta_count})?'
+    RE_PLAINS[proc_id] = re.compile(fr'^-?{TAG_CHAR}+?$')
+    RE_SYMBOLS[proc_id] = re.compile(fr'^-?{SYMBOL_CHAR}+?$')
+    RE_METAS[proc_id] = re.compile(fr'^{META_CHAR}+?{meta_count}$')
+    RE_SORTS[proc_id] = re.compile(fr'^{sort}$')
+    RE_FAVS[proc_id] = re.compile(fr'^{fav}$')
+    RE_POOLS[proc_id] = re.compile(fr'^{pool}$')
+    RE_ORGRS_FULL[proc_id] = re.compile(fr'^\((?:{orgr_part})(?:~{orgr_part})+?\)$')
+    RE_ORGRS_FULL_S[proc_id] = re.compile(fr'^\( (?:{orgr_part})(?: ~ {orgr_part})+? \)$')
+    RE_ANDGR_FULL[proc_id] = re.compile(fr'^-\((?:{RE_ANDGR_PART_U})(?:,{RE_ANDGR_PART_U})+?\)$')
 
 #
 #

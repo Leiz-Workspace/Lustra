@@ -56,6 +56,15 @@ static-analysis = [
 pyinstaller = [
     'pyinstaller>=6.21.0',
 ]
+ai = [
+    'anthropic>=2.9',  # AI mode of the extension generator (lustra.aigen); the template mode needs nothing extra
+]
+model = [
+    'numpy>=1.26', 'onnxruntime>=1.18', 'pillow>=10',  # gender model server (python -m lustra.model_server) / model in process
+]
+model-gpu = [  # instead of 'model' (both install the onnxruntime package): the model on an NVIDIA GPU, CUDA / cuDNN from pip
+    'numpy>=1.26', 'onnxruntime-gpu[cuda,cudnn]>=1.21', 'pillow>=10',
+]
 
 [project.urls]
 Upstream = 'https://github.com/trickerer01/Ruxx'
@@ -65,6 +74,9 @@ Lustra = 'lustra:main'
 
 [tool.setuptools]
 py-modules = ['lustra']
+
+[tool.setuptools.package-data]
+lustra = ['builtin_ext/*/manifest.json', 'gender_rules/*.json']
 
 [tool.setuptools.packages]
 find = {include = ['lustra*'], exclude= ['lustra.release', 'lustra.tests', 'lustra.un']}

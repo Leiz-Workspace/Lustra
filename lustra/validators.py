@@ -9,9 +9,10 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 import datetime
 import json
 import pathlib
+import re
 from abc import ABC, abstractmethod
-from argparse import ArgumentError
-from ipaddress import IPv4Address
+from argparse import ArgumentError, ArgumentTypeError
+from ipaddress import ip_address
 
 from .defines import API_KEY_LEN_RX, DMODE_CHOICES, FMT_DATE, THREADS_MAX_ITEMS
 from .gui_defines import (
@@ -48,6 +49,7 @@ __all__ = (
     'Validator',
     'VideosCBValidator',
     'WindowPosValidator',
+    'module_id_from_setting',
     'valid_api_key',
     'valid_date',
     'valid_download_mode',
@@ -62,6 +64,10 @@ __all__ = (
 )
 
 
+re_login_name = re.compile(r'^[\w.\-]{1,64}$')
+re_hostname = re.compile(r'^(?=.{1,253}$)(?:[a-z\d](?:[a-z\d\-]{0,61}[a-z\d])?\.)*[a-z\d](?:[a-z\d\-]{0,61}[a-z\d])?$', re.IGNORECASE)
+
+
 def valid_proxy_type(ptype: str) -> str:
     try:
         assert ptype in OPTION_VALUES_PROXYTYPE
@@ -71,6 +77,8 @@ def valid_proxy_type(ptype: str) -> str:
 
 
 def valid_proxy(prox: str, with_type=True) -> str:
+    """Accepts 'type://[user:pass@]host:port' where host is IPv4, [IPv6] or a hostname.
+    socks5h:// resolves hostnames on the proxy side (useful when local DNS is filtered)"""
     if len(prox) == 0:
         return prox
     try:
@@ -81,11 +89,49 @@ def valid_proxy(prox: str, with_type=True) -> str:
         else:
             url = url_parse.urlparse(prox)
         _ = valid_proxy_type(url.scheme)
-        _ = IPv4Address(url.hostname)
-        assert 20 < url.port < 65535
+        host = url.hostname or ''
+        try:
+            _ = ip_address(host)
+        except ValueError:
+            assert re_hostname.fullmatch(host)
+        assert 0 < url.port < 65536
         return prox
     except Exception:
+        raise ArgumentTypeError('invalid proxy (expected type://[user:pass@]host:port)')
+
+
+def valid_gender_list(val: str) -> list[str]:
+    try:
+        from .gender import GENDER_LABELS
+        labels = [v.strip().lower() for v in val.split(',') if v.strip()]
+        assert labels and all(lb in GENDER_LABELS for lb in labels)
+        return list(dict.fromkeys(labels))
+    except Exception:
         raise ArgumentError
+
+
+def valid_gender_exclude(val: str) -> list[str]:
+    """-gender_exclude: same labels as -gender, but not every label (nothing would be left)"""
+    from .gender import GENDER_LABELS
+    labels = valid_gender_list(val)
+    if set(labels) >= set(GENDER_LABELS):
+        raise ArgumentError
+    return labels
+
+
+def valid_gender_model_url(val: str) -> str:
+    """-gender_model_url: http(s) address of a model server; plain http only to this computer or a local network"""
+    from .gender_model import check_api_url
+    try:
+        return check_api_url(val)
+    except ValueError:
+        raise ArgumentError
+
+
+def valid_gender_model_token(val: str) -> str:
+    if not re.fullmatch(r'[\x21-\x7e]{8,256}', val or ''):
+        raise ArgumentError
+    return val
 
 
 def valid_date(date: str) -> str:
@@ -97,10 +143,22 @@ def valid_date(date: str) -> str:
 
 
 def valid_json(json_str: str) -> dict[str, str]:
+    """-headers / -cookies: a JSON object of strings. Ruxx removed every backslash before parsing: escaped quotes were rejected,
+    '\\\\' was lost and '\\u00e9' became 'u00e9'. Shell quoted input ('{...}' / "{...}") is still accepted"""
     try:
-        return json.loads(json_str.strip('\'"').replace('\\', ''))
+        s = json_str.strip()
+        try:
+            val = json.loads(s)
+        except ValueError:
+            val = None
+        if val is None and len(s) >= 2 and s[0] == s[-1] and s[0] in '\'"':
+            val = json.loads(s[1:-1])
+        elif isinstance(val, str):  # a json string holding the object
+            val = json.loads(val)
+        assert isinstance(val, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in val.items())
+        return val
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid JSON object')
 
 
 def valid_kwarg(kwarg: str) -> tuple[str, str]:
@@ -108,7 +166,7 @@ def valid_kwarg(kwarg: str) -> tuple[str, str]:
         k, v = tuple(kwarg.split('=', 1))
         return k, v
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid name=value pair')
 
 
 def valid_positive_int(val: str, *, lb=0, ub=4294967295) -> int:
@@ -161,20 +219,22 @@ def valid_window_position(val: str, tk: 'Tk') -> str:
 def valid_api_key_key(key: str) -> str:
     try:
         if key:
-            assert len(key) == API_KEY_LEN_RX
-            assert key.isalnum()
+            # RX keys are 128 alnum chars, other modules (ex. danbooru) use shorter keys
+            assert 16 <= len(key) <= max(API_KEY_LEN_RX, 256)
+            assert key.replace('_', '').replace('-', '').isalnum()
         return key
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid API key')
 
 
 def valid_api_key_userid(user_id: str) -> str:
     try:
         if user_id:
-            assert user_id.isnumeric()
+            # numeric user id (RX) or login name (danbooru)
+            assert user_id.isnumeric() or re_login_name.fullmatch(user_id)
         return user_id
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid API user id / login')
 
 
 def valid_api_key(val: str) -> str:
@@ -184,7 +244,7 @@ def valid_api_key(val: str) -> str:
         _ = valid_api_key_userid(user_id)
         return f'{key},{user_id}'
     except Exception:
-        raise ArgumentError
+        raise ArgumentTypeError('invalid API key (expected KEY,USER_ID or API_KEY,LOGIN)')
 
 
 class Validator(ABC):
@@ -221,9 +281,23 @@ class DummyValidator(IntValidator, StrValidator):
         return str
 
 
-class ModuleValidator(IntValidator):
-    def __call__(self, val: int) -> bool:
-        return ProcModule.PROC_MODULE_MIN - 1 <= val <= ProcModule.PROC_MODULE_MAX - 1
+def module_id_from_setting(val: str | int) -> int:
+    """Module setting: abbreviation ('db'), or the legacy 0-based integer of Ruxx configs (builtin modules only)"""
+    s = str(val).strip().lower()
+    if s in ProcModule.PROC_MODULES_BY_NAME:
+        return ProcModule.PROC_MODULES_BY_NAME[s]
+    if s.isdigit() and ProcModule.PROC_MODULE_MIN <= int(s) + 1 <= ProcModule.PROC_MODULE_MAX:
+        return int(s) + 1
+    raise ValueError(f'unknown module \'{val}\'')
+
+
+class ModuleValidator(StrValidator):
+    def __call__(self, val: str) -> bool:
+        try:
+            module_id_from_setting(val)
+            return True
+        except Exception:
+            return False
 
 
 class FolderPathValidator(StrValidator):

@@ -13,6 +13,7 @@ import re
 
 from .defines import (
     FILE_NAME_PREFIX_BB,
+    FILE_NAME_PREFIX_DB,
     FILE_NAME_PREFIX_EN,
     FILE_NAME_PREFIX_RN,
     FILE_NAME_PREFIX_RP,
@@ -28,7 +29,7 @@ from .module import ProcModule
 from .rex import re_infolist_filename
 from .utils import unique_ordered
 
-__all__ = ('gather_item_infos_in_dir', 'prepare_id_list', 'prepare_item_infos_dict', 'prepare_tag_lists')
+__all__ = ('gather_item_infos_in_dir', 'prepare_id_list', 'prepare_item_infos_dict', 'prepare_tag_lists', 'register_module_prefix')
 
 re_comments = re.compile(r'^(?:--|//|#).*?$')
 re_separators = re.compile(r'(?:, *| +)')
@@ -41,6 +42,7 @@ IDSTRING_PATTERNS = {
     ProcModule.EN: re.compile(fr'^(?:{FILE_NAME_PREFIX_EN}?)?\d+?(?:(?:, *?| +?)(?:{FILE_NAME_PREFIX_EN}?)?\d+?)*$'),
     ProcModule.XB: re.compile(fr'^(?:{FILE_NAME_PREFIX_XB}?)?\d+?(?:(?:, *?| +?)(?:{FILE_NAME_PREFIX_XB}?)?\d+?)*$'),
     ProcModule.BB: re.compile(fr'^(?:{FILE_NAME_PREFIX_BB}?)?\d+?(?:(?:, *?| +?)(?:{FILE_NAME_PREFIX_BB}?)?\d+?)*$'),
+    ProcModule.DB: re.compile(fr'^(?:{FILE_NAME_PREFIX_DB}?)?\d+?(?:(?:, *?| +?)(?:{FILE_NAME_PREFIX_DB}?)?\d+?)*$'),
 }
 PREFIX_OPTIONAL_PATTERNS = {
     ProcModule.RX: re.compile(fr'{FILE_NAME_PREFIX_RX}?'),
@@ -50,7 +52,17 @@ PREFIX_OPTIONAL_PATTERNS = {
     ProcModule.EN: re.compile(fr'{FILE_NAME_PREFIX_EN}?'),
     ProcModule.XB: re.compile(fr'{FILE_NAME_PREFIX_XB}?'),
     ProcModule.BB: re.compile(fr'{FILE_NAME_PREFIX_BB}?'),
+    ProcModule.DB: re.compile(fr'{FILE_NAME_PREFIX_DB}?'),
 }
+
+
+def register_module_prefix(proc_id: int, file_name_prefix: str) -> None:
+    """Registers file name prefix patterns of a module provided by an extension"""
+    if proc_id in IDSTRING_PATTERNS:
+        return
+    fp = re.escape(file_name_prefix)
+    IDSTRING_PATTERNS[proc_id] = re.compile(fr'^(?:{fp}?)?\d+?(?:(?:, *?| +?)(?:{fp}?)?\d+?)*$')
+    PREFIX_OPTIONAL_PATTERNS[proc_id] = re.compile(fr'{fp}?')
 
 
 def _get_idval_eq_sep() -> str:

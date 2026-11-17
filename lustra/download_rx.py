@@ -10,6 +10,8 @@ import base64
 import re
 from typing import Never, final
 
+from requests import exceptions
+
 from .defines import (
     API_KEY_DEFAULT_RX,
     API_USER_ID_DEFAULT_RX,
@@ -20,6 +22,7 @@ from .defines import (
     SITENAME_B_RX,
     TAGS_CONCAT_CHAR_RX,
     Comment,
+    ModuleCaps,
 )
 from .download_gelbooru import DownloaderGelbooru
 from .logger import trace
@@ -48,6 +51,8 @@ class DownloaderRx(DownloaderGelbooru):
     """
     DownloaderRx
     """
+    CAPABILITIES = frozenset((ModuleCaps.API_KEY, ModuleCaps.API_KEY_REQUIRED, ModuleCaps.PARENT_CHILD, ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS, ModuleCaps.PREVIEW, ModuleCaps.GENDER_TAGS))
+
     def __init__(self) -> None:
         super().__init__()
         self._base_cookies = {'gdpr-consent': '1', 'gdpr': '1'}
@@ -60,6 +65,15 @@ class DownloaderRx(DownloaderGelbooru):
 
     def _get_id_bounds(self) -> Never:
         raise NotImplementedError
+
+    def _use_chunked_download(self, is_video_ext: bool) -> bool:
+        return is_video_ext
+
+    def _fix_link_after_download_error(self, link: str, original_link: str, err: Exception) -> str:
+        if isinstance(err, exceptions.HTTPError) and err.response is not None and err.response.status_code == 404 and link != original_link:
+            trace(f'Warning (W3): catched HTTPError 404 for normalized link. Switching to slow link \'{original_link}\'...', True)
+            return original_link
+        return link
 
     def _form_item_string_manually(self, *ignored) -> Never:
         raise NotImplementedError
@@ -101,7 +115,7 @@ class DownloaderRx(DownloaderGelbooru):
             for comment_div in comment_divs:
                 author = comment_div.get('creator')
                 body = comment_div.get('body')
-                self.item_info_dict_per_task[full_item_id].comments.append(Comment(author, body))
+                self._item_info_for(full_item_id).comments.append(Comment(author, body))
         else:
             trace(f'Warning (W3): ProcItem: unable to retreive comments for {item_id}!', True)
 
