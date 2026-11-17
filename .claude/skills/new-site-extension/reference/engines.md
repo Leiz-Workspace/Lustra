@@ -14,7 +14,7 @@
 | `shimmie` | chân trang có "Shimmie" nhưng không có API danbooru | HTML `/post/list/<tags>/<page>` | viết tay (`_parse` HTML hoặc trang từng post) | `extensions/rule34hentai` |
 | `custom` | không khớp mục nào | theo trang listing / docs API | viết tay: `HTML_EXAMPLE` nếu trang danh sách đủ thông tin, không thì `extensions/rule34us` | `extensions/rule34us`, `lustra/download_db.py` |
 
-## JSON API bất kỳ: `lustra/download_json.py`
+## JSON API bất kỳ: `DownloaderJsonApi` (`from lustra.sdk import DownloaderJsonApi, JsonPost`)
 
 Kế thừa `DownloaderJsonApi`, khai báo `SITE`, `ABBR`, `ITEMS_PER_PAGE`, `MAX_PAGES` (`TAGS_CONCAT`, `ACCEPT` nếu khác), rồi viết:
 

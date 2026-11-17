@@ -6,7 +6,8 @@
 - [ ] Không vượt CAPTCHA / Cloudflare / bot-detection; không xoay User-Agent; manifest không khai báo `cf_clearance` hay cookie phiên.
 - [ ] Không dựng URL file cho bài site ẩn / giới hạn; chỉ dùng URL site trả về.
 - [ ] Không DRM, không HLS / DASH mã hóa; chỉ URL file trực tiếp (`links` đạt).
-- [ ] Import chỉ trong allowlist; `check` không báo vi phạm `policy`.
+- [ ] Import tên của Lustra từ `lustra.sdk`; `minSdkVersion` của manifest còn nguyên; `check` không báo vi phạm `policy`.
+- [ ] Site không nằm trong danh sách chặn tên miền (`check` không có mục `domain:…`).
 - [ ] Hằng số / regex đặt cục bộ; không sửa `lustra/defines.py`, `lustra/rex.py`; regex không có lượng từ lồng nhau (ReDoS).
 - [ ] Mỗi post có tag (`tags` đạt); `CAPABILITIES` chỉ khai báo tính năng có thật.
 - [ ] `manifest.json` giữ `id`, `abbr`, `$generator`; `media` đúng với site; `auth.apiKey` chỉ khi site có API key chính thức.
