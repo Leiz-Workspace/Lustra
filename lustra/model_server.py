@@ -544,10 +544,18 @@ def make_server(host: str, port: int, tagger=None, *, loader: Callable[[], objec
                        hardware=hardware, media=media, extract=extract)
 
 
+def _gpu_memory(g: dict) -> str:
+    if isinstance(g.get('vramMiB'), int):
+        return f'{g.get("vramFreeMiB")}/{g["vramMiB"]} MiB VRAM free'
+    if g.get('shared'):
+        return 'shared memory'
+    # an NVIDIA card seen only through sysfs: no nvidia-smi here (a CPU container, or the driver tools are missing)
+    return 'VRAM unknown (no nvidia-smi)' if g.get('vendor') == 'nvidia' else 'VRAM unknown'
+
+
 def describe_hardware(hw: dict) -> str:
     """one line for the server log: GPUs, free VRAM, what onnxruntime can run on"""
-    gpus = ', '.join(f'{g["name"]} ' + (f'{g["vramFreeMiB"]}/{g["vramMiB"]} MiB VRAM free' if isinstance(g.get('vramMiB'), int)
-                                         else 'shared memory') for g in hw.get('gpus') or []) or 'no GPU'
+    gpus = ', '.join(f'{g.get("name") or "GPU"} {_gpu_memory(g)}' for g in hw.get('gpus') or [] if isinstance(g, dict)) or 'no GPU'
     rt = hardware_check(hw)['runtime']
     return f'{gpus}; onnxruntime {hw.get("runtime") or "?"} {f"with {rt}" if rt else "CPU only"}'
 
