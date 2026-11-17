@@ -31,6 +31,7 @@ GPU_PROVIDERS = (  # onnxruntime execution provider: (device name, GPU vendors i
     ('DmlExecutionProvider', 'directml', ('nvidia', 'amd', 'intel', '')),
 )
 PCI_VENDORS = {'0x10de': 'nvidia', '0x1002': 'amd', '0x8086': 'intel'}
+VENDOR_NAMES = {'nvidia': 'NVIDIA', 'amd': 'AMD', 'intel': 'Intel'}
 CACHE_SECONDS = 10
 NAME_MAX = 80
 
@@ -90,9 +91,9 @@ def drm_gpus(root: str | os.PathLike = '/sys/class/drm', skip: tuple[str, ...] =
             pass
         if not gpu['name']:
             try:
-                gpu['name'] = f'{vendor.upper() if vendor == "amd" else vendor.title()} GPU {(dev / "device").read_text().strip()}'
+                gpu['name'] = f'{VENDOR_NAMES.get(vendor, vendor)} GPU {(dev / "device").read_text().strip()}'
             except OSError:
-                gpu['name'] = f'{vendor} GPU'
+                gpu['name'] = f'{VENDOR_NAMES.get(vendor, vendor)} GPU'
         out.append(gpu)
     return out
 
