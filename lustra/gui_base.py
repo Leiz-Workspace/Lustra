@@ -55,7 +55,6 @@ from typing import Literal, NamedTuple, TypeAlias, TypedDict
 from tkinterdnd2 import DND_ALL, TkinterDnD
 
 from .defines import (
-    API_KEY_LEN_RX,
     CONNECT_RETRIES_BASE,
     CONNECT_TIMEOUT_BASE,
     DATE_MAX_DEFAULT,
@@ -64,6 +63,7 @@ from .defines import (
     PLATFORM_WINDOWS,
     PROGRESS_BAR_MAX,
     SITENAME_B_BB,
+    SITENAME_B_DB,
     SITENAME_B_EN,
     SITENAME_B_RN,
     SITENAME_B_RP,
@@ -99,10 +99,10 @@ from .gui_defines import (
     IMG_OPEN_DATA,
     IMG_PROC_BB_DATA,
     IMG_PROC_EN_DATA,
+    IMG_PROC_LUSTRA_DATA,
     IMG_PROC_RN_DATA,
     IMG_PROC_RP_DATA,
     IMG_PROC_RS_DATA,
-    IMG_PROC_LUSTRA_DATA,
     IMG_PROC_RX_DATA,
     IMG_PROC_XB_DATA,
     IMG_SAVE_DATA,
@@ -149,6 +149,7 @@ from .gui_defines import (
 from .help import (
     ABOUT_MSG,
     HELP_TAGS_MSG_BB,
+    HELP_TAGS_MSG_DB,
     HELP_TAGS_MSG_EN,
     HELP_TAGS_MSG_RN,
     HELP_TAGS_MSG_RP,
@@ -241,6 +242,7 @@ SITENAMES_PER_PROC_MODULE = {
     ProcModule.EN: SITENAME_B_EN,
     ProcModule.XB: SITENAME_B_XB,
     ProcModule.BB: SITENAME_B_BB,
+    ProcModule.DB: SITENAME_B_DB,
 }
 HELP_TAGS_PER_PROC_MODULE = {
     ProcModule.RX: HELP_TAGS_MSG_RX,
@@ -250,6 +252,7 @@ HELP_TAGS_PER_PROC_MODULE = {
     ProcModule.EN: HELP_TAGS_MSG_EN,
     ProcModule.XB: HELP_TAGS_MSG_XB,
     ProcModule.BB: HELP_TAGS_MSG_BB,
+    ProcModule.DB: HELP_TAGS_MSG_DB,
 }
 
 
@@ -1505,7 +1508,7 @@ class _APIRequestStrIntWindow(_BaseWindow):
 
 class _ApiKeyWindow(_APIRequestStrIntWindow):
     def __init__(self, parent) -> None:
-        super().__init__(parent, 'API Key', f'Key ({API_KEY_LEN_RX:d} symbols)', 'User ID (number)', ('', ''),
+        super().__init__(parent, 'API Key (selected module)', 'Key', 'User ID (number) or login', ('', ''),
                          Options.APIKEY_KEY, Options.APIKEY_USERID, Options.APIKEY_KEY_TEMP, Options.APIKEY_USERID_TEMP)
 
 

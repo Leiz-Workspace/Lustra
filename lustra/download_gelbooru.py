@@ -13,10 +13,17 @@ from multiprocessing.dummy import current_process
 
 from bs4 import BeautifulSoup
 
-from .defines import FILE_NAME_FULL_MAX_LEN, FMT_DATE, DownloadModes, ItemInfo
+from .defines import (
+    DATE_MAX_DEFAULT,
+    DATE_MIN_DEFAULT,
+    FILE_NAME_FULL_MAX_LEN,
+    FMT_DATE,
+    DownloadModes,
+    ItemInfo,
+    ModuleCaps,
+)
 from .download import Downloader
 from .logger import trace
-from .module import ProcModule
 from .network import thread_exit
 from .rex import re_item_info_part_xml, re_orig_file_link, re_sample_file_link
 
@@ -29,6 +36,8 @@ class DownloaderGelbooru(Downloader):
     """
     DownloaderGelbooru !Abstract!
     """
+    CAPABILITIES = frozenset((ModuleCaps.PARENT_CHILD, ModuleCaps.SOURCES, ModuleCaps.DATE_FILTER, ModuleCaps.COMMENTS, ModuleCaps.PREVIEW))
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -147,15 +156,18 @@ class DownloaderGelbooru(Downloader):
             last_thumbs = len(self._get_all_post_tags(raw_html.html))
             return (last - 1) * self._get_items_per_page() + last_thumbs
         else:
-            raw_html = self.fetch_html(f'{url}&pid=0', tries=tries)
+            raw_html = self.fetch_html(f'{url}&pid=0', tries=tries, do_cache=True)  # same url as page 0: fetched once
             if raw_html is None:
                 thread_exit('ERROR: GetItemsQueSize: unable to retreive html', code=-444)
 
             try:
                 return int(raw_html.html.find('posts').get('count'))
             except Exception:
-                if ProcModule.is_rx() and 'Missing authentication' in str(raw_html):
+                if self._has_capability(ModuleCaps.API_KEY) and 'Missing authentication' in str(raw_html):
                     thread_exit('FATAL: Invalid RX API key!', code=-478)
+                response = raw_html.html.find('response')
+                reason = str(response.get('reason', '')) if response is not None else ''
+                thread_exit(f'ERROR: GetItemsQueSize: unexpected website response: {reason or raw_html.raw[:200]!r}', code=-479)
 
     def _get_image_address(self, h: str) -> tuple[str, str]:
         def hi_res_addr() -> tuple[str, str]:
@@ -231,6 +243,30 @@ class DownloaderGelbooru(Downloader):
         subfolder = self.subfolder_vid if is_video else self.subfolder_img
         hint_maxlen = FILE_NAME_FULL_MAX_LEN - (len(self.dest_base_s.as_posix()) + len(item_id) + 1 + len(fmt))
         self._download(address, item_id, self.dest_base_s / subfolder / f'{self._try_append_extra_info(item_id, hint_maxlen)}.{fmt}')
+
+    def _supports_id_cursor(self) -> bool:
+        # gelbooru 0.2 (checked on xbooru 2026-11-17): 'id:<N' -> posts below N, newest first; 'id:>N sort:id:asc' -> posts above N,
+        # oldest first. Date filters are not native here: they need page numbers (date bisection), so no cursor with them
+        return (not self.favorites_search_user and not self.pool_search_str
+                and self.date_min == DATE_MIN_DEFAULT and self.date_max == DATE_MAX_DEFAULT
+                and not any(t.startswith('sort:') for t in ''.join(self.tags_str_arr[:1]).split(self._get_tags_concat_char())))
+
+    def _form_cursor_page_address(self, cursor: int | None, ascending: bool) -> str:
+        cc = self._get_tags_concat_char()
+        if ascending:
+            extra = f'{cc}sort:id:asc' if cursor is None else f'{cc}id:>{cursor:d}{cc}sort:id:asc'
+        else:
+            extra = '' if cursor is None else f'{cc}id:<{cursor:d}'
+        return f'{self._form_tags_search_address(f"{self.cursor_base_tags}{extra}")}&pid=0'
+
+    def _prefer_id_cursor(self, count: int | None) -> bool:
+        # 1000 posts dapi pages take ~1 s each: page numbers are scanned in parallel (and page 0 is already cached by the count);
+        # the cursor is only needed past the search depth limit (200k on rx), where page numbers end in 'too many results'
+        return count is None or count > self._get_max_search_depth()
+
+    def _cursor_first_page_ok(self, ids: list[int], ascending: bool) -> bool:
+        # 'sort:id:asc' ignored by the website: the page would be the newest posts, not the oldest ones
+        return not ascending or ids == sorted(ids)
 
     def _form_tags_search_address(self, tags: str, maxlim: int | None = None) -> str:
         return (f'{self._get_sitename()}index.php?page=favorites&s=view&id={self.favorites_search_user}' if self.favorites_search_user else

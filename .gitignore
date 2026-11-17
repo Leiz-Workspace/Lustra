@@ -15,6 +15,26 @@ node_modules/
 app/out/
 app/dist/
 .lustra-cache/
+# extension drafts of python -m lustra.extgen / the new-site-extension skill (reviewed and installed by hand)
+.extgen-drafts/
+# release bundles (app: electron-builder, model server: tools/build_model_server.py)
+*.AppImage
+/dist-model-server/
+# gender model files (downloaded at run time into the data folder, never committed)
+*.onnx
+/models/
+# secrets: catalog signing keys (tools/sign_catalog.py), local env files
+*.pem
+*.key
+signing-key*
+.env.*
+!.env.example
+# tools and OS
+.ruff_cache/
+.claude/worktrees/
+.claude/settings.local.json
+.DS_Store
+Thumbs.db
 
 # IDE
 /.idea/*
@@ -30,6 +50,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# electron-builder resources are sources (app/build/after-pack.js), the frozen core is a build output
+!/app/build/
+/app/build/core/
 develop-eggs/
 dist/
 downloads/

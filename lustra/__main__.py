@@ -8,4 +8,4 @@ if not __package__ and not getattr(sys, 'frozen', False):
 import lustra
 
 if __name__ == '__main__':
-    lustra.main(sys.argv[1:])
+    lustra.main(sys.argv[1:])  # exits with lustra_main's code

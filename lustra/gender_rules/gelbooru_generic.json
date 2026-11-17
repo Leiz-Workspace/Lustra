@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "module": "*",
+  "completeness": 0.75,
+  "female": {
+    "high": [
+      "1girl",
+      "1girls",
+      "2girls",
+      "3girls",
+      "multiple_girls",
+      "female"
+    ],
+    "medium": [
+      "yuri",
+      "lesbian"
+    ]
+  },
+  "male": {
+    "high": [
+      "1boy",
+      "2boys",
+      "3boys",
+      "multiple_boys",
+      "male",
+      "male_focus"
+    ],
+    "medium": [
+      "yaoi",
+      "gay"
+    ]
+  },
+  "both": [
+    "hetero",
+    "straight"
+  ],
+  "exclusive": {
+    "only_female": [
+      "female_only"
+    ],
+    "only_male": [
+      "male_only"
+    ]
+  },
+  "exclusiveFuta": [
+    "futa_only"
+  ],
+  "solo": [],
+  "pairSeparator": "",
+  "other": [
+    "androgynous",
+    "ambiguous_gender"
+  ],
+  "none": [
+    "no_humans"
+  ],
+  "flags": {
+    "futa": [
+      "futanari",
+      "dickgirl",
+      "intersex"
+    ],
+    "futaMale": [
+      "cuntboy"
+    ],
+    "trap": [
+      "femboy",
+      "trap",
+      "otoko_no_ko"
+    ],
+    "trapFemale": [],
+    "anthro": [
+      "anthro",
+      "furry"
+    ],
+    "real": [
+      "real",
+      "photo"
+    ],
+    "crowd": [
+      "crowd"
+    ],
+    "pov": [
+      "pov",
+      "male_pov"
+    ]
+  },
+  "maleBodypart": [
+    "penis",
+    "disembodied_penis",
+    "faceless_male",
+    "male_pov"
+  ],
+  "aliases": {}
+}
