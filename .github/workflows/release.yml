@@ -225,19 +225,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
       # The app's own self-test (quick: no network) on the packaged build: frozen core, sidecar contract, settings,
-      # extension generator, index tools. Windows and macOS runners may lack a usable desktop session: reported only.
+      # extension generator, index tools. A python wrapper bounds it (macOS has no timeout command).
       - name: Self-test of the packaged app
-        continue-on-error: ${{ !startsWith(matrix.platform, 'linux') }}
         env:
           LUSTRA_SELFTEST_QUICK: '1'
           UNPACKED: app/dist/${{ matrix.unpacked }}
         run: |
           export LUSTRA_SELFTEST_DIR="$RUNNER_TEMP/selftest"
           mkdir -p "$LUSTRA_SELFTEST_DIR"
+          run_bounded() { python -c 'import subprocess, sys; sys.exit(subprocess.run(sys.argv[1:], timeout=600).returncode)' "$@"; }
           if [ "$RUNNER_OS" = Linux ]; then
-            timeout 600 xvfb-run -a "$UNPACKED" --no-sandbox
+            run_bounded xvfb-run -a "$UNPACKED" --no-sandbox
           else
-            timeout 600 "$UNPACKED"
+            run_bounded "$UNPACKED"
           fi
           python tools/check_selftest.py "$LUSTRA_SELFTEST_DIR/report.json"
 
@@ -251,19 +251,25 @@ jobs:
           done
           ls -l dist-model-server
 
+      # one flat folder: the release job merges every platform's files side by side
+      - name: Collect release files
+        if: needs.plan.outputs.publish == 'true'
+        run: |
+          shopt -s nullglob
+          out="$RUNNER_TEMP/release-files"
+          mkdir -p "$out"
+          files=(app/dist/lustra-*.AppImage app/dist/lustra-*.deb app/dist/lustra-setup-*.exe app/dist/lustra-*.dmg \
+            app/dist/lustra-mac-*.zip dist-model-server/lustra-model-server-*.tar.gz dist-model-server/lustra-model-server-*.zip)
+          if [ "${#files[@]}" -eq 0 ]; then echo "::error::no release file was built"; exit 1; fi
+          cp -- "${files[@]}" "$out/"
+          ls -l "$out"
+
       - name: Upload release files
         if: needs.plan.outputs.publish == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: lustra-${{ matrix.platform }}
-          path: |
-            app/dist/lustra-*.AppImage
-            app/dist/lustra-*.deb
-            app/dist/lustra-setup-*.exe
-            app/dist/lustra-*.dmg
-            app/dist/lustra-mac-*.zip
-            dist-model-server/lustra-model-server-*.tar.gz
-            dist-model-server/lustra-model-server-*.zip
+          path: ${{ runner.temp }}/release-files/*
           if-no-files-found: error
           retention-days: 1
 
@@ -366,7 +372,14 @@ jobs:
           IMAGE: ${{ needs.plan.outputs.image }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          sha256sum -- lustra-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+          shopt -s nullglob
+          # older artifacts kept their folders: every file goes to the top of dist
+          find . -mindepth 2 -type f -name 'lustra-*' -exec mv -t . -- {} +
+          find . -mindepth 1 -type d -empty -delete
+          files=(lustra-*)
+          if [ "${#files[@]}" -eq 0 ]; then echo "::error::no release file was downloaded"; exit 1; fi
+          sha256sum -- "${files[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
           jq -n --arg version "$VERSION" --arg tree "$TREE" --arg commit "$GITHUB_SHA" --arg run "$RUN_ID" \
             --arg image "$IMAGE:${TAG#v}" \
             '{version: $version, tree: $tree, commit: $commit, run: ($run | tonumber), image: $image}' > build-info.json
