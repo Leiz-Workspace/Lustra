@@ -12,7 +12,7 @@ import os
 import pathlib
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from multiprocessing.dummy import current_process
 from threading import Thread
 from tkinter import END, messagebox
@@ -41,7 +41,7 @@ from .downloaders import get_new_downloader
 from .file_parser import gather_item_infos_in_dir
 from .file_searcher import find_duplicated_files
 from .file_sorter import FileTypeFilter, sort_files_by_score, sort_files_by_size, sort_files_by_type
-from .file_tagger import retag_files_any, retag_files_tagtype, untag_files
+from .file_tagger import item_infos_from_index, retag_files_any, retag_files_tagtype, untag_files
 from .gui_base import (
     AskChecksWindow,
     AskFileScoreFilterWindow,
@@ -210,9 +210,10 @@ def _file_worker_report(succ_count: int, total_count: int, word1: str, word2='')
         trace(f'An error occured while {word1}ing {total_count:d} files{word2}. Code: {succ_count:d}')
 
 
-def _gather_retag_info(base_path: pathlib.Path, load_db=False) -> dict[str, ItemInfo]:
+def _gather_retag_info(base_path: pathlib.Path, load_db=False, files: Sequence[pathlib.Path] = ()) -> dict[str, ItemInfo]:
+    """Post infos for the re-tag tools: the download index first (by file), the info files of the folder as fallback"""
     try:
-        if all_infos := gather_item_infos_in_dir(base_path):
+        if all_infos := {**gather_item_infos_in_dir(base_path), **item_infos_from_index(files)}:
             if (not load_db) or load_tags_db():
                 return all_infos
         return {}
@@ -237,10 +238,10 @@ def _retag_files_do() -> None:
             update_lastpath(filelist[0])
             if filter_type == [TagCategories.AUTO]:
                 module = get_new_downloader()
-                all_infos = _gather_retag_info(filelist[0].parent)
+                all_infos = _gather_retag_info(filelist[0].parent, files=filelist)
                 retagged_count = retag_files_any(filelist, all_infos, module.get_re_tags_to_process(), module.get_re_tags_to_exclude())
             else:
-                all_infos = _gather_retag_info(filelist[0].parent, True)
+                all_infos = _gather_retag_info(filelist[0].parent, True, filelist)
                 retagged_count = retag_files_tagtype(filelist, all_infos, *filter_type)
                 TagsDB.clear()
             _file_worker_report(retagged_count, len(filelist), 're-tagg')

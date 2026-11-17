@@ -8,6 +8,8 @@ Lustra: local index of downloaded files, <data dir>/index/downloads.sqlite
 - read by '-skip_known' (posts whose md5 or module + id is known and whose file is still on disk are not downloaded again)
   and by the sidecar methods 'index.search' / 'index.stats'
 - LUSTRA_DLINDEX=0 disables recording (reading still works)
+- maintenance (lustra/dlindex_tools.py): clean_missing() drops rows whose file is gone (rows only, never files), the library
+  import adds files already on disk, rename_paths() follows files renamed by the re-tag / sort tools
 """
 #########################################
 #
@@ -25,15 +27,15 @@ import sqlite3
 import stat
 import threading
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 from .defines import FMT_DATE, ItemInfo
 from .logger import trace
 
 __all__ = (
-    'ENV_DLINDEX', 'DownloadIndex', 'IndexRecord', 'IndexWriter', 'index_path', 'indexing_enabled', 'norm_date', 'norm_md5',
-    'parse_search_terms', 'record_for',
+    'ENV_DLINDEX', 'CleanResult', 'DownloadIndex', 'IndexRecord', 'IndexWriter', 'file_present', 'index_path', 'indexing_enabled',
+    'norm_date', 'norm_md5', 'parse_search_terms', 'record_for', 'rename_indexed_files',
 )
 
 ENV_DLINDEX = 'LUSTRA_DLINDEX'
@@ -56,6 +58,8 @@ SEARCH_PAGE_SIZE_MAX = 200
 SEARCH_TERMS_MAX = 24
 TAG_MAX_CHAR = '\U0010ffff'
 '''upper bound of a prefix range: name >= prefix AND name < prefix + this'''
+CLEAN_BATCH = 500
+'''rows checked on disk per step of clean_missing(): each step deletes in its own short transaction'''
 
 re_md5 = re.compile(r'[0-9a-f]{32}')
 re_int = re.compile(r'[-+]?\d+')
@@ -206,6 +210,30 @@ class IndexRecord:
     ext: str = ''
     size: int = 0
     downloaded_at: float = field(default_factory=time.time)
+
+
+@dataclass(slots=True)
+class CleanResult:
+    """clean_missing() counts. missing: rows whose file is gone; missing_dirs: those of them whose folder is gone too (an unplugged
+    drive looks the same: kept unless asked); removed: rows deleted (0 for a dry run)"""
+    total: int = 0
+    checked: int = 0
+    missing: int = 0
+    missing_dirs: int = 0
+    removed: int = 0
+    dry_run: bool = False
+    include_missing_dirs: bool = False
+    cancelled: bool = False
+    folders: list[str] = field(default_factory=list)
+    '''missing folders (at most CLEAN_FOLDERS_MAX), for the report'''
+
+    def as_dict(self) -> dict:
+        return {'total': self.total, 'checked': self.checked, 'missing': self.missing, 'missingDirs': self.missing_dirs,
+                'removed': self.removed, 'dryRun': self.dry_run, 'missingFolders': self.include_missing_dirs, 'cancelled': self.cancelled,
+                'folders': list(self.folders)}
+
+
+CLEAN_FOLDERS_MAX = 50
 
 
 def record_for(module: str, info: ItemInfo, post_id: str, dest: str | os.PathLike, size: int, raw: str = '') -> IndexRecord:
@@ -433,6 +461,146 @@ class DownloadIndex:
                 'SELECT module, COUNT(*), COALESCE(SUM(size), 0), MAX(downloaded_at) FROM files GROUP BY module ORDER BY COUNT(*) DESC')],
         })
         return out
+
+    # ----- maintenance (lustra/dlindex_tools.py) -----
+
+    def known_paths(self, paths: Iterable[str]) -> set[str]:
+        """The given absolute paths that already have a row (whether the file is still on disk or not)"""
+        conn = self._connection()
+        out: set[str] = set()
+        if conn is None:
+            return out
+        for chunk in _chunks(list(dict.fromkeys(paths)), SQL_CHUNK):
+            out.update(p for (p,) in conn.execute(f'SELECT path FROM files WHERE path IN ({_qs(len(chunk))})', chunk))
+        return out
+
+    def rows_for_paths(self, paths: Iterable[str]) -> dict[str, dict]:
+        """{path: row (see search items)} of the given absolute paths"""
+        conn = self._connection()
+        out: dict[str, dict] = {}
+        if conn is None:
+            return out
+        for chunk in _chunks(list(dict.fromkeys(paths)), SQL_CHUNK):
+            for r in conn.execute(f'SELECT {ROW_COLUMNS} FROM files f WHERE f.path IN ({_qs(len(chunk))})', chunk):
+                out[r[3]] = self._row(r)
+        return out
+
+    def rows_for_posts(self, module: str, post_ids: Iterable[str]) -> dict[str, dict]:
+        """{post id: row} of this module's posts (the most recent download of each), any path"""
+        conn = self._connection()
+        out: dict[str, dict] = {}
+        if conn is None:
+            return out
+        ids = list(dict.fromkeys(str(x).strip() for x in post_ids if str(x).strip()))
+        for chunk in _chunks(ids, SQL_CHUNK):
+            sql = (f'SELECT {ROW_COLUMNS} FROM files f WHERE f.module = ? AND f.post_id IN ({_qs(len(chunk))}) '
+                   'ORDER BY f.downloaded_at ASC')
+            for r in conn.execute(sql, (module, *(_db_post_id(x) for x in chunk))):
+                out[str(r[1])] = self._row(r)
+        return out
+
+    def rename_paths(self, pairs: Sequence[tuple[str, str]]) -> int:
+        """Files moved / renamed on disk (re-tag, sort into subfolders): their rows follow (old path -> new path, absolute).
+        A row already at the new path (a stale one) is replaced. Returns the number of rows moved"""
+        pairs = [(str(a), str(b)) for a, b in pairs if str(a) != str(b)]
+        conn = self._connection()
+        if conn is None or not pairs:
+            return 0
+        moved = 0
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            for old, new in pairs:
+                if conn.execute('SELECT 1 FROM files WHERE path = ?', (old,)).fetchone() is None:
+                    continue
+                if (stale := conn.execute('SELECT id FROM files WHERE path = ?', (new,)).fetchone()) is not None:
+                    conn.execute('DELETE FROM file_tags WHERE file_id = ?', stale)
+                    conn.execute('DELETE FROM files WHERE id = ?', stale)
+                conn.execute('UPDATE files SET path = ? WHERE path = ?', (new, old))
+                moved += 1
+            conn.execute('COMMIT')
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute('ROLLBACK')
+            raise
+        return moved
+
+    def clean_missing(self, *, include_missing_dirs: bool = False, dry_run: bool = False, batch: int = CLEAN_BATCH,
+                      progress: Callable[[CleanResult], None] | None = None, cancel: threading.Event | None = None,
+                      pause: float = 0.0) -> CleanResult:
+        """Drops the rows whose file is no longer on disk (a stat per row, files are never opened, moved or deleted). Rows are read
+        in id order, `batch` at a time; each batch's deletions are one short transaction, so download jobs keep recording meanwhile.
+        A row rewritten meanwhile (the file downloaded again: new downloaded_at) is kept. Rows whose folder is gone as well are kept
+        unless include_missing_dirs (an unplugged drive or unmounted share looks the same). The tag names stay (writers cache their
+        ids). progress(result) after each batch; cancel stops between batches"""
+        res = CleanResult(dry_run=dry_run, include_missing_dirs=include_missing_dirs)
+        conn = self._connection()
+        if conn is None:
+            return res
+        batch = max(1, int(batch))
+        res.total = conn.execute('SELECT COUNT(*) FROM files').fetchone()[0]
+        dirs: dict[str, bool] = {}
+        last_id = 0
+        while True:
+            if cancel is not None and cancel.is_set():
+                res.cancelled = True
+                break
+            rows = conn.execute('SELECT id, path, downloaded_at FROM files WHERE id > ? ORDER BY id LIMIT ?', (last_id, batch)).fetchall()
+            if not rows:
+                break
+            last_id = rows[-1][0]
+            gone: list[tuple[int, str, float]] = []
+            for file_id, path, at in rows:
+                if file_present(path):
+                    continue
+                res.missing += 1
+                folder = os.path.dirname(path)
+                if (folder_ok := dirs.get(folder)) is None:
+                    folder_ok = dirs[folder] = os.path.isdir(folder)
+                    if not folder_ok and len(res.folders) < CLEAN_FOLDERS_MAX:
+                        res.folders.append(folder)
+                if not folder_ok:
+                    res.missing_dirs += 1
+                    if not include_missing_dirs:
+                        continue
+                gone.append((file_id, path, at))
+            res.checked += len(rows)
+            if gone and not dry_run:
+                res.removed += self._delete_rows(conn, gone)
+            if progress is not None:
+                progress(res)
+            if pause > 0:
+                time.sleep(pause)
+        return res
+
+    @staticmethod
+    def _delete_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str, float]]) -> int:
+        removed = 0
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            for file_id, path, at in rows:
+                # same path and download time: a row the writer of a running job rewrote meanwhile is not touched
+                if conn.execute('DELETE FROM files WHERE id = ? AND path = ? AND downloaded_at = ?', (file_id, path, at)).rowcount:
+                    conn.execute('DELETE FROM file_tags WHERE file_id = ?', (file_id,))
+                    removed += 1
+            conn.execute('COMMIT')
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute('ROLLBACK')
+            raise
+        return removed
+
+
+def rename_indexed_files(pairs: Sequence[tuple[str | os.PathLike, str | os.PathLike]]) -> int:
+    """Best effort for file tools (re-tag, un-tag, sort): moved files keep their index rows. Never raises, an index that does not
+    exist is not created. Returns the number of rows moved"""
+    if not pairs:
+        return 0
+    try:
+        with DownloadIndex() as index:
+            return index.rename_paths([(os.path.abspath(os.fspath(a)), os.path.abspath(os.fspath(b))) for a, b in pairs])
+    except Exception as err:
+        trace(f'Warning (W2): download index: unable to follow {len(pairs):d} renamed file(s): {type(err).__name__}: {err}', True)
+        return 0
 
 
 class IndexWriter:
