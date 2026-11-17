@@ -55,7 +55,6 @@ from typing import Literal, NamedTuple, TypeAlias, TypedDict
 from tkinterdnd2 import DND_ALL, TkinterDnD
 
 from .defines import (
-    API_KEY_LEN_RX,
     CONNECT_RETRIES_BASE,
     CONNECT_TIMEOUT_BASE,
     DATE_MAX_DEFAULT,
@@ -1509,7 +1508,7 @@ class _APIRequestStrIntWindow(_BaseWindow):
 
 class _ApiKeyWindow(_APIRequestStrIntWindow):
     def __init__(self, parent) -> None:
-        super().__init__(parent, 'API Key', f'Key ({API_KEY_LEN_RX:d} symbols)', 'User ID (number)', ('', ''),
+        super().__init__(parent, 'API Key (selected module)', 'Key', 'User ID (number) or login', ('', ''),
                          Options.APIKEY_KEY, Options.APIKEY_USERID, Options.APIKEY_KEY_TEMP, Options.APIKEY_USERID_TEMP)
 
 
