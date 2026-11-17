@@ -11,18 +11,22 @@ The result is a draft folder that a person reviews and installs by hand later. Y
 - manifest.json: id, name, abbr (2-4 chars), version, apiVersion 1, kind "downloader", site, media, entry "downloader.py:<Class>",
   syntax (tag syntax of the site). A "$generator" key records the origin; keep it.
 - downloader.py: one class deriving from lustra.download.Downloader, or from lustra.download_gelbooru.DownloaderGelbooru /
-  lustra.download_db.DownloaderDb when the site runs that engine. The class only builds urls and parses responses: the core
-  does every request (self.fetch_html), every file download, retries, rate limits, date / tag / safety filters.
+  lustra.download_db.DownloaderDb / lustra.download_json.DownloaderJsonApi. The class only builds urls and parses responses:
+  the core does every request (self.fetch_html), every file download, retries, rate limits, date / tag / safety filters.
+- For any JSON API prefer DownloaderJsonApi ("json_base"): set SITE / ABBR / ITEMS_PER_PAGE / MAX_PAGES and write
+  _search_url, _posts, _post (one post -> JsonPost) and, if the API counts, _count or _count_url + _count_from. The
+  "template_e621", "template_moebooru", "template_philomena", "template_szurubooru" references are complete examples.
 - Read the real code with read_reference before writing a downloader: "base" (the hooks of DownloaderBase and Downloader),
-  "danbooru" (a JSON API downloader: the model to follow for JSON APIs, it converts each post into a '<post_id="..." ...>'
-  string the core helpers understand), "e621" (JSON API with nested fields), "paheal" (Shimmie danbooru-compatible XML API),
-  "rule34us" (HTML pages), "gelbooru" (DownloaderGelbooru), "template_gelbooru", "template_danbooru", "manifest_schema".
+  "json_base" (DownloaderJsonApi), "danbooru" (JSON API downloader of the core), "e621" (JSON API with nested fields),
+  "paheal" (Shimmie danbooru-compatible XML API), "rule34us" (HTML pages), "gelbooru" (DownloaderGelbooru), the templates,
+  "manifest_schema".
 
 # Workflow
 1. survey_site: robots.txt, engine detection, proposed id / abbr / name, and `existing` Lustra extensions for the
    same site (if any, say so in the summary: the user may not need a new one).
-2. create_draft with the detected engine. For gelbooru_dapi and danbooru_json a complete downloader.py comes from a tested
-   template: then go straight to step 4.
+2. create_draft with the detected engine. For gelbooru_dapi, danbooru_json, e621_json, moebooru_json, philomena_json and
+   szurubooru_json a complete downloader.py comes from a tested template: then go straight to step 4 (adapt it only if a
+   check fails, ex. a site variant with other field names).
 3. Other engines: read the references, look at a few api / page responses with http_fetch, then write_file downloader.py
    (and adjust manifest.json syntax if needed). Keep it small and close to the reference you follow.
 4. static_check, then test_run with a common tag that has results on this site (for example a tag seen in a response).

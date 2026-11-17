@@ -65,7 +65,11 @@ def _send(prefix: str, payload: dict) -> None:
 
 def _proxy_request(self, url: str, tries: int, method: str, **kwargs):
     _seq[0] += 1
-    _send('@@FETCH', {'id': _seq[0], 'url': url, 'method': method})
+    try:  # the only header passed on: some APIs answer json only with it (szurubooru)
+        accept = str(self._get_module_specific_default_headers().get('Accept', ''))[:100]
+    except Exception:
+        accept = ''
+    _send('@@FETCH', {'id': _seq[0], 'url': url, 'method': method, 'accept': accept})
     reply = json.loads(_in.readline() or '{}')
     REQUESTS.append({'url': url, 'status': reply.get('status'), 'error': reply.get('error', '')})
     if reply.get('error'):
@@ -103,6 +107,30 @@ BLOCKED_EVENTS = {
 }
 
 
+READ_ROOTS: tuple[str, ...] = ()
+READ_FILES: set[str] = set()
+
+
+def _set_read_roots(draft: str) -> None:
+    """reading is limited to python / lustra code, the draft and the temporary folder: never the user's files (settings,
+    keys, downloads...). Computed right before the hook is installed"""
+    global READ_ROOTS
+    import mimetypes
+    roots = {TMP, CONFIG['repo'], draft, sys.prefix, sys.base_prefix, sys.exec_prefix, '/usr/share/zoneinfo', '/usr/lib/locale',
+             getattr(sys, '_MEIPASS', '')}
+    roots.update(p for p in sys.path if p and os.path.isdir(p))
+    READ_ROOTS = tuple(os.path.realpath(r).rstrip(os.sep) + os.sep for r in roots if r)
+    READ_FILES.update(os.path.realpath(f) for f in ('/dev/null', '/dev/urandom', *mimetypes.knownfiles))
+
+
+def _readable(path) -> bool:
+    try:
+        p = os.path.realpath(os.fsdecode(path))
+    except Exception:
+        return False
+    return p in READ_FILES or (p + os.sep).startswith(READ_ROOTS)
+
+
 def _under_tmp(path) -> bool:
     try:
         return os.path.realpath(os.fsdecode(path)).startswith(TMP + os.sep)
@@ -118,6 +146,11 @@ def _hook(event: str, args: tuple) -> None:
         flags = args[2] if len(args) > 2 and isinstance(args[2], int) else 0
         if (any(c in mode for c in 'wax+') or flags & _WRITE_FLAGS) and not _under_tmp(args[0]):
             raise PermissionError(f'sandbox: writing {args[0]!r} is not allowed')
+        if not _readable(args[0]):
+            raise PermissionError(f'sandbox: reading {args[0]!r} is not allowed')
+    elif event in ('os.listdir', 'os.scandir') and args and isinstance(args[0], (str, bytes, os.PathLike)):
+        if not _readable(args[0]):
+            raise PermissionError(f'sandbox: listing {args[0]!r} is not allowed')
     elif event in ('os.remove', 'os.rename', 'os.rmdir', 'shutil.rmtree', 'os.mkdir', 'os.chmod') and args:
         if not _under_tmp(args[0]):
             raise PermissionError(f'sandbox: {event} on {args[0]!r} is not allowed')
@@ -138,6 +171,7 @@ def main() -> dict:
     query = [str(t) for t in CONFIG.get('query') or []]
     limit = int(CONFIG.get('limit') or 3)
     draft = CONFIG['draft']
+    _set_read_roots(draft)
     sys.addaudithook(_hook)  # from here on the draft's code runs
 
     try:

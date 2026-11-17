@@ -14,13 +14,13 @@ import ast
 import re
 from dataclasses import asdict, dataclass
 
-__all__ = ('Violation', 'check_source')
+__all__ = ('Violation', 'check_manifest', 'check_source')
 
 MAX_SOURCE_BYTES = 200 * 1024
 MIN_INTERVAL_FLOOR = 0.5  # seconds between api requests of a non builtin extension (R4)
 
 ALLOWED_LUSTRA = {
-    'lustra.defines', 'lustra.download', 'lustra.download_base', 'lustra.download_gelbooru', 'lustra.download_db',
+    'lustra.defines', 'lustra.download', 'lustra.download_base', 'lustra.download_gelbooru', 'lustra.download_db', 'lustra.download_json',
     'lustra.logger', 'lustra.rex', 'lustra.utils', 'lustra.tags', 'lustra.vcs', 'lustra.vcs.version', 'lustra.vcs.debug',
 }
 ALLOWED_NETWORK_NAMES = {'HTMLContent', 'thread_exit', 'DownloadInterruptException', 'LUSTRA_USER_AGENT'}
@@ -137,7 +137,7 @@ def check_source(source: str, *, allowed_hosts: set[str] | None = None) -> list[
         # ---- classes: protected hooks, rate floor
         elif isinstance(node, ast.ClassDef):
             bases = {getattr(b, 'id', getattr(b, 'attr', '')) for b in node.bases}
-            if bases & {'Downloader', 'DownloaderGelbooru', 'DownloaderDb'}:
+            if bases & {'Downloader', 'DownloaderGelbooru', 'DownloaderDb', 'DownloaderJsonApi'}:
                 has_downloader_class = True
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -160,7 +160,20 @@ def check_source(source: str, *, allowed_hosts: set[str] | None = None) -> list[
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             err('R10', node, 'global / nonlocal statements are not allowed', 'warning')
     if not has_downloader_class:
-        err('R10', None, 'no class derived from Downloader / DownloaderGelbooru / DownloaderDb')
+        err('R10', None, 'no class derived from Downloader / DownloaderGelbooru / DownloaderDb / DownloaderJsonApi')
+    return out
+
+
+def check_manifest(data: dict) -> list[Violation]:
+    """Generated manifests: no login / challenge cookies (R1), any other cookie is reported for review"""
+    out: list[Violation] = []
+    auth = data.get('auth') if isinstance(data, dict) else None
+    cookies = auth.get('cookies') if isinstance(auth, dict) else None
+    for name in cookies if isinstance(cookies, list) else []:
+        if CREDENTIAL_COOKIES.search(str(name)):
+            out.append(Violation('R1', 'error', 0, f'auth.cookies: \'{name}\' is a login / challenge cookie: generated extensions must not ask for it'))
+        else:
+            out.append(Violation('R1', 'warning', 0, f'auth.cookies: \'{name}\' asks the user for a cookie: check that it is not a login'))
     return out
 
 

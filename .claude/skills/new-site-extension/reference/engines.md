@@ -6,12 +6,21 @@
 |---|---|---|---|---|
 | `gelbooru_dapi` | `index.php?page=dapi&s=post&q=index&limit=1` trả XML `<posts count="N">` | `pid=n`; count ở thuộc tính `count` | **template**: lớp con của `DownloaderGelbooru`, chỉ đổi site / abbr / interval | `extensions/xbooru`, `lustra/download_gelbooru.py` |
 | `danbooru_json` | `posts.json?limit=1` trả mảng có `tag_string` | `page=n+1`; giới hạn số tag cho khách | **template**: lớp con của `DownloaderDb` | `lustra/download_db.py` |
-| `e621_json` | `posts.json?limit=1` trả `{"posts":[{"file":…,"tags":{…}}]}` | `page`; không có endpoint đếm rẻ | viết tay theo mẫu | `extensions/e621` |
-| `moebooru_json` | `post.json?limit=1` trả mảng có `jpeg_url` / `sample_url` | `page=n+1`; đếm qua `post.xml?limit=0` | viết tay theo `download_db.py` | `lustra/download_db.py` |
-| `philomena_json` | `api/v1/json/search/images?q=*&per_page=1` trả `{"images":[…],"total":N}` | `page`, `per_page`; tag nối bằng dấu phẩy | viết tay theo `download_db.py` | `lustra/download_db.py` |
-| `szurubooru_json` | `api/posts/?limit=1` với `Accept: application/json` trả `{"results":[…],"total":N}` | `offset=n*limit` | viết tay theo `download_db.py` | `lustra/download_db.py` |
+| `e621_json` | `posts.json?limit=1` trả `{"posts":[{"file":…,"tags":{…}}]}` | `page`; không có endpoint đếm, lớp nền tìm trang cuối bằng tìm nhị phân | **template** (`DownloaderJsonApi`) | `extensions/e621` |
+| `moebooru_json` | `post.json?limit=1` trả mảng có `jpeg_url` / `sample_url` | `page=n+1`; đếm qua `post.xml?limit=1` | **template** (`DownloaderJsonApi`) | — |
+| `philomena_json` | `api/v1/json/search/images?q=*&per_page=1` trả `{"images":[…],"total":N}` | `page`, `per_page`; tag nối bằng dấu phẩy, `_` gửi đi thành dấu cách | **template** (`DownloaderJsonApi`) | — |
+| `szurubooru_json` | `api/posts/?limit=1` với `Accept: application/json` trả `{"results":[…],"total":N}` | `offset=n*limit`; URL file tương đối | **template** (`DownloaderJsonApi`) | — |
 | `shimmie` | chân trang có "Shimmie", `/post/list/<tags>/<page>` | HTML theo trang, hoặc `/api/danbooru/find_posts` | viết tay | `extensions/paheal` (API), `extensions/rule34hentai` (HTML) |
 | `custom` | không khớp mục nào | theo trang listing / docs API | viết tay | `extensions/rule34us` (HTML), `lustra/download_db.py` (JSON) |
+
+## JSON API bất kỳ: `lustra/download_json.py`
+
+Kế thừa `DownloaderJsonApi`, khai báo `SITE`, `ABBR`, `ITEMS_PER_PAGE`, `MAX_PAGES` (`TAGS_CONCAT`, `ACCEPT` nếu khác), rồi viết:
+
+- `_search_url(tags, page, limit)`: `page` tính từ 0;
+- `_posts(data)`: danh sách post của một trang, `None` nếu là trang lỗi;
+- `_post(p)`: trả `JsonPost(id, file_url, tags, created_at, sample_url, preview_url, md5, width, height, score, rating, source, parent_id, has_children)`. `created_at` là ISO 8601 hoặc unix; URL tương đối được tự ghép với site; `file_url` rỗng thì post bị bỏ qua (không bao giờ tự dựng URL);
+- tuỳ chọn: `_count(data)`, hoặc `_count_url(tags)` + `_count_from(raw)`; `_query_tags(tags)` để đổi cú pháp tag.
 
 ## Hook cần chú ý khi viết tay (`lustra/download_base.py`)
 

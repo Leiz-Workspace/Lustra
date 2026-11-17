@@ -12,7 +12,7 @@ import json
 import pathlib
 
 from .engines import ENGINES, detect_engine
-from .fetch import SafeFetcher, host_of, normalize_site
+from .fetch import FetchPolicyError, SafeFetcher, host_of, normalize_site
 from .templates import TEMPLATE_ENGINES, existing_extensions, make_manifest, render_downloader, suggest_names, validate_names
 
 __all__ = ('create_draft', 'fetcher_for', 'survey')
@@ -50,7 +50,11 @@ def survey(site_url: str, fetcher: SafeFetcher | None = None) -> dict:
     site = normalize_site(site_url) if not (fetcher and fetcher.allow_local) else site_url.rstrip('/') + '/'
     fetcher = fetcher or fetcher_for(site)
     robots = fetcher.robots_info(site)
+    if robots['status'].startswith('unreachable'):
+        raise FetchPolicyError('R2', f'robots.txt of {host_of(site)} is {robots["status"]}: that means no access (RFC 9309)')
     guess = detect_engine(fetcher, site)
+    if not guess.evidence and any(n.startswith('skipped') for n in guess.notes):
+        raise FetchPolicyError('R2', f'robots.txt of {host_of(site)} does not allow any api or page Lustra could use')
     return {'site': site, 'robots': robots, 'engine': guess.to_dict(), 'names': suggest_names(site),
             'existing': existing_extensions(site), 'requests': list(fetcher.log)}
 

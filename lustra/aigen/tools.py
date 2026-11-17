@@ -19,7 +19,7 @@ from lustra.modspec import ExtensionManifest
 
 from ..extgen.engines import ENGINES
 from ..extgen.fetch import FetchPolicyError, SafeFetcher, redact_url, strip_html
-from ..extgen.policy import check_source
+from ..extgen.policy import check_manifest, check_source
 from ..extgen.sandbox import record
 from ..extgen.scaffold import create_draft, survey
 from ..extgen.templates import render_downloader
@@ -29,7 +29,7 @@ __all__ = ('TOOLS', 'ToolBox')
 REPO = pathlib.Path(__file__).resolve().parents[2]
 # frozen core: reference sources are bundled as data under aigen_refs/ (tools/build_core.py), same relative paths
 REFS = REPO if (REPO / 'lustra' / 'download_base.py').is_file() else REPO / 'aigen_refs'
-REF_FILES = ('lustra/download_base.py', 'lustra/download.py', 'lustra/network.py', 'lustra/download_db.py',
+REF_FILES = ('lustra/download_base.py', 'lustra/download.py', 'lustra/network.py', 'lustra/download_db.py', 'lustra/download_json.py',
              'lustra/download_gelbooru.py', 'lustra/builtin_ext/danbooru/manifest.json',
              'docs/schemas/extension-manifest.schema.json')
 WRITABLE = ('downloader.py', 'manifest.json', 'specs.md')
@@ -45,8 +45,13 @@ REFERENCES = {
     'paheal': 'extensions/paheal: Shimmie2 with the danbooru compatible XML API',
     'rule34us': 'extensions/rule34us: HTML listing and post pages',
     'xbooru': 'extensions/xbooru: a DownloaderGelbooru site',
+    'json_base': 'lustra/download_json.py: DownloaderJsonApi, base class for any JSON API (subclass declares urls + fields)',
     'template_gelbooru': 'downloader.py template for gelbooru_dapi sites',
     'template_danbooru': 'downloader.py template for danbooru_json sites',
+    'template_e621': 'downloader.py template for e621_json sites (DownloaderJsonApi)',
+    'template_moebooru': 'downloader.py template for moebooru_json sites (DownloaderJsonApi, count endpoint)',
+    'template_philomena': 'downloader.py template for philomena_json sites (DownloaderJsonApi, tag syntax conversion)',
+    'template_szurubooru': 'downloader.py template for szurubooru_json sites (DownloaderJsonApi, relative urls)',
     'manifest_schema': 'JSON schema of manifest.json',
 }
 
@@ -126,13 +131,13 @@ def _base_hooks() -> str:
 def reference_text(name: str) -> str:
     if name == 'base':
         return _base_hooks()
-    if name == 'template_gelbooru':
-        return render_downloader('gelbooru_dapi', ext_id='example', abbr='ex', site='https://example.com/')
-    if name == 'template_danbooru':
-        return render_downloader('danbooru_json', ext_id='example', abbr='ex', site='https://example.com/')
+    if name.startswith('template_'):
+        engine = {'gelbooru': 'gelbooru_dapi'}.get(name[9:], f'{name[9:]}_json')
+        return render_downloader(engine, ext_id='example', abbr='ex', site='https://example.com/')
     files = {
         'danbooru': ['lustra/download_db.py', 'lustra/builtin_ext/danbooru/manifest.json'],
         'gelbooru': ['lustra/download_gelbooru.py'],
+        'json_base': ['lustra/download_json.py'],
         'manifest_schema': ['docs/schemas/extension-manifest.schema.json'],
     }.get(name) or [f'extensions/{name}/downloader.py', f'extensions/{name}/manifest.json']
     return '\n\n'.join(f'### {f}\n{p.read_text(encoding="utf-8")}' for f in files if (p := _ref_path(f)))
@@ -232,10 +237,12 @@ class ToolBox:
         if path == 'manifest.json':
             data = json.loads(content)
             old = json.loads((draft / 'manifest.json').read_text(encoding='utf-8'))
-            for keep in ('id', 'abbr', '$generator'):
+            for keep in ('id', 'abbr', 'site', '$generator'):
                 if data.get(keep) != old.get(keep):
                     raise ValueError(f'manifest.json: \'{keep}\' cannot be changed')
             ExtensionManifest.from_dict(data, None, 'user')  # validates
+            if bad := [v.message for v in check_manifest(data) if v.severity == 'error']:
+                raise ValueError('; '.join(bad))
             content = json.dumps(data, indent=2, ensure_ascii=False) + '\n'
         elif path == 'downloader.py':
             ast.parse(content)
