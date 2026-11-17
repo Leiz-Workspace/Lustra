@@ -447,7 +447,46 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Vấn đề 3:** `--device cpu` trên máy có GPU bị app báo `gpu_fallback` ("thiếu CUDA / cuDNN"). Sửa: status có `deviceSetting`, mã mới `cpu_forced` với lời khuyên bỏ tuỳ chọn.
 - **Kiểm chứng:** `test_model_server` 23 test (thêm tiến trình con: đa luồng, ảnh hỏng, lỗi nạp, tiến trình chết rồi nạp lại, 500 khi model lỗi, tắt thì tiến trình thoát; `cpu_forced`; `deviceSetting`). Bộ test offline có model thật (`LUSTRA_GENDER_MODEL_DIR`): 232 đạt, không bỏ qua test nào. Server systemd thật: `check: gpu`, nạp trên CUDA 0,7 s; `--device cpu` / `--device gpu --preload` trên cổng phụ đúng như mong đợi. Preview Danbooru qua sidecar (`robot rating:g`, `-gender_conf high`): server tự nạp model trên CUDA, model xem 3 post, gán nhãn cả 3. Self-test Electron: `check: gpu`, unload qua main.
 
+### 7?. Xem lại video / ảnh động sau khi tải trên nhiều khung (P4 của model giới tính) — 2026-11-17
+- **Yêu cầu:** P4 của plan gender-filter-model (D9, §3.5, AC-G16). Trước khi tải, model chỉ thấy một khung (ảnh poster, độ tin cậy tối đa medium). Sau khi tải, video và ảnh động được xem lại trên nhiều khung; file không khớp bộ lọc được chuyển vào `_gender_mismatch/`, không xoá. Lõi đóng băng của app không có numpy / onnxruntime / Pillow, nên khung phải được đọc ở model server.
+- **Model server:** `POST /v1/frames` nhận bytes của video (mp4 / mov, webm / mkv, avi) hoặc ảnh động (GIF, APNG, WebP), ≤ 200 MB, bắt buộc `Content-Length`, cùng luật token với `/v1/tag`. Server lấy tối đa 8 khung cách đều trong đoạn 5 %–95 %, gắn tag từng khung rồi trả `frames: [{at, tags}]`. Body được ghi vào thư mục tạm riêng (0700), thư mục bị xoá trước khi trả lời. (Bản đầu xoá thư mục sau khi đã gửi lỗi; test phát hiện, đã sửa.) `/v1/status` có thêm `media: {video, animated}`, log khởi động có dòng `media (/v1/frames): …`. Mã lỗi: 415 khi không có bộ giải mã cho file, 400 khi file hỏng. Một worker lo cả việc đọc khung lẫn gắn tag.
+- **`lustra/media_frames.py`** (mới):
+  - `file_media_kind` nhận ra video / ảnh động qua các byte đầu, thuần Python: đếm khung GIF bằng cách duyệt block, đọc `acTL` của APNG, cờ animation của WebP `VP8X`. Lõi của app dùng hàm này mà không cần Pillow.
+  - `extract_frames` đọc video bằng ffmpeg / ffprobe trên PATH. Mỗi lần chạy subprocess tối đa 30 s, cả file tối đa 120 s. Định dạng bị ép bằng `-f` theo các byte đầu, kèm `-protocol_whitelist file`, nên playlist HLS đổi tên thành `.mp4` bị từ chối. Không có ffmpeg thì dùng PyAV. Ảnh động đọc bằng Pillow `ImageSequence`. Khung thu nhỏ còn ≤ 896 px.
+- **Client** (`gender_model.py`):
+  - `ModelApi.predict_frames` stream file lên server. Gặp 503 `busy` thì mở lại file và gửi lại. 400 / 413 / 415 → `MediaUnreadable` (giữ file). 404 là server cũ → `ModelUnavailable`.
+  - `GenderTagger.predict_frames` cho model chạy trong tiến trình.
+  - `classify_frames` gộp theo §3.5, thuộc tính là từng tag của bộ luật `db`. Tag có mặt khi ≥ 2 khung có p ≥ 0,35 (clip dưới 3 khung chỉ cần 1), vắng khi mọi khung có p ≤ 0,2, còn lại là chưa rõ. Nhãn chỉ được giữ khi mọi tổ hợp của các tag luật chưa rõ cho cùng nhãn; quá 8 tag chưa rõ thì `unknown`. Cờ của mọi tổ hợp được giữ lại cho strict. Độ tin cậy lấy theo bằng chứng yếu nhất và không bị giới hạn ở medium. Safety gate chạy trên từng khung; ảnh thật trên đủ số khung → `unknown`.
+  - `media_support` cho biết server đọc được gì; `verdict_for_media` trả kết quả cho downloader. `python -m lustra.gender_model classify` xét video / ảnh động trên nhiều khung.
+- **Lõi:**
+  - `-gender_verify_media` (gui_defines, cmdargs, help). Là cờ nên không cần validator; điều kiện được kiểm ở `_check_verify_media`: cần `-gender` / `-gender_exclude` + `-gender_mode model` + chế độ tải `full`, thiếu thì bỏ qua kèm W1. Server cũ không có `media` thì dừng job; server không có ffmpeg / PyAV thì chỉ cảnh báo W2.
+  - `_download` → `_verify_media_file` chỉ chạy cho file vừa tải trong lượt này, của post có kết quả giới tính mà tag chưa đủ kết luận (`needs_model`). Kết quả gộp bằng `combine` rồi `decide`. Không khớp (kể cả safety gate) → `os.replace` vào `<thư mục lưu>/_gender_mismatch/` và ghi log; index ghi đường dẫn mới. Khi bật tuỳ chọn, `_filter_existing_items` quét cả thư mục này để file đã chuyển không bị tải lại.
+  - Server mất giữa chừng → `_stop_run` đặt `launch_error`, dừng mọi luồng; job kết thúc với lỗi `'-gender_verify_media': …` (exit 1), không có file nào bị chuyển hay xoá.
+  - IPC: mọi dòng tiến độ và dòng DONE có thêm `genderVerified`, `genderMismatch`.
+- **App:**
+  - Ô **Kiểm tra video sau khi tải** trong bộ lọc giới tính: chỉ hiện khi đã bật model, chỉ dùng được với "Tag + model (ảnh)". Lưu ở `download.gender.verifyMedia`. `genderArgs` → `-gender_verify_media`; preview không truyền cờ này.
+  - Card job hiện "Không khớp, đã chuyển: n / m file đã xem lại"; tóm tắt bộ lọc có "xem lại video sau khi tải".
+  - `mock.js`: cài đặt và tiến độ giả.
+  - Self-test: `genderArgs` thêm 4 trường hợp `verify*`. Bước mới `genderVerifyUi` kiểm ô bị ẩn khi tắt model, bị khoá ở chế độ tag, dùng được ở chế độ model và được lưu vào cài đặt.
+- **Docker:** `apt-get install --no-install-recommends ffmpeg`. Image tăng từ ~418 MB lên ~1,05 GB vì gói Debian kéo theo nhiều thư viện codec. `THIRD_PARTY_NOTICES.md` có thêm dòng FFmpeg.
+- **Kiểm chứng:**
+  - Test mới `test_media_verify` (23 test):
+    - nhận dạng file bằng GIF / APNG / WebP viết tay, không cần Pillow;
+    - bảng gộp khung;
+    - endpoint với model giả: 401 / 411 / 413 / 400 / 415, thư mục tạm bị xoá, server cũ, server sập, 503 rồi gửi lại;
+    - downloader: chuyển chứ không xoá, khớp thì giữ, safety gate, các trường hợp không xem lại, `_download` + index, file đã có, quét `_gender_mismatch/`, tham số;
+    - server mất giữa job nhiều luồng → exit 1;
+    - Pillow thật (GIF / APNG / WebP, file hỏng);
+    - ffmpeg thật (mp4 / mkv, không có ffprobe, file cắt cụt);
+    - đường PyAV với module giả.
+  - Không có Pillow / ffmpeg (chặn import, PATH rỗng): 18 đạt, 5 bỏ qua. Bộ test offline trong docs/operations.md: 255 đạt (1 bỏ qua khi không có model). ruff sạch, `npm run check` đạt.
+  - Server thật (worktree, cổng 8782, model trên CUDA), media tổng hợp: clip làm từ icon app (mp4 / webm / GIF / WebP / APNG) → only_female high (8/8 khung); clip `testsrc` → unknown; clip 1 s icon + 3 s `testsrc` → only_female (2/8 khung). Mỗi video ~0,5 s, GIF ~0,12 s. Chạy `_verify_media_file` thật với bộ lọc only_male: 5/5 file động bị chuyển vào `_gender_mismatch/`, ảnh tĩnh giữ nguyên; với only_female chỉ clip `testsrc` bị chuyển.
+  - Danbooru thật (`1other animated rating:g`, `-gender only_female,both,none -gender_conf high -dlimit 4`, 1 luồng): 3 GIF được xem lại trên 8 khung, khớp nên giữ nguyên. GIF thứ 4 có `3boys 3girls` (tag đủ tin cậy) nên không xem lại, đúng thiết kế.
+  - Docker (bản build mới, CPU, token, model gắn read-only): `media` báo ffmpeg 7.1.5 / Pillow 13. mp4 / webm / GIF mỗi file 2,7–4,2 s, `/tmp` không còn file tạm, thiếu token → 401. Trong một container bỏ đi: PyAV 19.0.2 thật (ffmpeg bị ẩn khỏi PATH) đọc mp4 / webm / mkv đúng vị trí khung như ffmpeg. Container và image thử đã xoá.
+  - Self-test Electron (quick, model server 8782): mọi bước đạt trừ `contract.notAllowed` (đúng như mong đợi).
+- **Chưa làm:** đánh giá trên 300 clip gán tay (AC-G17, cần người gán nhãn), nên ngưỡng t_hi / t_lo chưa được chọn theo precision. Chưa thử ffmpeg trên Windows / macOS. App chưa có badge riêng cho kết quả nhiều khung.
+
 ### 8. Việc tiếp theo (cập nhật 2026-11-17)
 - Đã xong, không còn là việc tiếp theo: đóng gói app (electron-builder, AppImage, lõi PyInstaller: đợt D), phân trang con trỏ cho Danbooru (đợt C), giai đoạn 2 của plan search-engine (đợt D).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
-- Còn lại: model server chạy độc lập cho người dùng không có mã nguồn; tập đo độ chính xác của model giới tính; video nhiều khung; index (dọn, nhập thư viện, re-tag, đa site); extension (denylist domain, eval, ký catalog, `lustra.sdk`); build Windows / macOS.
+- Còn lại: model server chạy độc lập cho người dùng không có mã nguồn; tập đo độ chính xác của model giới tính; đánh giá xem lại video trên 300 clip gán tay (AC-G17); index (dọn, nhập thư viện, re-tag, đa site); extension (denylist domain, eval, ký catalog, `lustra.sdk`); build Windows / macOS.

@@ -99,14 +99,19 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
   ```bash
   docker run -d --name lustra-model --restart unless-stopped -e LUSTRA_GENDER_MODEL_TOKEN=<token> -p 127.0.0.1:8765:8765 -v lustra-model:/models lustra-model-server
   ```
-  Model tải vào volume `/models` ở lần chạy đầu. Đã có model trên máy thì gắn thẳng: `-v ~/.config/Lustra/models/wd-vit-tagger-v3:/models:ro`. Image ~420 MB (chưa gồm model). Cho máy khác dùng: `-p 8765:8765` và đặt server sau reverse proxy https (app từ chối http tới máy ngoài mạng nội bộ).
+  Model tải vào volume `/models` ở lần chạy đầu. Đã có model trên máy thì gắn thẳng: `-v ~/.config/Lustra/models/wd-vit-tagger-v3:/models:ro`. Image ~1,05 GB (chưa gồm model; có ffmpeg để đọc video cho `-gender_verify_media`, không có ffmpeg ~420 MB). Cho máy khác dùng: `-p 8765:8765` và đặt server sau reverse proxy https (app từ chối http tới máy ngoài mạng nội bộ).
 - **App**: Cài đặt → Model nhận diện giới tính: công tắc **Dùng model** (mặc định tắt), địa chỉ API, token (nếu server có), nút Kiểm tra, dòng **Phần cứng của server**, nút **Hướng dẫn** (hướng dẫn chung, `app/renderer/guide.js`). Bật: app hỏi server GPU / VRAM trước; không có GPU có VRAM riêng ≥ 1,5 GB, onnxruntime bản CPU, server bị đặt `--device cpu` hoặc VRAM trống không đủ thì hiện cảnh báo khuyên để tắt (Hướng dẫn / Vẫn bật (chạy bằng CPU) / Để tắt), rồi nạp model ngay và báo chạy bằng gì. Tắt: job chỉ lọc theo tag, server trên máy này giải phóng model. Sau khi bật: Bộ lọc giới tính → Nhận diện → "Tag + model (ảnh)". Server không phản hồi thì preview ghi lỗi, job dừng với `Error: '-gender_mode model': model server … is not reachable`.
 - **CLI**:
   ```bash
   .venv/bin/python -m lustra -module xb -gender only_female,both -gender_mode model -gender_model_url http://127.0.0.1:8765 -path ~/Downloads/Lustra -- scenery
   ```
   Token: `-gender_model_token` hoặc `LUSTRA_GENDER_MODEL_TOKEN`. Không có địa chỉ thì CLI chạy model trong tiến trình (cần `pip install "lustra[model]"` và `python -m lustra.gender_model install`). Log có `Gender model: looking at N / M item(s) …` và `N labeled, K still unknown`.
-- Công cụ: `python -m lustra.gender_model status` (có `LUSTRA_GENDER_MODEL_URL` thì kiểm server), `install`, `remove`, `classify ảnh.jpg …` (in nhãn, độ tin cậy, bằng chứng, safety tag; qua server nếu có biến địa chỉ).
+- **Xem lại video / ảnh động sau khi tải** (`-gender_verify_media`, F-21, plan §3.5 P4): file video / ảnh động vừa tải của post mà tag chưa đủ kết luận được gửi tới `POST /v1/frames`, server gắn tag tối đa 8 khung; file không khớp bộ lọc được **chuyển** vào `<thư mục lưu>/_gender_mismatch/` (không xoá).
+  - Server cần `ffmpeg` trên PATH để đọc video (không có thì dùng PyAV nếu đã cài); ảnh động (GIF / APNG / WebP) chỉ cần Pillow. Dòng `media (/v1/frames): videos ffmpeg …, animated pictures pillow …` lúc khởi động server cho biết server đọc được gì. Image Docker đã có ffmpeg (gói Debian). Server không có ffmpeg / PyAV: job cảnh báo W2, video giữ nguyên, không xem lại.
+  - CLI (thêm vào lệnh ở trên): `-gender_verify_media`. Log có `… does not match the gender filter (only_male on 8 frame(s)), moved to _gender_mismatch/`; với `-verbose` có thêm dòng cho file khớp. Dòng tiến độ / DONE có `genderVerified`, `genderMismatch`. App: bộ lọc giới tính → ô **Kiểm tra video sau khi tải** (hiện khi đã bật model, dùng được với "Tag + model (ảnh)"); card job hiện "Không khớp, đã chuyển: n / m file đã xem lại".
+  - Đo trên máy dev: model trên GPU (RTX 4070 Ti SUPER, CUDA), mỗi video 4–5 s (512 px / 640 px) qua HTTP ~0,5 s (phần lớn là 8 lần chạy ffmpeg), GIF 10 khung ~0,12 s; image Docker (CPU) 2,7–4,2 s mỗi file. File tối đa 200 MB; ffmpeg mỗi lần tối đa 30 s, cả file tối đa 120 s. Image Docker có ffmpeg: ~1,05 GB trên đĩa (trước đó ~420 MB), vì gói `ffmpeg` của Debian kéo theo nhiều thư viện codec.
+  - Kiểm tra tay: `python -m lustra.media_frames clip.mp4 anim.gif` (khung nào được lấy, bộ giải mã; không cần model), `LUSTRA_GENDER_MODEL_URL=http://127.0.0.1:8765 python -m lustra.gender_model classify clip.mp4` (nhãn, bằng chứng, số khung).
+- Công cụ: `python -m lustra.gender_model status` (có `LUSTRA_GENDER_MODEL_URL` thì kiểm server), `install`, `remove`, `classify ảnh.jpg …` (in nhãn, độ tin cậy, bằng chứng, safety tag; video / ảnh động thì xét trên nhiều khung; qua server nếu có biến địa chỉ).
 - Kết quả theo post nằm ở `<data>/cache/gender_model.sqlite` của client; xoá file này để model xem lại.
 
 ## 4. Test
@@ -117,11 +122,11 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
 cd app && npm run check
 LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -a ./node_modules/.bin/electron . --no-sandbox --ozone-platform=x11
 ```
-`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `lustra.tests.test_extgen` chạy offline; test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói.
+`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline; test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói.
 
 Toàn bộ test offline như CI (`.github/workflows/run-tests.yml`), với thư mục dữ liệu tạm:
 ```bash
-LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_model_server
+LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_model_server lustra.tests.test_media_verify
 ```
 
 ## 5. Build
