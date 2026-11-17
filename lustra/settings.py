@@ -46,6 +46,7 @@ from .validators import (
     Validator,
     VideosCBValidator,
     WindowPosValidator,
+    module_id_from_setting,
 )
 
 __all__ = ('ConfigMgr', 'register_config_worker')
@@ -88,9 +89,10 @@ class ListConfigWorker:
                 elif conf == Options.COOKIE_ADD_STR:
                     window_hcookiesm().set_cookies_s(val)
                 elif conf == Options.MODULE:
-                    ConfigMgr.on_proc_module_change_callback(val + 1)
+                    module_id = module_id_from_setting(val)
+                    ConfigMgr.on_proc_module_change_callback(module_id)
                     setrootconf(conf, ProcModule.name())
-                    set_int_var(conf, val + 1)
+                    set_int_var(conf, module_id)
                 elif conf == Options.WINDOW_POSITION:
                     if set_window_pos:
                         rootm().set_position(*(float(dim) for dim in str(val).split('x', 1)))
@@ -118,7 +120,7 @@ class ListConfigWorker:
             elif conf == Options.COOKIE_ADD_STR:
                 myval = window_hcookiesm().get_json_c_s()
             elif conf == Options.MODULE:
-                myval = ProcModule.value() - 1
+                myval = ProcModule.name()  # abbreviation: external module ids are not stable between runs
             elif conf in ConfigMgr.combobox_setting_arrays:
                 myval = ConfigMgr.combobox_setting_arrays[conf].index(getrootconf(conf))
             elif conf == Options.WINDOW_POSITION:
@@ -164,9 +166,10 @@ class JSONConfigWorker:
                 elif conf == Options.COOKIE_ADD_STR:
                     window_hcookiesm().set_cookies(val)
                 elif conf == Options.MODULE:
-                    ConfigMgr.on_proc_module_change_callback(val + 1)
+                    module_id = module_id_from_setting(val)
+                    ConfigMgr.on_proc_module_change_callback(module_id)
                     setrootconf(conf, ProcModule.name())
-                    set_int_var(conf, val + 1)
+                    set_int_var(conf, module_id)
                 elif conf == Options.WINDOW_POSITION:
                     if set_window_pos:
                         rootm().set_position(*(float(dim) for dim in str(val).split('x', 1)))
@@ -191,7 +194,7 @@ class JSONConfigWorker:
             elif conf == Options.COOKIE_ADD_STR:
                 myval = window_hcookiesm().get_json_c()
             elif conf == Options.MODULE:
-                myval = ProcModule.value() - 1
+                myval = ProcModule.name()  # abbreviation: external module ids are not stable between runs
             elif conf in ConfigMgr.combobox_setting_arrays:
                 myval = ConfigMgr.combobox_setting_arrays[conf].index(getrootconf(conf))
             elif conf == Options.WINDOW_POSITION:

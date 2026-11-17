@@ -12,7 +12,7 @@ import os
 import pathlib
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from multiprocessing.dummy import current_process
 from threading import Thread
 from tkinter import END, messagebox
@@ -32,6 +32,7 @@ from .defines import (
     DownloaderOptions,
     DownloaderStates,
     ItemInfo,
+    ModuleCaps,
     ModuleConfigType,
     max_progress_value_for_state,
 )
@@ -40,7 +41,7 @@ from .downloaders import get_new_downloader
 from .file_parser import gather_item_infos_in_dir
 from .file_searcher import find_duplicated_files
 from .file_sorter import FileTypeFilter, sort_files_by_score, sort_files_by_size, sort_files_by_type
-from .file_tagger import retag_files_any, retag_files_tagtype, untag_files
+from .file_tagger import item_infos_from_index, retag_files_any, retag_files_tagtype, untag_files
 from .gui_base import (
     AskChecksWindow,
     AskFileScoreFilterWindow,
@@ -177,6 +178,7 @@ ICON_TYPE_PER_PROC_MODULE = {
     ProcModule.EN: Icons.EN,
     ProcModule.XB: Icons.XB,
     ProcModule.BB: Icons.BB,
+    ProcModule.DB: Icons.EN,  # legacy GUI has no dedicated icon for danbooru
 }
 
 # loaded
@@ -208,9 +210,10 @@ def _file_worker_report(succ_count: int, total_count: int, word1: str, word2='')
         trace(f'An error occured while {word1}ing {total_count:d} files{word2}. Code: {succ_count:d}')
 
 
-def _gather_retag_info(base_path: pathlib.Path, load_db=False) -> dict[str, ItemInfo]:
+def _gather_retag_info(base_path: pathlib.Path, load_db=False, files: Sequence[pathlib.Path] = ()) -> dict[str, ItemInfo]:
+    """Post infos for the re-tag tools: the download index first (by file), the info files of the folder as fallback"""
     try:
-        if all_infos := gather_item_infos_in_dir(base_path):
+        if all_infos := {**gather_item_infos_in_dir(base_path), **item_infos_from_index(files)}:
             if (not load_db) or load_tags_db():
                 return all_infos
         return {}
@@ -235,10 +238,10 @@ def _retag_files_do() -> None:
             update_lastpath(filelist[0])
             if filter_type == [TagCategories.AUTO]:
                 module = get_new_downloader()
-                all_infos = _gather_retag_info(filelist[0].parent)
+                all_infos = _gather_retag_info(filelist[0].parent, files=filelist)
                 retagged_count = retag_files_any(filelist, all_infos, module.get_re_tags_to_process(), module.get_re_tags_to_exclude())
             else:
-                all_infos = _gather_retag_info(filelist[0].parent, True)
+                all_infos = _gather_retag_info(filelist[0].parent, True, filelist)
                 retagged_count = retag_files_tagtype(filelist, all_infos, *filter_type)
                 TagsDB.clear()
             _file_worker_report(retagged_count, len(filelist), 're-tagg')
@@ -450,9 +453,19 @@ def _toggle_autocompletion_wrapper() -> None:
     _update_widget_enabled_states()
 
 
+_api_keys: dict[str, tuple[str, str]] = {}
+'''api key / user id per module abbreviation: Ruxx had one key slot, switching module could send one site's key to another site'''
+
+
 def _set_proc_module(dwnmodule: int) -> None:
     global dwn
 
+    if GetRoot() is not None and dwnmodule != ProcModule.value():
+        _api_keys[ProcModule.name()] = (str(getrootconf(Options.APIKEY_KEY)), str(getrootconf(Options.APIKEY_USERID)))
+        key, user_id = _api_keys.get(ProcModule.PROC_MODULES_NAMES_BY_ID.get(dwnmodule, ''), ('', ''))
+        for conf, val in ((Options.APIKEY_KEY, key), (Options.APIKEY_KEY_TEMP, key), (Options.APIKEY_USERID, user_id),
+                          (Options.APIKEY_USERID_TEMP, user_id)):
+            setrootconf(conf, val)
     ProcModule.set(dwnmodule)
     dwn = None
 
@@ -469,7 +482,18 @@ def _set_proc_module(dwnmodule: int) -> None:
     reset_last_tags()
 
 
+def _module_caps() -> frozenset[str]:
+    """Capabilities of the selected module (Ruxx hard-coded module names here, extensions were never enabled correctly)"""
+    from .downloaders import DOWNLOADERS_BY_PROC_MODULE
+    from .extensions import Extensions
+    if ProcModule.value() not in DOWNLOADERS_BY_PROC_MODULE:
+        Extensions.ensure_loaded(include_catalog=Extensions.catalog_autoload())
+    cls = DOWNLOADERS_BY_PROC_MODULE.get(ProcModule.value())
+    return cls.CAPABILITIES if cls else frozenset()
+
+
 def _update_widget_enabled_states() -> None:
+    caps = _module_caps()
     batching = _is_processing_batch()
     downloading = _is_downloading()
     batching_or_downloading = batching or downloading
@@ -487,15 +511,13 @@ def _update_widget_enabled_states() -> None:
                     newstate = STATE_DISABLED
                 elif i == Menus.ACTIONS and j == SubMenus.DOWNLOAD and checkingdupes:  # Disabled when active
                     newstate = STATE_DISABLED
-                elif i == Menus.EDIT and j == SubMenus.SSOURCE and ProcModule.is_rs():  # Save sources, disabled for RS
+                elif i == Menus.EDIT and j == SubMenus.SSOURCE and ModuleCaps.SOURCES not in caps:
                     newstate = STATE_DISABLED
-                elif i == Menus.EDIT and j == SubMenus.SCOMMENTS and ProcModule.is_xb():  # Save comments, disabled for XB
-                    newstate = STATE_DISABLED
-                elif i == Menus.EDIT and j == SubMenus.SCOMMENTS and ProcModule.is_bb():  # Save comments, disabled for BB
+                elif i == Menus.EDIT and j == SubMenus.SCOMMENTS and ModuleCaps.COMMENTS not in caps:
                     newstate = STATE_DISABLED
                 elif i == Menus.TOOLS and j == SubMenus.AUTOCOMPLETER and TagsDB.is_empty():
                     newstate = STATE_DISABLED
-                elif i == Menus.CONNECTION and j == SubMenus.APIKEY and not ProcModule.is_rx():
+                elif i == Menus.CONNECTION and j == SubMenus.APIKEY and ModuleCaps.API_KEY not in caps:
                     newstate = STATE_DISABLED
                 else:
                     newstate = STATE_DISABLED if batching_or_downloading else menu_item_orig_states[i][j]
@@ -503,11 +525,10 @@ def _update_widget_enabled_states() -> None:
     gi: Globals
     for gi in Globals.__members__.values():
         if gi == Globals.COMBOBOX_PARCHI:
-            no_parchi = not ProcModule.is_rx() and not ProcModule.is_en() and not ProcModule.is_xb() and not ProcModule.is_bb()
-            newstate = STATE_DISABLED if no_parchi else gobject_orig_states[gi]
+            newstate = STATE_DISABLED if ModuleCaps.PARENT_CHILD not in caps else gobject_orig_states[gi]
             config_global(gi, state=newstate)
         elif gi in {Globals.FIELD_DATEMIN, Globals.FIELD_DATEMAX}:
-            newstate = STATE_DISABLED if ProcModule.is_rs() else gobject_orig_states[gi]
+            newstate = STATE_DISABLED if ModuleCaps.DATE_FILTER not in caps else gobject_orig_states[gi]
             get_global(gi).set_state(newstate)
             config_global(gi, state=newstate)
 
@@ -619,8 +640,8 @@ def _prepare_cmdline() -> list[str]:
                 break
             except Exception:
                 setrootconf(datestr[0], DATE_MIN_DEFAULT if datestr[0] == Options.DATEMIN else DATE_MAX_DEFAULT)
-    # API key
-    if ProcModule.is_rx():
+    # API key (of the selected module only)
+    if ModuleCaps.API_KEY in _module_caps():
         if addstr := str(getrootconf(Options.APIKEY_KEY)):
             addstr2 = str(getrootconf(Options.APIKEY_USERID))
             newstr.append(OPTION_CMD_APIKEY_CMD)
@@ -1253,6 +1274,8 @@ def _dwnm() -> Downloader:
 def run_lustra_gui() -> None:
     Logger.init(False)
     ensure_compatibility()
+    from .extensions import Extensions
+    Extensions.ensure_loaded(include_catalog=True)  # legacy gui lists every locally available module
     if CAN_MANIPULATE_CONSOLE:
         Logger.pending_strings.append('[Launcher] Hiding own console...')
         ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)

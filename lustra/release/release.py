@@ -29,7 +29,6 @@ RELEASE_DEST_DIR = ROOT_DIR / 'release'
 RELEASE_FILENAME = f'{APP_NAME}{".exe" if sys.platform == PLATFORM_WINDOWS else ""}'
 RELEASE_SRC = RELEASE_SRC_DIR / RELEASE_FILENAME
 RELEASE_DEST = RELEASE_DEST_DIR / RELEASE_FILENAME
-RELEASE_ICON_SIZE = 256
 
 CLEANUP_FILES = (VERSIONINFO_FILE_PATH, ROOT_DIR / f'{APP_NAME}.spec')
 CLEANUP_DIRS = (BUILD_DIR, RELEASE_SRC_DIR)
@@ -100,9 +99,17 @@ def build_exe() -> None:
         '--clean', '--log-level', 'DEBUG',
         '-F', '--noupx', '-c', '-y',
         '-n', APP_NAME,
-        '-i', f'./images/8_{RELEASE_ICON_SIZE:d}.ico',
+        '-i', './images/lustra.ico',  # app/assets/icons/full-mask-orange.png at 16-256 px
         *(itertools.chain.from_iterable(zip(('--exclude-module',) * len(MODULES_EXCLUDED), MODULES_EXCLUDED, strict=True))),
         '--collect-datas=fake_useragent',
+        # builtin extensions: manifests are data, downloader modules are imported dynamically
+        '--add-data', f'{ROOT_DIR.joinpath("lustra/builtin_ext").as_posix()}:lustra/builtin_ext',
+        '--add-data', f'{ROOT_DIR.joinpath("lustra/gender_rules").as_posix()}:lustra/gender_rules',
+        # domain denylist + trusted catalog keys (read at run time: a missing file refuses non builtin extensions)
+        '--add-data', f'{ROOT_DIR.joinpath("lustra/safety_data").as_posix()}:lustra/safety_data',
+        '--hidden-import', 'lustra.download_rx', '--hidden-import', 'lustra.download_db',
+        # the stable API extensions import (lustra/sdk.py): no core module imports it
+        '--hidden-import', 'lustra.sdk',
         '--version-file=version_info.txt',
     ))
 

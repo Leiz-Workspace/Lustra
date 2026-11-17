@@ -12,11 +12,12 @@ import pathlib
 from collections.abc import Callable
 from dataclasses import asdict
 from tempfile import TemporaryDirectory
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from lustra.cmdargs import prepare_arglist
 from lustra.defines import DATE_MIN_DEFAULT, IDVAL_EQ_SEPARATORS, MODULE_CHOICES, Comment, DownloadModes, ItemInfo, ThreadInterruptException
 from lustra.downloaders import DOWNLOADERS_BY_PROC_MODULE, _make_downloader
+from lustra.extensions import Extensions
 from lustra.file_parser import IDSTRING_PATTERNS, PREFIX_OPTIONAL_PATTERNS
 from lustra.gui import ICON_TYPE_PER_PROC_MODULE
 from lustra.gui_base import HELP_TAGS_PER_PROC_MODULE, SITENAMES_PER_PROC_MODULE
@@ -168,27 +169,28 @@ class DataStructureIntegrityTests(TestCase):
     @test_prepare()
     def test_integrity04_procmodule_dicts(self) -> None:
         self.assertEqual(1, ProcModule.PROC_MODULE_MIN)
-        self.assertEqual(7, ProcModule.PROC_MODULE_MAX)
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(ProcModule.PROC_MODULES_BY_NAME))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(ProcModule.PROC_MODULES_NAMES_BY_ID))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(MAX_STRING_LENGTHS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(MAX_NEGATIVE_TAGS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(MAX_WILDCARDS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_PLAINS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_METAS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_SORTS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_FAVS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_POOLS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_ORGRS_FULL))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_ORGRS_FULL_S))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(RE_ANDGR_FULL))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(IDVAL_EQ_SEPARATORS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(IDSTRING_PATTERNS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(PREFIX_OPTIONAL_PATTERNS))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(DOWNLOADERS_BY_PROC_MODULE))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(ICON_TYPE_PER_PROC_MODULE))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(SITENAMES_PER_PROC_MODULE))
-        self.assertEqual(ProcModule.PROC_MODULE_MAX, len(HELP_TAGS_PER_PROC_MODULE))
+        self.assertEqual(8, ProcModule.PROC_MODULE_MAX)
+        Extensions.ensure_loaded(include_catalog=True)
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in ProcModule.PROC_MODULES_BY_NAME if k in MODULE_CHOICES]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in ProcModule.PROC_MODULES_NAMES_BY_ID if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in MAX_STRING_LENGTHS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in MAX_NEGATIVE_TAGS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in MAX_WILDCARDS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_PLAINS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_METAS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_SORTS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_FAVS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_POOLS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_ORGRS_FULL if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_ORGRS_FULL_S if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in RE_ANDGR_FULL if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in IDVAL_EQ_SEPARATORS if k in MODULE_CHOICES]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in IDSTRING_PATTERNS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in PREFIX_OPTIONAL_PATTERNS if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in DOWNLOADERS_BY_PROC_MODULE if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in ICON_TYPE_PER_PROC_MODULE if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in SITENAMES_PER_PROC_MODULE if k <= ProcModule.PROC_MODULE_MAX]))
+        self.assertEqual(ProcModule.PROC_MODULE_MAX, len([k for k in HELP_TAGS_PER_PROC_MODULE if k <= ProcModule.PROC_MODULE_MAX]))
         print(f'{self._testMethodName} passed')
 
 
@@ -208,9 +210,9 @@ class FileCheckTests(TestCase):
     @test_prepare()
     def test_filecheck03_tags_load(self) -> None:
         TagsDB.try_set_basepath(pathlib.Path(), traverse=False)
-        for module in MODULE_CHOICES:
-            TagsDB._load(module)
-            self.assertGreater(len(TagsDB.DB[module]), 0, msg=f'{self._testMethodName} for module \'{module}\' failed')
+        with mock.patch.object(TagsDB, 'CacheEnabled', False):  # do not write ~70 MB of list caches into the user's data dir
+            for module in MODULE_CHOICES:
+                self.assertGreater(TagsDB.count(module), 0, msg=f'{self._testMethodName} for module \'{module}\' failed')
         print(f'{self._testMethodName} passed')
 
 

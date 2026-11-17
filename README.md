@@ -6,6 +6,15 @@ Lustra is a booru content downloader with precise tag search, a desktop UI (Elec
 - New desktop UI: see [`app/`](app/) and [`docs/`](docs/README.md)
 - Default extensions: **Rule34** (`rx`) and **Danbooru** (`db`). Other sites are optional extensions, see [`extensions/`](extensions/)
 
+### Quick start (desktop app)
+```bash
+uv venv .venv --python 3.13 --python-preference only-managed && uv pip install --python .venv/bin/python -r requirements.txt
+cd app && npm install && node node_modules/electron/install.js && npm start
+```
+Docs (Vietnamese): [docs/README.md](docs/README.md) · operations: [docs/operations.md](docs/operations.md) · tag lists cron: `tools/cron/`
+
+Modules: `rx` and `db` are builtin, `rn rs rp en xb bb` are optional extensions (`extensions/`), installable from the app or loaded automatically by the CLI.
+
 ### What is it?
 Lustra is a content downloader with a lot of filters for maximum search precision. Supported websites are in description, everywhere else ‒ abbreviations only
 

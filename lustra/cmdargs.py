@@ -14,12 +14,14 @@ from .defines import (
     DMODE_CHOICES,
     DMODE_DEFAULT,
     MODULE_ABBR_RX,
-    MODULE_CHOICES,
     THREADS_MAX_ITEMS,
 )
 from .gui_defines import (
+    GENDER_CONFS,
+    GENDER_MODES,
     OPTION_CMD_APIKEY_CMD,
     OPTION_CMD_APPEND_SOURCE_AND_TAGS,
+    OPTION_CMD_AUDIO,
     OPTION_CMD_COOKIES_CMD,
     OPTION_CMD_DATEAFTER_CMD,
     OPTION_CMD_DATEBEFORE_CMD,
@@ -27,6 +29,14 @@ from .gui_defines import (
     OPTION_CMD_DOWNLOAD_ORDER,
     OPTION_CMD_DOWNMODE_CMD,
     OPTION_CMD_FNAMEPREFIX,
+    OPTION_CMD_GENDER_CMD,
+    OPTION_CMD_GENDER_CONF_CMD,
+    OPTION_CMD_GENDER_EXCLUDE_CMD,
+    OPTION_CMD_GENDER_MODE_CMD,
+    OPTION_CMD_GENDER_MODEL_TOKEN_CMD,
+    OPTION_CMD_GENDER_MODEL_URL_CMD,
+    OPTION_CMD_GENDER_STRICT,
+    OPTION_CMD_GENDER_VERIFY_MEDIA,
     OPTION_CMD_GET_MAXID_CMD,
     OPTION_CMD_HEADERS_CMD,
     OPTION_CMD_HIDE_PERSONAL_INFO,
@@ -36,6 +46,7 @@ from .gui_defines import (
     OPTION_CMD_MODULE_CMD,
     OPTION_CMD_PARCHI,
     OPTION_CMD_PATH_CMD,
+    OPTION_CMD_PATH_SUB_AUD,
     OPTION_CMD_PATH_SUB_IMG,
     OPTION_CMD_PATH_SUB_VID,
     OPTION_CMD_PRESERVE_DATE,
@@ -46,6 +57,8 @@ from .gui_defines import (
     OPTION_CMD_SAVE_HASHES,
     OPTION_CMD_SAVE_SOURCES,
     OPTION_CMD_SAVE_TAGS,
+    OPTION_CMD_SKIP_KNOWN,
+    OPTION_CMD_TAGS_LIMIT_CMD,
     OPTION_CMD_THREADING_CMD,
     OPTION_CMD_TIMEOUT_CMD,
     OPTION_CMD_VERBOSE,
@@ -66,6 +79,14 @@ from .help import (
     HELP_ARG_DUMP_PER_ITEM,
     HELP_ARG_DUMP_SOURCES,
     HELP_ARG_DUMP_TAGS,
+    HELP_ARG_GENDER,
+    HELP_ARG_GENDER_CONF,
+    HELP_ARG_GENDER_EXCLUDE,
+    HELP_ARG_GENDER_MODE,
+    HELP_ARG_GENDER_MODEL_TOKEN,
+    HELP_ARG_GENDER_MODEL_URL,
+    HELP_ARG_GENDER_STRICT,
+    HELP_ARG_GENDER_VERIFY_MEDIA,
     HELP_ARG_GET_MAXID,
     HELP_ARG_HEADER,
     HELP_ARG_HEADERS,
@@ -86,11 +107,15 @@ from .help import (
     HELP_ARG_PROXY,
     HELP_ARG_PROXYNODOWN,
     HELP_ARG_REVERSE_DOWNLOAD_ORDER,
+    HELP_ARG_SKIP_AUDIO,
     HELP_ARG_SKIP_IMAGES,
+    HELP_ARG_SKIP_KNOWN,
     HELP_ARG_SKIP_VIDEOS,
+    HELP_ARG_SUBFOLDER_AUDIO,
     HELP_ARG_SUBFOLDER_IMAGES,
     HELP_ARG_SUBFOLDER_VIDEOS,
     HELP_ARG_TAGS,
+    HELP_ARG_TAGS_LIMIT,
     HELP_ARG_THREADS,
     HELP_ARG_VERBOSE,
     HELP_ARG_VERSION,
@@ -102,6 +127,10 @@ from .validators import (
     valid_date,
     valid_folder_name,
     valid_folder_path,
+    valid_gender_exclude,
+    valid_gender_list,
+    valid_gender_model_token,
+    valid_gender_model_url,
     valid_json,
     valid_kwarg,
     valid_positive_int,
@@ -129,10 +158,12 @@ DEFAULT_PATH = valid_folder_path('.')
 def _create_parsers() -> dict[str, ArgumentParser]:
     def create_parser(sub, name: str, description: str) -> ArgumentParser:
         if sub:
-            parser: ArgumentParser = sub.add_parser(PARSER_TITLE_NAMES_REMAP.get(name, name), description=description, add_help=False)
+            parser: ArgumentParser = sub.add_parser(PARSER_TITLE_NAMES_REMAP.get(name, name), description=description, add_help=False,
+                                                    allow_abbrev=False)
             parser.set_defaults(**{PARSER_PARAM_PARSER_TITLE: name})
         else:
-            parser = ArgumentParser(add_help=False, prog=MODULE)
+            # no abbreviations: negative tags like '-web' or '-v' must never be taken for options (tags also follow '--')
+            parser = ArgumentParser(add_help=False, prog=MODULE, allow_abbrev=False)
         parser.set_defaults(**{PARSER_PARAM_PARSER_TYPE: parser})
         assert name not in parsers
         parsers[name] = parser
@@ -152,7 +183,7 @@ def _create_parsers() -> dict[str, ArgumentParser]:
 
 def _add_common_args(par: ArgumentParser) -> None:
     op = par.add_argument_group(title='options')
-    op.add_argument(OPTION_CMD_MODULE_CMD, default=MODULE_ABBR_RX, help=HELP_ARG_MODULE, choices=MODULE_CHOICES)
+    op.add_argument(OPTION_CMD_MODULE_CMD, default=MODULE_ABBR_RX, help=HELP_ARG_MODULE, choices=ProcModule.known_names())
     op.add_argument(dest='tags', nargs=ZERO_OR_MORE, action='extend', help=HELP_ARG_TAGS)
     co = par.add_argument_group(title='connection options')
     co.add_argument(OPTION_CMD_PROXY_CMD, metavar='#type://[user:pass@]a.d.d.r:port', help=HELP_ARG_PROXY, type=valid_proxy)
@@ -173,6 +204,8 @@ def _add_common_args(par: ArgumentParser) -> None:
     do.add_argument(OPTION_CMD_VIDEOS[0], action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_VIDEOS)
     do.add_argument(OPTION_CMD_PATH_SUB_VID, metavar='#NAME', help=HELP_ARG_SUBFOLDER_VIDEOS, type=valid_folder_name)
     do.add_argument(OPTION_CMD_PATH_SUB_IMG, metavar='#NAME', help=HELP_ARG_SUBFOLDER_IMAGES, type=valid_folder_name)
+    do.add_argument(OPTION_CMD_AUDIO, action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_AUDIO)
+    do.add_argument(OPTION_CMD_PATH_SUB_AUD, metavar='#NAME', help=HELP_ARG_SUBFOLDER_AUDIO, type=valid_folder_name)
     dom1 = do.add_mutually_exclusive_group(required=False)
     dom1.add_argument(OPTION_CMD_VIDEOS[1], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFER_MP4)
     dom1.add_argument(OPTION_CMD_VIDEOS[2], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFER_WEBM)
@@ -193,6 +226,16 @@ def _add_common_args(par: ArgumentParser) -> None:
     dofi = par.add_argument_group(title='filtering options')
     dofi.add_argument(OPTION_CMD_DATEAFTER_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MINDATE, type=valid_date)
     dofi.add_argument(OPTION_CMD_DATEBEFORE_CMD, metavar='#DD-MM-YYYY', help=HELP_ARG_MAXDATE, type=valid_date)
+    dofi.add_argument(OPTION_CMD_TAGS_LIMIT_CMD, metavar='#NUMBER', help=HELP_ARG_TAGS_LIMIT, type=valid_positive_int)
+    dofi.add_argument(OPTION_CMD_GENDER_CMD, metavar='#LABEL[,LABEL...]', help=HELP_ARG_GENDER, type=valid_gender_list)
+    dofi.add_argument(OPTION_CMD_GENDER_EXCLUDE_CMD, metavar='#LABEL[,LABEL...]', help=HELP_ARG_GENDER_EXCLUDE, type=valid_gender_exclude)
+    dofi.add_argument(OPTION_CMD_GENDER_MODE_CMD, choices=GENDER_MODES, help=HELP_ARG_GENDER_MODE)
+    dofi.add_argument(OPTION_CMD_GENDER_MODEL_URL_CMD, metavar='#URL', help=HELP_ARG_GENDER_MODEL_URL, type=valid_gender_model_url)
+    dofi.add_argument(OPTION_CMD_GENDER_MODEL_TOKEN_CMD, metavar='#TOKEN', help=HELP_ARG_GENDER_MODEL_TOKEN, type=valid_gender_model_token)
+    dofi.add_argument(OPTION_CMD_GENDER_CONF_CMD, choices=GENDER_CONFS, help=HELP_ARG_GENDER_CONF)
+    dofi.add_argument(OPTION_CMD_GENDER_STRICT[True], action=ACTION_STORE_TRUE, help=HELP_ARG_GENDER_STRICT)
+    dofi.add_argument(OPTION_CMD_GENDER_VERIFY_MEDIA[True], action=ACTION_STORE_TRUE, help=HELP_ARG_GENDER_VERIFY_MEDIA)
+    dofi.add_argument(OPTION_CMD_SKIP_KNOWN[True], action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_KNOWN)
     dona = par.add_argument_group(title='naming options')
     dona.add_argument(OPTION_CMD_FNAMEPREFIX[True], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFIX)
     dona.add_argument(OPTION_CMD_APPEND_SOURCE_AND_TAGS[True], action=ACTION_STORE_TRUE, help=HELP_ARG_APPEND_SOURCE_AND_TAGS)
@@ -231,6 +274,9 @@ def _validate_parsed(parser: ArgumentParser, args: list[str] | tuple[str, ...]) 
 
 
 def prepare_arglist(args: list[str] | tuple[str, ...]) -> Namespace:
+    """Tags should follow '--' (options after it are tags: '-webm' means 'exclude tag webm')"""
+    from .extensions import Extensions
+    Extensions.ensure_loaded(include_catalog=Extensions.catalog_autoload())  # extensions may add module abbreviations
     parsers = _create_parsers()
     parser_root = parsers[PARSER_TITLE_NONE]
     pcmd = parsers[PARSER_TITLE_CMD]
