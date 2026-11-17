@@ -184,6 +184,40 @@ ANTHROPIC_API_KEY=... .venv/bin/python -m lustra.aigen.eval run --mode ai --live
 - `--only a,b` chạy một số site; site có `"modes": ["ai"]` (site HTML tùy biến) chỉ chạy ở chế độ AI. Chạy offline với `--mode ai --fixtures DIR` cũng được, nhưng request nào model gọi mà chưa ghi sẽ nhận 404 và được liệt kê ở `missing`.
 - Ước tính chi phí (`estimate`): (1) **trường hợp xấu nhất** = số site × trần mỗi phiên (`--max-usd`, phiên không bắt đầu lượt mới khi đã chạm trần; lượt cuối có thể vượt một ít); (2) **mô hình**: một phiên `--turns` lượt (mặc định 14), lượt đầu ghi cache tiền tố (system prompt + tool, đếm theo 3,5 ký tự / token), lượt sau đọc cache tiền tố + lịch sử và ghi phần mới (`--out-tokens` 1500 + `--result-tokens` 2500), giá theo `MODELS` trong `lustra/aigen/session.py` (Opus 5.5: 4 / 20 USD mỗi triệu token vào / ra, đọc cache 0,20, ghi cache 5). Với mặc định: ~0,77 USD / phiên, 9 site ~7 USD, xấu nhất 18 USD; (3) **đo được**: trung bình `usd` các phiên AI cũ (báo cáo eval và `report.json` của bản nháp) nếu có. Khi chạy thật, lệnh in ước tính và dừng cả bộ khi tổng chi phí chạm tổng các trần.
 
+## 3g. Đánh giá model giới tính (`python -m lustra.gender_eval`, plan gender-filter-model P1)
+Công cụ đo độ chính xác của tầng 0 (tag) và tầng 1 (model) theo plan §3.2, §3.7. **Không lưu ảnh**: ảnh được tải vào RAM bằng session của downloader (cùng header, proxy, giãn cách request), cho người xem hoặc gửi tới model rồi bỏ. File ra chỉ có id post, md5, URL, tag, nhãn và số đo. Nên chạy với `LUSTRA_DATA_DIR` riêng nếu không muốn đụng thư mục dữ liệu thật (chỉ thư mục `ratelimit/` được dùng).
+
+1. **Lấy mẫu** (chỉ metadata, qua downloader của module, cách nhau ≥ 1 s mỗi trang):
+   ```bash
+   .venv/bin/python -m lustra.gender_eval sample --module db --query "random:100 rating:g" --query "1boy random:100 rating:g" --query "no_humans random:100 rating:g" --query "gentags:<=8 random:100 rating:g" --quota only_female=60,only_male=60,both=60,none=60,sparse=80,weak=20 --out eval/manifest.json
+   ```
+   - Mỗi `--query` là một truy vấn (không có nhóm OR), lấy `--pages` trang. Trên Danbooru, `random:N` chỉ trả một trang: muốn thêm post thì lặp lại cùng truy vấn; post trùng bị bỏ.
+   - Thứ tự loại (log đếm từng bước, ghi vào `exclusions` của manifest): 1 danh sách chặn cứng §4.1 trên tag và alias (`gender_rules/*.json` + `all_tag_aliases.json`), 2 danh sách loại bổ sung §4.2 (`school_uniform`, `petite`…), 3 ảnh / người thật §4.3, 4 safety gate của model (cần ảnh nên áp ở `label` và `evaluate`), 5 trùng md5 (pHash chưa làm vì không giữ ảnh), 6 post đã xoá / không có file. Module mà trang tìm kiếm không có tag (rule34.us) bị từ chối vì không kiểm được danh sách chặn.
+   - Mỗi post có nhãn tầng 0 + độ tin cậy, slice §3.7 (site, phong cách, ca biên futa / trap / POV / đông người ≥ 6 / `muscular_female` / da tối, mật độ tag, loại media) và tầng: nhãn tầng 0 mức high, `sparse` ("thiếu tag": ≤ 8 tag general hoặc không có tag giới) hoặc `weak` (tag giới mức medium / low). `--quota` đặt số post mỗi tầng (`all` = lấy hết).
+2. **Gán nhãn** (mỗi người một file, độc lập, không thấy tag hay nhãn tầng 0):
+   ```bash
+   .venv/bin/python -m lustra.gender_eval label --manifest eval/manifest.json --annotator an --open
+   ```
+   - Trang chỉ nghe trên `127.0.0.1` (mặc định cổng 8790), kiểm Host và token phiên. Phím: `1`/`F` chỉ nữ, `2`/`M` chỉ nam, `3`/`B` cả hai, `4`/`N` không có, `S`/Space bỏ qua, `T` đổi sample / thumbnail, `Z` hoàn tác, `X` không an toàn (loại).
+   - Nhãn ghi vào `eval/labels-an.json` sau mỗi lần bấm. `X`: post bị xoá khỏi manifest ngay, tag của nó được in ra và lưu trong `dropped` (kèm danh sách tag mà blacklist chưa chặn, để bổ sung vào `lustra/safety.py`).
+   - Trước khi hiện ảnh, công cụ gửi ảnh tới model server (`--model-url`, mặc định `LUSTRA_GENDER_MODEL_URL` hoặc `http://127.0.0.1:8765`) làm safety gate: tag cấm ≥ 0,15 thì post bị loại tự động, người gán không thấy ảnh. Server không chạy thì lệnh báo lỗi; `--no-model-gate` tắt bước này.
+3. **Độ đồng thuận** và tập vàng:
+   ```bash
+   .venv/bin/python -m lustra.gender_eval agree eval/labels-an.json eval/labels-binh.json --manifest eval/manifest.json --out eval/agree.json
+   .venv/bin/python -m lustra.gender_eval label --manifest eval/manifest.json --annotator trongtai --only eval/agree.json
+   .venv/bin/python -m lustra.gender_eval agree eval/labels-an.json eval/labels-binh.json --arbiter eval/labels-trongtai.json --manifest eval/manifest.json --out eval/agree.json --gold eval/gold.json
+   ```
+   `agree` tính Cohen's κ trên các post cả hai người đều gán một trong 4 nhãn (bỏ qua `skip`, post bị loại), in danh sách bất đồng cho trọng tài và kiểm AC-G08 (κ ≥ 0,8; ≥ 3.000 post; ≥ 30 % thiếu tag). `--gold`: nhãn hai người cùng chọn + quyết định của trọng tài.
+4. **Đánh giá**:
+   ```bash
+   .venv/bin/python -m lustra.gender_eval evaluate --manifest eval/manifest.json --gold eval/gold.json --out-dir eval/report
+   .venv/bin/python -m lustra.gender_eval evaluate --manifest eval/manifest.json --silver --out-dir eval/report-silver
+   ```
+   - Có tập vàng: đo tầng 0, model (chỉ ảnh) và tầng 0 + model (`combine`) so với nhãn của người. `--silver` (chưa có nhãn của người): tham chiếu là nhãn tầng 0 mức high, model chỉ nhận ảnh; đây là độ đồng ý với tag mạnh, không phải precision thật.
+   - Đầu vào `--inputs sample,thumb` (mặc định cả hai), điểm vận hành `--min-conf medium`. Ảnh cách nhau `--image-interval` giây (mặc định 1). Site trả bot challenge thì lệnh dừng và vẫn ghi báo cáo (đánh dấu chưa chạy hết); tag đoán ra được cache ở `<out-dir>/predictions.jsonl` nên chạy lại sẽ tiếp tục, không tải lại ảnh đã xem. `--max-minutes` giới hạn thời gian.
+   - Ra `report.json` và `report.md`: precision theo lớp, độ phủ, macro-F1 4 lớp, ma trận nhầm lẫn 4×4 + cột unknown, ECE (15 bin) trên xác suất mà nhãn dựa vào, các điểm risk–coverage, mọi slice kèm n, thumbnail so với sample, cờ thiên lệch (slice n ≥ 150 có precision thấp hơn toàn cục > 5 điểm), số post trap bị gán only_female.
+   - Post mà safety gate của model chặn (tag cấm ≥ 0,15 trên ảnh sample hoặc thumbnail) bị loại khỏi mọi số đo và bị xoá khỏi file manifest như ở `label`: `dropped` của manifest chỉ ghi khoá và tag của gate; các tag mà danh sách chặn chưa bắt được in ra và ghi trong `posts.modelGateDropped` của `report.json` để xem lại `lustra/safety.py`.
+
 ## 4. Test
 ```bash
 .venv/bin/python -m unittest lustra.tests.test_lustra
@@ -192,11 +226,11 @@ ANTHROPIC_API_KEY=... .venv/bin/python -m lustra.aigen.eval run --mode ai --live
 cd app && npm run check
 LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -a ./node_modules/.bin/electron . --no-sandbox --ozone-platform=x11
 ```
-`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline (gồm `DenylistTests`: các cách lách danh sách chặn tên miền; `SdkTests`: `lustra.sdk` và `minSdkVersion`); test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói. `lustra.tests.test_dlindex_tools` chạy offline (site giả, thư mục tạm). `lustra.tests.test_catalog_trust`: test vector RFC 8032, chữ ký catalog (sửa 1 byte, khoá lạ, chưa ký, khoá giữ chỗ, hết hạn, biến môi trường cho nhà phát triển), cài từ catalog từ xa qua transport giả, `tools/sign_catalog.py` (và đối chiếu với `openssl` nếu máy có). `lustra.tests.test_aigen_eval`: harness eval ghi / phát lại fixture (cả qua server HTTP cục bộ với `requests` thật), chế độ template, model giả lập, chế độ AI với client theo kịch bản, trần chi phí, kiểm khoá bị lộ; không gọi API trả phí.
+`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline (gồm `DenylistTests`: các cách lách danh sách chặn tên miền; `SdkTests`: `lustra.sdk` và `minSdkVersion`); test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói. `lustra.tests.test_dlindex_tools` chạy offline (site giả, thư mục tạm). `lustra.tests.test_catalog_trust`: test vector RFC 8032, chữ ký catalog (sửa 1 byte, khoá lạ, chưa ký, khoá giữ chỗ, hết hạn, biến môi trường cho nhà phát triển), cài từ catalog từ xa qua transport giả, `tools/sign_catalog.py` (và đối chiếu với `openssl` nếu máy có). `lustra.tests.test_aigen_eval`: harness eval ghi / phát lại fixture (cả qua server HTTP cục bộ với `requests` thật), chế độ template, model giả lập, chế độ AI với client theo kịch bản, trần chi phí, kiểm khoá bị lộ; không gọi API trả phí. `test_gender_eval` chạy offline (trang tìm kiếm giả, ảnh giả, model giả, trang gán nhãn thật trên cổng ngẫu nhiên).
 
 Toàn bộ test offline như CI (`.github/workflows/run-tests.yml`), với thư mục dữ liệu tạm:
 ```bash
-LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify lustra.tests.test_catalog_trust lustra.tests.test_aigen_eval
+LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify lustra.tests.test_catalog_trust lustra.tests.test_aigen_eval lustra.tests.test_gender_eval
 ```
 
 ## 5. Build
