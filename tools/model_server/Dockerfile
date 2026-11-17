@@ -11,6 +11,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LUSTRA_GENDER_MODEL_DIR=/models \
     LUSTRA_DATA_DIR=/data
 
+# ffmpeg: frames of videos for POST /v1/frames (-gender_verify_media); animated pictures only need Pillow
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # the server needs only these: the downloader dependencies of requirements.txt are not used
 RUN pip install --no-cache-dir 'requests>=2.31' 'numpy>=1.26' 'onnxruntime>=1.18' 'pillow>=10'
 

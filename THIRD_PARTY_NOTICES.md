@@ -41,4 +41,5 @@ built program under its own license).
 | onnxruntime (CPU) / onnxruntime-gpu | MIT |
 | Pillow | MIT-CMU |
 | requests and its dependencies | see above |
+| FFmpeg (Debian `ffmpeg` package, Docker image only: frames of videos for `/v1/frames`) | GPL-2.0-or-later (Debian build; FFmpeg itself LGPL-2.1-or-later); run as a separate program, never linked; sources: Debian |
 | NVIDIA CUDA / cuDNN libraries (`nvidia-*` pip packages, GPU installs only) | NVIDIA software license agreements; installed by the user from PyPI, never bundled by Lustra |
