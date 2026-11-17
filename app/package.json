@@ -4,6 +4,7 @@
   "desktopName": "lustra.desktop",
   "version": "2.0.1",
   "description": "Lustra desktop UI (Electron) for the Lustra booru downloader core",
+  "homepage": "https://github.com/Leiz-Workspace/Lustra",
   "author": "Lustra contributors",
   "main": "main.js",
   "private": true,
@@ -20,7 +21,7 @@
     "appId": "app.lustra.desktop",
     "productName": "Lustra",
     "copyright": "MIT License, Lustra contributors (derived from Ruxx by trickerer01)",
-    "artifactName": "Lustra-${version}-${os}-${arch}.${ext}",
+    "artifactName": "lustra-${os}-${arch}_v${version}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -37,36 +38,82 @@
       {
         "from": "build/core/lustra-core",
         "to": "core",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asar": true,
     "npmRebuild": false,
     "afterPack": "build/after-pack.js",
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "executableName": "lustra",
       "syncDesktopName": true,
       "icon": "assets/icons/full-mask-orange.png",
       "category": "Network",
       "synopsis": "Booru downloader",
       "description": "Booru downloader",
-      "executableArgs": []
+      "executableArgs": [],
+      "maintainer": "DungeonLeiz <korosakiryukai@gmail.com>",
+      "vendor": "DungeonLeiz"
     },
     "win": {
-      "target": ["nsis", "zip"],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "assets/icons/full-mask-orange.png"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lustra",
+      "artifactName": "lustra-setup-${arch}_v${version}.${ext}"
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
       "category": "public.app-category.utilities",
-      "icon": "assets/icons/full-mask-orange.png"
-    }
+      "icon": "assets/icons/full-mask-orange.png",
+      "identity": null
+    },
+    "deb": {
+      "packageCategory": "net"
+    },
+    "publish": null
   },
   "devDependencies": {
     "electron": "45.2.1",

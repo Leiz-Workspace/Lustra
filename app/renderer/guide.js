@@ -49,7 +49,7 @@ window.LUSTRA_GUIDE = {
       title: 'Chạy model server',
       blocks: [
         ['p', 'App không kèm model: model chạy trong một **model server** riêng, app chỉ gửi ảnh tới địa chỉ API trong Cài đặt (mặc định `http://127.0.0.1:8765`). Lần đầu chạy, server tự tải model (~380 MB, có kiểm sha256).'],
-        ['p', '**Bản chạy độc lập** (không cần Python): giải nén `lustra-model-server-<phiên bản>-<hệ điều hành>-cpu` vào một thư mục rồi chạy file `lustra-model-server` trong đó. Cho chạy nền mỗi khi đăng nhập:'],
+        ['p', '**Bản chạy độc lập** (không cần Python): giải nén `lustra-model-server-<hệ điều hành>-<kiến trúc>-cpu_v<phiên bản>` (tải ở trang Releases) vào một thư mục rồi chạy file `lustra-model-server` trong đó. Cho chạy nền mỗi khi đăng nhập:'],
         ['ul', [
           'Linux: chép thư mục vào `~/.local/share/lustra-model-server`, rồi dùng file `lustra-model-server-bundle.service` đi kèm (lệnh ở đầu file).',
           'macOS: trong thư mục đó chạy `sh install-model-server.sh`; gỡ bằng `sh install-model-server.sh --uninstall`.',

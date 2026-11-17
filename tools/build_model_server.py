@@ -15,7 +15,8 @@ NVIDIA GPUs: run the server from a Python environment with onnxruntime-gpu[cuda,
 A private build environment (uv, or venv + pip) gets numpy, the onnxruntime variant, Pillow, requests, yarl and PyInstaller,
 so the result does not depend on the calling interpreter (a CUDA onnxruntime-gpu there would add its CUDA provider libraries,
 useless without the NVIDIA pip packages).
-Output: DIR/lustra-model-server/ and DIR/lustra-model-server-<version>-<os>-<arch>-<variant>.tar.gz (.zip on Windows)
+Output: DIR/lustra-model-server/ and DIR/lustra-model-server-<os>-<arch>-<variant>_v<version>.tar.gz (.zip on Windows), named
+like the app installers of a release (lustra-linux-x86_64_v<version>.AppImage)
 """
 #########################################
 #
@@ -211,7 +212,7 @@ def main() -> int:
         print(f'{bundle}: {_size(bundle) / 1048576:.1f} MiB')
         if not args.no_smoke:
             smoke(bundle)
-        base = out / f'{NAME}-{_version()}-{_platform_tag()}-{args.variant}'
+        base = out / f'{NAME}-{_platform_tag()}-{args.variant}_v{_version()}'
         archive = shutil.make_archive(str(base), 'zip' if sys.platform == 'win32' else 'gztar', root_dir=out, base_dir=NAME)
         print(f'{archive}: {pathlib.Path(archive).stat().st_size / 1048576:.1f} MiB')
     finally:
