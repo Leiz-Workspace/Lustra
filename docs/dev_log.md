@@ -584,16 +584,24 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Workflow Tests chạy lần đầu trên GitHub:** đạt trên Linux và Windows (Python 3.11–3.15), lỗi trên macOS ở hai test: `/var` → `/private/var` trong `test_dlindex`, OpenSSL của máy macOS không có `pkeyutl -rawin` (chỉ OpenSSL 3 có) trong `test_catalog_trust`. Sửa test (so `realpath`; bỏ qua khi `openssl pkeyutl -help` không có `-rawin`, lần sửa đầu chỉ nhận ra LibreSSL nên chưa đủ); `lustra/tests/` thêm vào danh sách không phát hành của `release.yml`.
 - **Tự kiểm trên CI:** `tools/check_selftest.py` đọc báo cáo self-test của app đã đóng gói. Chạy thử trên máy dev: AppImage và `.deb` (124 MB, gói `lustra-desktop`, mục `net`) build được, self-test của bản `linux-unpacked` đạt.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ab)
+### 7ad. README viết lại cho Lustra, tài liệu Ruxx chuyển vào docs, kiểm tra image trên ghcr — 2026-11-17
+- **README** (tiếng Anh, cùng bố cục với Mirrix): giới thiệu và tính năng, bảng Download theo tên file của release, ghi chú cài đặt (chưa ký số, AppArmor của `.deb`, thư mục dữ liệu), model server (bản chạy độc lập, Docker trên ghcr, GPU), dòng lệnh, phát triển, bố cục repo, nhánh và release, giấy phép kèm phần ủng hộ tác giả Ruxx. Ba ảnh chụp giao diện thật (`docs/images/`) chụp từ `mock.js` dưới xvfb bằng Electron của app (user agent bỏ `Electron/` để trang nạp mock; thumbnail là SVG trung tính, không có nội dung site).
+- **Tài liệu của Ruxx không bị bỏ:** phần cú pháp tag chuyển nguyên văn sang `docs/tag-syntax.md`; phần giao diện Tk, dùng từ dòng lệnh, build exe sang `docs/legacy-gui.md`. Đã kiểm hai điều README nói: `python -m lustra -module db -path … -- scenery sky -rating:e` được phân tích đúng (tag loại trừ sau `--`), và chạy không tham số thì mở giao diện Tk (`lustra_main`).
+- **Mục lục `docs/README.md`** chia lại theo sản phẩm / vận hành và phát hành / plan và báo cáo, thêm tài liệu mới.
+- **Image trên ghcr:** sau khi chủ repo báo đã đổi package sang công khai, kiểm từ máy không đăng nhập: registry vẫn từ chối cấp token kéo image (`authentication required`), trang package trả 404 và trang package của repo ghi 0 package công khai. Image chưa kéo được công khai lúc ghi mục này; `docs/operations.md` ghi cách đổi và cách kiểm.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7ad)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
+- Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker; README mới (7ad).
 - Cần người:
+  - chuyển package `lustra-model-server` trên ghcr sang công khai (lúc 7ad vẫn riêng tư), rồi kiểm bằng `docker pull` khi chưa đăng nhập;
   - gán tập vàng của model giới tính (≥ 3.000 post, hai người, κ ≥ 0,8; lệnh ở [operations.md](operations.md) mục 3g), rồi đo precision tầng 0 / tầng 1 (AC-G07, AC-G09, AC-G10) và đánh giá 300 clip (AC-G17);
   - tạo khoá ký catalog thật (`tools/sign_catalog.py genkey`, giữ khoá bí mật ngoài repo), đưa khoá công khai vào `lustra/safety_data/catalog_keys.json` và ký catalog từ xa: tới lúc đó mọi catalog từ xa bị từ chối;
   - chạy eval trình tạo với Claude thật (tốn phí, ~7 USD cho bộ 9 site theo ước tính; mục 3f);
   - danh sách R8 của danh sách chặn tên miền (nhà phát triển điền, có thể dạng `sha256:`).
 - Kỹ thuật:
-  - build và thử trên Windows / macOS: app, model server chạy độc lập (CPU, DirectML), script chạy nền; job CI `desktop` và `model-server` chạy khi push;
+  - thử trên máy Windows / macOS thật: app (CI đã self-test cả 6 nền tảng), model server chạy độc lập (CPU, DirectML), script chạy nền;
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn).
