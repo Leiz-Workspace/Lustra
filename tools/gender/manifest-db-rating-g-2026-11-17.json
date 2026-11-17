@@ -111,7 +111,43 @@
   }
  },
  "sparseShare": 0.2439,
- "dropped": [],
+ "dropped": [
+  {
+   "key": "db:9019708",
+   "reason": "modelGate",
+   "gateTag": "aged_down",
+   "at": "2026-11-17T15:22:50",
+   "by": "evaluate"
+  },
+  {
+   "key": "db:10453505",
+   "reason": "modelGate",
+   "gateTag": "aged_down",
+   "at": "2026-11-17T15:22:50",
+   "by": "evaluate"
+  },
+  {
+   "key": "db:7804235",
+   "reason": "modelGate",
+   "gateTag": "randoseru",
+   "at": "2026-11-17T15:22:50",
+   "by": "evaluate"
+  },
+  {
+   "key": "db:8263106",
+   "reason": "modelGate",
+   "gateTag": "child",
+   "at": "2026-11-17T15:22:50",
+   "by": "evaluate"
+  },
+  {
+   "key": "db:201251",
+   "reason": "modelGate",
+   "gateTag": "child",
+   "at": "2026-11-17T15:22:50",
+   "by": "evaluate"
+  }
+ ],
  "posts": [
   {
    "key": "db:356296",
@@ -2886,76 +2922,6 @@
    "stratum": "both"
   },
   {
-   "key": "db:9019708",
-   "site": "db",
-   "id": "9019708",
-   "md5": "0cbbfbad091a94e91e8edefa60fe8559",
-   "rating": "g",
-   "mediaKind": "image",
-   "width": 1820,
-   "height": 2570,
-   "urls": {
-    "preview": "https://cdn.donmai.us/180x180/0c/bb/0cbbfbad091a94e91e8edefa60fe8559.jpg",
-    "sample": "https://cdn.donmai.us/sample/0c/bb/sample-0cbbfbad091a94e91e8edefa60fe8559.jpg",
-    "file": "https://cdn.donmai.us/original/0c/bb/0cbbfbad091a94e91e8edefa60fe8559.jpg"
-   },
-   "tags": [
-    "!?",
-    "1boy",
-    "1girl",
-    "absurdres",
-    "athrun_zala",
-    "bathrobe",
-    "blonde_hair",
-    "blue_hair",
-    "blush",
-    "cagalli_yula_athha",
-    "comic",
-    "commentary_request",
-    "couple",
-    "green_eyes",
-    "gundam",
-    "gundam_seed",
-    "hetero",
-    "highres",
-    "indoors",
-    "on_bed",
-    "open_mouth",
-    "seiza",
-    "she_(morianosu)",
-    "short_hair",
-    "sitting",
-    "spoken_interrobang",
-    "yellow_eyes"
-   ],
-   "query": "hetero random:100 rating:g",
-   "postUrl": "https://danbooru.donmai.us/posts/9019708",
-   "tier0": {
-    "label": "both",
-    "conf": "high",
-    "flags": [],
-    "evidence": [
-     "1girl",
-     "1boy",
-     "hetero"
-    ],
-    "conflict": false,
-    "source": "tags"
-   },
-   "slices": {
-    "site": "db",
-    "style": [
-     "2d_anime"
-    ],
-    "edge": [],
-    "density": "full",
-    "media": "image",
-    "generalTags": 19,
-    "noGenderTag": false
-   },
-   "stratum": "both"
-  },
-  {
    "key": "db:9106183",
    "site": "db",
    "id": "9106183",
@@ -3709,89 +3675,6 @@
     "density": "full",
     "media": "image",
     "generalTags": 82,
-    "noGenderTag": false
-   },
-   "stratum": "both"
-  },
-  {
-   "key": "db:10453505",
-   "site": "db",
-   "id": "10453505",
-   "md5": "5d72a2bef4fee35cf6877a72688783e2",
-   "rating": "g",
-   "mediaKind": "image",
-   "width": 2480,
-   "height": 3508,
-   "urls": {
-    "preview": "https://cdn.donmai.us/180x180/5d/72/5d72a2bef4fee35cf6877a72688783e2.jpg",
-    "sample": "https://cdn.donmai.us/sample/5d/72/sample-5d72a2bef4fee35cf6877a72688783e2.jpg",
-    "file": "https://cdn.donmai.us/original/5d/72/5d72a2bef4fee35cf6877a72688783e2.png"
-   },
-   "tags": [
-    "1boy",
-    "1girl",
-    "absurdres",
-    "arknights",
-    "black_hair",
-    "black_hairband",
-    "black_jacket",
-    "closed_eyes",
-    "coat",
-    "collared_shirt",
-    "commentary",
-    "doctor_(arknights)",
-    "elloy_(ajhz2533)",
-    "gloves",
-    "hairband",
-    "hand_grab",
-    "hetero",
-    "highres",
-    "holding_hands",
-    "hood",
-    "hood_up",
-    "jacket",
-    "kiss",
-    "kissing_head",
-    "leaning_back",
-    "leaning_forward",
-    "long_hair",
-    "long_sleeves",
-    "lying",
-    "medium_hair",
-    "monochrome",
-    "on_back",
-    "priestess_(arknights)",
-    "shirt",
-    "skirt",
-    "sweater",
-    "turtleneck",
-    "white_coat",
-    "white_sweater"
-   ],
-   "query": "hetero random:100 rating:g",
-   "postUrl": "https://danbooru.donmai.us/posts/10453505",
-   "tier0": {
-    "label": "both",
-    "conf": "high",
-    "flags": [],
-    "evidence": [
-     "1girl",
-     "1boy",
-     "hetero"
-    ],
-    "conflict": false,
-    "source": "tags"
-   },
-   "slices": {
-    "site": "db",
-    "style": [
-     "2d_anime",
-     "monochrome"
-    ],
-    "edge": [],
-    "density": "full",
-    "media": "image",
-    "generalTags": 32,
     "noGenderTag": false
    },
    "stratum": "both"
@@ -11488,83 +11371,6 @@
    "stratum": "only_female"
   },
   {
-   "key": "db:7804235",
-   "site": "db",
-   "id": "7804235",
-   "md5": "cbffa5407b9f5764cb1941c0874d9be9",
-   "rating": "g",
-   "mediaKind": "image",
-   "width": 1885,
-   "height": 2314,
-   "urls": {
-    "preview": "https://cdn.donmai.us/180x180/cb/ff/cbffa5407b9f5764cb1941c0874d9be9.jpg",
-    "sample": "https://cdn.donmai.us/sample/cb/ff/sample-cbffa5407b9f5764cb1941c0874d9be9.jpg",
-    "file": "https://cdn.donmai.us/original/cb/ff/cbffa5407b9f5764cb1941c0874d9be9.png"
-   },
-   "tags": [
-    "1girl",
-    "backpack",
-    "bag",
-    "beach",
-    "blonde_hair",
-    "boots",
-    "brown_bag",
-    "brown_boots",
-    "brown_gloves",
-    "cloud",
-    "commentary_request",
-    "dodoco_(genshin_impact)",
-    "dress",
-    "feathers",
-    "genshin_impact",
-    "gloves",
-    "hat",
-    "hat_feather",
-    "highres",
-    "hilichurl_(genshin_impact)",
-    "klee_(genshin_impact)",
-    "ocean",
-    "open_mouth",
-    "outstretched_arms",
-    "pointy_ears",
-    "pom_pom_(clothes)",
-    "pome0826",
-    "red_dress",
-    "red_eyes",
-    "red_hat",
-    "side_ahoge",
-    "sky",
-    "spread_arms",
-    "teeth",
-    "upper_teeth_only",
-    "white_feathers"
-   ],
-   "query": "1girl random:100 rating:g",
-   "postUrl": "https://danbooru.donmai.us/posts/7804235",
-   "tier0": {
-    "label": "only_female",
-    "conf": "high",
-    "flags": [],
-    "evidence": [
-     "1girl"
-    ],
-    "conflict": false,
-    "source": "tags"
-   },
-   "slices": {
-    "site": "db",
-    "style": [
-     "2d_anime"
-    ],
-    "edge": [],
-    "density": "full",
-    "media": "image",
-    "generalTags": 29,
-    "noGenderTag": false
-   },
-   "stratum": "only_female"
-  },
-  {
    "key": "db:7828679",
    "site": "db",
    "id": "7828679",
@@ -15594,84 +15400,6 @@
    "stratum": "only_male"
   },
   {
-   "key": "db:8263106",
-   "site": "db",
-   "id": "8263106",
-   "md5": "6f711278a70be23cfc9870a37589a0d7",
-   "rating": "g",
-   "mediaKind": "image",
-   "width": 800,
-   "height": 1000,
-   "urls": {
-    "preview": "https://cdn.donmai.us/180x180/6f/71/6f711278a70be23cfc9870a37589a0d7.jpg",
-    "sample": "https://cdn.donmai.us/original/6f/71/6f711278a70be23cfc9870a37589a0d7.jpg",
-    "file": "https://cdn.donmai.us/original/6f/71/6f711278a70be23cfc9870a37589a0d7.jpg"
-   },
-   "tags": [
-    "1boy",
-    "^_^",
-    "barefoot",
-    "black_hair",
-    "blush_stickers",
-    "closed_eyes",
-    "collared_shirt",
-    "commentary",
-    "deformed",
-    "eyelashes",
-    "eyeshadow",
-    "fetal_position",
-    "full_body",
-    "hakutaku_(hoozuki_no_reitetsu)",
-    "headscarf",
-    "high_collar",
-    "hoozuki_no_reitetsu",
-    "lab_coat",
-    "long_sleeves",
-    "lying",
-    "makeup",
-    "male_focus",
-    "on_side",
-    "pants",
-    "parted_lips",
-    "rabbit",
-    "red_eyeshadow",
-    "sevten_(ashkeroth)",
-    "shirt",
-    "short_hair",
-    "sleeping",
-    "solo",
-    "white_background",
-    "white_headscarf",
-    "white_pants",
-    "white_shirt"
-   ],
-   "query": "1boy random:100 rating:g",
-   "postUrl": "https://danbooru.donmai.us/posts/8263106",
-   "tier0": {
-    "label": "only_male",
-    "conf": "high",
-    "flags": [],
-    "evidence": [
-     "1boy",
-     "male_focus"
-    ],
-    "conflict": false,
-    "source": "tags"
-   },
-   "slices": {
-    "site": "db",
-    "style": [
-     "2d_anime"
-    ],
-    "edge": [],
-    "density": "full",
-    "media": "image",
-    "generalTags": 32,
-    "noGenderTag": false
-   },
-   "stratum": "only_male"
-  },
-  {
    "key": "db:8273114",
    "site": "db",
    "id": "8273114",
@@ -18782,60 +18510,6 @@
     "density": "sparse",
     "media": "image",
     "generalTags": 7,
-    "noGenderTag": false
-   },
-   "stratum": "sparse"
-  },
-  {
-   "key": "db:201251",
-   "site": "db",
-   "id": "201251",
-   "md5": "0b2cad556dc45b1885802fc4fbb02579",
-   "rating": "g",
-   "mediaKind": "image",
-   "width": 560,
-   "height": 450,
-   "urls": {
-    "preview": "https://cdn.donmai.us/180x180/0b/2c/0b2cad556dc45b1885802fc4fbb02579.jpg",
-    "sample": "https://cdn.donmai.us/original/0b/2c/0b2cad556dc45b1885802fc4fbb02579.jpg",
-    "file": "https://cdn.donmai.us/original/0b/2c/0b2cad556dc45b1885802fc4fbb02579.jpg"
-   },
-   "tags": [
-    "1girl",
-    "clannad",
-    "gofu",
-    "greyscale",
-    "hair_bobbles",
-    "hair_ornament",
-    "ichinose_kotomi",
-    "monochrome",
-    "sketch",
-    "solo",
-    "traditional_media",
-    "two_side_up"
-   ],
-   "query": "gentags:<=8 random:100 rating:g",
-   "postUrl": "https://danbooru.donmai.us/posts/201251",
-   "tier0": {
-    "label": "only_female",
-    "conf": "high",
-    "flags": [],
-    "evidence": [
-     "1girl"
-    ],
-    "conflict": false,
-    "source": "tags"
-   },
-   "slices": {
-    "site": "db",
-    "style": [
-     "2d_anime",
-     "monochrome"
-    ],
-    "edge": [],
-    "density": "sparse",
-    "media": "image",
-    "generalTags": 8,
     "noGenderTag": false
    },
    "stratum": "sparse"
