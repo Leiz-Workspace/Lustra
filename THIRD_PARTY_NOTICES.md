@@ -43,4 +43,5 @@ built program under its own license).
 | requests, yarl and their dependencies (urllib3, idna, certifi, charset-normalizer, multidict, propcache) | see above |
 | Python (CPython runtime in the bundle) | PSF-2.0 |
 | onnxruntime-directml (Windows `directml` bundle) | MIT; `DirectML.dll` inside it comes with Microsoft's own license terms, shipped in the package |
+| FFmpeg (Debian `ffmpeg` package, Docker image only: frames of videos for `/v1/frames`) | GPL-2.0-or-later (Debian build; FFmpeg itself LGPL-2.1-or-later); run as a separate program, never linked; sources: Debian |
 | NVIDIA CUDA / cuDNN libraries (`nvidia-*` pip packages, GPU installs only) | NVIDIA software license agreements; installed from PyPI by the user into a Python environment or a locally built GPU Docker image; Lustra publishes no bundle or image containing them |

@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 import pathlib
+import shutil
 import sys
 import time
 from abc import abstractmethod
@@ -44,9 +45,9 @@ from .defines import (
     ThreadInterruptException,
 )
 from .dlindex import IndexWriter, indexing_enabled, record_for
-from .download_base import DownloaderBase
+from .download_base import GENDER_MISMATCH_DIR, DownloaderBase
 from .file_parser import prepare_item_infos_dict
-from .gender import GENDER_LABELS, GenderConf
+from .gender import GENDER_LABELS, GenderConf, decide, infer_from_tags, rules_for_module
 from .gui_defines import NEWLINE, OPTION_CMD_APIKEY_CMD, UNDERSCORE
 from .logger import trace
 from .module import ProcModule
@@ -253,6 +254,8 @@ class Downloader(DownloaderBase):
                 except OSError:
                     thread_exit('ERROR: Unable to create subfolder!')
 
+        # -gender_verify_media checks files of this run only: a file already there is the user's
+        verify = self.gender_verify_media and self.download_mode == DownloadModes.FULL and not (dest.is_file() and dest.stat().st_size > 0)
         try:
             result = self.download_file(link, item_id, dest, self.download_mode, self.preserve_date)
         except DownloadInterruptException:
@@ -262,6 +265,10 @@ class Downloader(DownloaderBase):
             result.result_str = f'{result.result_str}done ({result.file_size / Mem.MB:.2f} Mb)'
             with self.item_lock:
                 self.success_count += 1
+            if verify:
+                trace(result.result_str, True)
+                result.result_str = ''
+                dest = self._verify_media_file(item_id, dest)
             if self._index_on and self.download_mode == DownloadModes.FULL:
                 self._index_file(item_id, dest, result.file_size)
         else:
@@ -274,7 +281,85 @@ class Downloader(DownloaderBase):
                 self.fail_count += 1
                 self.failed_items.append(item_id)
 
-        trace(result.result_str, True)
+        if result.result_str:
+            trace(result.result_str, True)
+
+    # threaded
+    def _stop_run(self, message: str) -> None:
+        """A download thread found an error that stops the whole run (thread_exit alone only fails the item there)"""
+        with self._thread_exception_lock:
+            if not self.launch_error:
+                self.launch_error = message
+        if self.my_root_thread is not None:
+            self.my_root_thread.killed = True
+        thread_exit(message)
+
+    # threaded
+    def _verify_media_file(self, item_id: str, path: pathlib.Path) -> pathlib.Path:
+        """-gender_verify_media (plan §3.5, P4): a downloaded video / animated picture whose tags were not conclusive (its label
+        came from the image model, before the download from one frame) is looked at on up to 8 frames; a file whose verdict does
+        not pass the gender filter is moved into <destination>/_gender_mismatch/, never deleted. Returns where the file is"""
+        from .gender_model import MediaUnreadable, ModelUnavailable, combine, needs_model, verdict_for_media
+        from .media_frames import file_media_kind
+        if item_id not in self.gender_results:  # parent posts are not gender filtered
+            return path
+        info = self._item_info_for(item_id)
+        tag_res = infer_from_tags(info.tags.split(' ') if info.tags else [], rules_for_module(self._get_module_abbr()))
+        if not needs_model(tag_res, self.gender_min_conf):  # tags confident enough decide alone (plan §3.4)
+            return path
+        try:
+            kind = file_media_kind(path)
+        except OSError:
+            return path
+        if not kind:
+            return path
+        try:
+            verdict, frames = verdict_for_media(self, path)
+        except ModelUnavailable as err:
+            self._stop_run(f'Error: \'-gender_verify_media\': {err}')
+            return path
+        except (MediaUnreadable, OSError) as err:
+            trace(f'Warning (W2): {item_id}: {kind} not checked on its frames ({str(err)[:160]}), kept', True)
+            return path
+        with self.item_lock:
+            self.gender_verified_count += 1
+        if verdict.safety_tag:  # model safety gate on a frame (plan §4.2)
+            why = f'model safety gate on a frame: {verdict.safety_tag}'
+        else:
+            res = combine(tag_res, verdict.result, self.gender_min_conf)
+            keep, eff = decide(res, self.gender_select, self.gender_min_conf, self.gender_strict)
+            self.gender_results[item_id] = res
+            if keep:
+                if self.verbose:
+                    trace(f'{item_id}: {kind} checked on {frames:d} frame(s): {eff}', True)
+                return path
+            why = f'{eff} on {frames:d} frame(s)'
+        moved = self._move_to_mismatch(path)
+        if moved != path:
+            with self.item_lock:
+                self.gender_mismatch_count += 1
+            trace(f'{item_id}: {kind} does not match the gender filter ({why}), moved to {GENDER_MISMATCH_DIR}/', True)
+        return moved
+
+    # threaded
+    def _move_to_mismatch(self, path: pathlib.Path) -> pathlib.Path:
+        folder = self.dest_base_s / GENDER_MISMATCH_DIR
+        target = folder / path.name
+        try:
+            with self.item_lock:
+                folder.mkdir(parents=True, exist_ok=True)
+                for n in range(1, 1000):  # a file already there is never overwritten
+                    if not target.exists():
+                        break
+                    target = folder / f'{path.stem}_{n:d}{path.suffix}'
+            try:
+                os.replace(path, target)
+            except OSError:  # another file system
+                shutil.move(path, target)
+            return target
+        except OSError as err:
+            trace(f'Warning (W3): unable to move {path.name} into {GENDER_MISMATCH_DIR}/ ({err.strerror or err}), kept', True)
+            return path
 
     # threaded
     def _index_file(self, item_id: str, dest: pathlib.Path, size: int) -> None:
@@ -1125,6 +1210,7 @@ class Downloader(DownloaderBase):
         self.gender_model_token = getattr(args, 'gender_model_token', None) or self.gender_model_token
         self.gender_min_conf = GenderConf.parse(args.gender_conf) if getattr(args, 'gender_conf', None) else self.gender_min_conf
         self.gender_strict = getattr(args, 'gender_strict', False) or self.gender_strict
+        self.gender_verify_media = getattr(args, 'gender_verify_media', False) or self.gender_verify_media
         self.tags_limit = getattr(args, 'tags_limit', None) or self.tags_limit
         self.skip_known = getattr(args, 'skip_known', False) or self.skip_known
         self.tags_str_arr[:] = [] if self.get_max_id else convert_taglist(args.tags)
@@ -1190,8 +1276,34 @@ class Downloader(DownloaderBase):
             if not self._has_capability(ModuleCaps.GENDER_TAGS):
                 trace(f'Warning (W2): \'{abbr}\' module has no measured gender tag rules, most posts will be labeled \'unknown\'')
                 ret = True
+        if self.gender_verify_media:
+            ret |= self._check_verify_media()
         ret |= self._solve_module_specific_conflicts()
         return ret
+
+    def _check_verify_media(self) -> bool:
+        """-gender_verify_media conflicts: needs the gender filter with the model and files to look at. A model server that
+        cannot read frames (older than /v1/frames) stops the run; no video decoder there is a warning (videos are kept unchecked)"""
+        if not self.gender_select or self.gender_mode != 'model':
+            trace('Warning (W1): \'-gender_verify_media\' needs \'-gender\' (or \'-gender_exclude\') with \'-gender_mode model\'. Ignored!')
+            self.gender_verify_media = False
+            return True
+        if self.download_mode != DownloadModes.FULL:
+            trace(f'Warning (W1): \'-gender_verify_media\' checks downloaded files, not with download mode \'{self.download_mode}\'. Ignored!')
+            self.gender_verify_media = False
+            return True
+        from .gender_model import ModelUnavailable, media_support
+        try:
+            media = media_support(self.gender_model_url, self.gender_model_token)
+        except ModelUnavailable as err:
+            thread_exit(f'Error: \'-gender_verify_media\': {err}')
+            return False
+        missing = [what for what, key in (('videos', 'video'), ('animated pictures', 'animated')) if not media.get(key)]
+        if missing:
+            trace(f'Warning (W2): \'-gender_verify_media\': the model cannot read {" or ".join(missing)} here '
+                  '(ffmpeg on PATH or PyAV for videos, Pillow for animated pictures), those files are kept unchecked')
+            return True
+        return False
 
     def _extract_cur_task_infos(self, parents: MutableSet[str]) -> None:
         def put_info(item_info: ItemInfo) -> None:

@@ -1,6 +1,6 @@
 # Plan — Gán nhãn & lọc theo giới tính nhân vật (`only_female` / `only_male` / `both`)
 
-> 2026-11-16 · Trạng thái (cập nhật 2026-11-17): tầng 0 và tầng 1 phương án A0 **đã làm**, xem [Trạng thái triển khai](#trạng-thái-triển-khai). User story: US-21 ([user-stories.md](../user-stories.md)). Liên quan: [search-engine.md](search-engine.md) (Giai đoạn 3).
+> 2026-11-16 · Trạng thái (cập nhật 2026-11-17): tầng 0, tầng 1 phương án A0 và P4 (video nhiều khung, trừ đánh giá 300 clip) **đã làm**, xem [Trạng thái triển khai](#trạng-thái-triển-khai). User story: US-21 ([user-stories.md](../user-stories.md)). Liên quan: [search-engine.md](search-engine.md) (Giai đoạn 3).
 > Mục tiêu: người dùng chọn "chỉ nữ", "chỉ nam" hoặc "cả hai" và Lustra tự loại post không khớp **trước khi tải**.
 > Hướng đi gồm hai tầng:
 > - **Tầng 0** suy nhãn từ tag sẵn có. Không cần ML, không tải ảnh, ra mắt được ngay.
@@ -32,8 +32,14 @@
   - Thư mục `data_dir()/models/wd-vit-tagger-v3/` (biến `LUSTRA_GENDER_MODEL_DIR` để trỏ chỗ khác), tải thẳng từ Hugging Face, không có catalog model (§5.4) và chưa có rollback.
   - Ảnh: `sample_url` khi là ảnh (~850 px, tốt hơn nhiều so với thumbnail 150–180 px), nếu không thì thumbnail; không đọc cache thumbnail của Electron. Cache kết quả `cache/gender_model.sqlite`, khoá `<module>:<post id>` + id model.
   - RPC đặt tên `gender.model*`; không có `gender.classify` chạy nền: preview gọi model đồng bộ cho tối đa 40 post / trang.
-  - Video: chỉ ảnh poster (độ tin cậy tối đa medium); P4 chưa làm.
-- Còn lại của tầng 1: tập vàng và đo precision / thiên lệch (P1, §3.7), head A1 / phương án B, int8, catalog model, DirectML / CoreML.
+  - Video: trước khi tải chỉ ảnh poster (độ tin cậy tối đa medium); xem nhiều khung sau khi tải là P4, xem mục P4 bên dưới.
+- **P4 video nhiều khung đã làm (2026-11-17, dev log mục "Xem lại video / ảnh động sau khi tải")**: `-gender_verify_media` (app: ô "Kiểm tra video sau khi tải" trong bộ lọc, `download.gender.verifyMedia`), `POST /v1/frames` của model server, `lustra/media_frames.py` (ffmpeg / PyAV cho video, Pillow cho GIF / APNG / WebP), `classify_frames` gộp theo §3.5. File không khớp bộ lọc được chuyển vào `_gender_mismatch/`, không xoá (AC-G16: test tự động, chạy thật trên media tổng hợp với model thật). **Khác plan**:
+  - Khung được đọc ở model server (hoặc model trong tiến trình), không ở client: lõi của app không có Pillow / ffmpeg. Client chỉ nhận ra video / ảnh động qua các byte đầu rồi gửi cả file (≤ 200 MB).
+  - Chưa có tập vàng nên ngưỡng §3.5 không chọn theo precision: t_hi = 0,35 (ngưỡng tag của một ảnh), t_lo = 0,2. Thuộc tính là từng tag của bộ luật `db` (không phải hai đầu ra F / M): nhãn chỉ giữ khi mọi tổ hợp tag luật chưa rõ cho cùng nhãn, nên một khung có nam (hay một tag nam ở vùng 0,2–0,35) đủ làm clip thành `unknown`.
+  - Chỉ file của post mà tag chưa đủ kết luận (`needs_model`) mới được xem lại: tag đủ tin cậy vẫn thắng như §3.4. File đã có trước lượt tải và post của task parent không bị đụng tới.
+  - Safety gate trên một khung cũng chuyển file vào `_gender_mismatch/` (không xoá: file nằm trong thư mục người dùng, gate có ngưỡng thấp nên có chặn nhầm).
+  - **Chưa làm**: đánh giá trên 300 clip gán tay (AC-G17), cần người gán nhãn; badge riêng cho kết quả nhiều khung trong app (card job chỉ có số file đã chuyển).
+- Còn lại của tầng 1: tập vàng và đo precision / thiên lệch (P1, §3.7), head A1 / phương án B, int8, catalog model, DirectML / CoreML, đánh giá video (AC-G17).
 - **Bổ sung 2026-11-17 (dev log 7s)**: chế độ loại bỏ: `-gender_exclude` ở lõi / CLI, nút gạt Giữ / Loại bỏ trong app.
 - **P0 đã làm (2026-11-16)**: `lustra/gender.py`, `lustra/gender_rules/{db,rx,en,gelbooru_generic}.json`, `lustra/safety.py`, hai filter trong `_process_tags`, CLI `-gender/-gender_conf/-gender_strict/-gender_mode`, RPC `search.preview` (`gender`, `excludedBy`, `genderStats`, `blockedCount`), IPC (`genderFiltered`, `blocked`, `genderStats`), UI (chip, badge, thống kê, lightbox, card job), manifest `genderRules`/`safetyTags`, `tools/gender_coverage.py`, test `lustra/tests/test_gender.py`.
 - **Khác plan**: không chuẩn hoá qua `all_tag_aliases.json`. File đó là alias dùng để đặt tên file (ví dụ `male` → `1+boys`), dùng để suy nhãn sẽ sai. Mỗi bộ luật mang khoá `aliases` riêng (rx: `hetero`, `hetero_sex` → `straight`). Chưa có `-dump_gender` (câu hỏi mở §8.5).

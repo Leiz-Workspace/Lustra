@@ -16,7 +16,7 @@
     appearance: { theme: 'ember', icon: 'full-mask-orange', background: { mode: 'icon', image: '', blur: 4, opacity: 0.9, dim: 0.18 } },
     search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {}, filtersOpen: true },
     download: { path: '/home/user/Downloads/Lustra', threads: 4, images: true, videos: true, videoFormat: '', lowRes: false, prefix: true,
-      gender: { select: [], conf: 'medium', strict: false },
+      gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags', verifyMedia: false },
       appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },
@@ -268,11 +268,14 @@
         }
         const id = `job-${Date.now()}-${jobs.size}`;
         const job = { id, module: q.module, tags: q.tags, label: q.label || '', dest: q.path, status: 'running', createdAt: Date.now(), startedAt: Date.now(), progress: { stateName: 'SEARCHING' }, logTail: ['mock job started'] };
+        // -gender_verify_media (model on, 'Tag + model', box ticked): about 1 file in 8 is a video checked again, 1 in 32 moved aside
+        const verify = settings.genderModel.enabled && q.gender?.mode === 'model' && q.gender?.verifyMedia === true && (q.gender.select || []).length > 0;
         jobs.set(id, job);
         let n = 0;
         const t = setInterval(() => {
           n += 4;
           job.progress = n < 12 ? { stateName: 'SCANNING_PAGES1', total: 96 } : { stateName: 'DOWNLOADING', totalAll: 96, processed: Math.min(96, n), success: Math.min(96, n), bytes: n * 1.7e6 };
+          if (verify && n >= 12) Object.assign(job.progress, { genderVerified: Math.floor(Math.min(96, n) / 8), genderMismatch: Math.floor(Math.min(96, n) / 32) });
           if (n >= 96) { job.status = 'done'; job.progress.stateName = 'DONE'; clearInterval(t); }
           emit('jobs:update', { ...job });
         }, 300);

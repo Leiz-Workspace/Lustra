@@ -41,6 +41,9 @@ re_preview_url_attr = re.compile(r'\bpreview_url="([^"]+)"')
 re_sample_url_attr = re.compile(r'\bsample_url="([^"]+)"')
 re_img_src = re.compile(r'<img[^>]+?src="([^"]+)"')
 
+GENDER_MISMATCH_DIR = '_gender_mismatch'
+'''-gender_verify_media: subfolder of the destination for downloaded files that do not match the gender filter'''
+
 ST1 = TypeVar('ST1')
 ST2 = TypeVar('ST2')
 
@@ -127,6 +130,11 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.gender_results: dict[str, GenderResult] = {}
         self.gender_stats: dict[str, int] = {}
         self.gender_filtered_count: int = 0
+        self.gender_verify_media: bool = False
+        '''-gender_verify_media: downloaded videos / animated pictures labeled by the model are checked on several frames'''
+        self.gender_verified_count: int = 0
+        self.gender_mismatch_count: int = 0
+        '''files moved into GENDER_MISMATCH_DIR by -gender_verify_media'''
         self.safety_blocked_count: int = 0
         '''positive tags which could not be sent to website (tags limit) and are checked locally'''
         self.known_parents: set[str] = set()
@@ -628,6 +636,8 @@ class DownloaderBase(ThreadedHtmlWorker):
 
         folders = [self.dest_base_s] + [self.dest_base_s / sub for sub in dict.fromkeys((self.subfolder_img, self.subfolder_vid,
                                                                                          self.subfolder_aud)) if sub]
+        if self.gender_verify_media:  # files already checked and moved aside are not downloaded and checked again
+            folders.append(self.dest_base_s / GENDER_MISMATCH_DIR)
         abbrp = self._get_module_abbr_p()
         re_owned_file = re.compile(fr'^(?:{re.escape(abbrp)})?(\d+)[._]')
         existing_ids: set[str] = set()
