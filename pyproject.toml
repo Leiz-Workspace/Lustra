@@ -56,6 +56,9 @@ static-analysis = [
 pyinstaller = [
     'pyinstaller>=6.21.0',
 ]
+ai = [
+    'anthropic>=2.9',  # AI mode of the extension generator (lustra.aigen); the template mode needs nothing extra
+]
 
 [project.urls]
 Upstream = 'https://github.com/trickerer01/Ruxx'

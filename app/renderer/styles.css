@@ -376,6 +376,33 @@ body.safe .card:hover img { filter: none; }
 .ext p { margin: 0; color: var(--muted); font-size: 12.5px; flex: 1; }
 .ext .row { justify-content: flex-end; }
 
+/* ----- extension generator ----- */
+.gen-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0 8px; }
+.gen-form #gen-url { flex: 1 1 320px; min-width: 220px; }
+.gen-opts { gap: 14px; }
+.gen-short { width: 150px; }
+.gen-hint { margin: 8px 0 0; font-size: 12px; }
+.gen-run { margin-top: 12px; }
+.gen-status { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.gen-status .muted { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+.gen-status .dot.busy { animation: gen-pulse 1.2s ease-in-out infinite; }
+@keyframes gen-pulse { 50% { opacity: .35; } }
+.gen-log { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: var(--radius-sm); background: rgba(0, 0, 0, .25); font-size: 11.5px; white-space: pre-wrap; }
+.gen-log .model { color: var(--meta); }
+.gen-log .err { color: var(--danger); }
+.gen-drafts { display: flex; flex-direction: column; gap: 8px; }
+.gen-draft { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); }
+.gen-draft-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gen-draft-head .muted { font-size: 12px; }
+.gen-draft p { margin: 0; color: var(--muted); font-size: 12.5px; white-space: pre-wrap; }
+.gen-draft .row { justify-content: flex-end; }
+.tagpill.err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.tagpill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.gen-detail { max-width: 760px; }
+.gen-detail pre { white-space: pre-wrap; margin: 0 0 12px; font: inherit; }
+.gen-detail .table td:first-child { white-space: nowrap; }
+.gen-detail .table td { vertical-align: top; word-break: break-word; }
+
 /* ----- settings ----- */
 .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: var(--gap); align-items: start; }
 .settings .panel { margin: 0; }

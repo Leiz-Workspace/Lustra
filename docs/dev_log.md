@@ -242,6 +242,34 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Self-test Electron `LUSTRA_SELFTEST_ICONS=1` với HOME tạm: chưa có launcher → `missing`; tạo → đổi icon → `updated` (icon cũ bị xoá, có marker và `StartupWMClass=lustra`); chọn lại icon cũ → `unchanged`; launcher lạ → `foreign`, không bị sửa. HOME thật không bị ghi gì.
 - **Chưa kiểm:** shortcut trên Windows thật, dock trên macOS thật, dock GNOME Wayland thật (cần mở lại app).
 
+### 7m. Tạo extension cho site mới: skill + AI trong app — 2026-11-17
+- **Yêu cầu (mục 5, đã chốt):** đưa link một site, AI phân tích rồi sinh `manifest.json` và `downloader.py`, chạy thử và tạo thành một extension mới cho app. Kết quả là bản nháp; người dùng tự cài, **không tự cài**.
+- **Đã làm:**
+  - `lustra/extgen`: công cụ dùng chung, thực thi rule bằng code.
+  - `lustra/aigen`: worker gọi Claude qua `client.beta.messages.stream`:
+    - model `claude-opus-5-5`, effort `high`, prompt caching, `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`);
+    - tool `strict`, riêng `write_file` dùng `eager_input_streaming`;
+    - xử lý `refusal` / `max_tokens` / JSON hỏng;
+    - giới hạn 30 lượt, 2 USD, 5 lần chạy thử;
+    - kiểm tra độc lập sau khi model nói xong.
+  - Chế độ "Không dùng AI": dùng template cho Gelbooru / Danbooru.
+  - Electron: wizard, khoá Claude chỉ lưu mã hoá và chỉ ghi, xuất zip, cài có xác nhận. Skill Claude Code `new-site-extension`.
+  - Lõi đóng băng có thêm lệnh `aigen` / `extgen` / `sandbox`. Sandbox có watchdog và luồng đọc stderr (an toàn trên Windows).
+  - Id / abbr tránh extension đã có; bản tóm tắt nhắc khi site đã có extension.
+- **Kiểm chứng:**
+  - `lustra.tests.test_extgen`: 20 test offline, gồm:
+    - bộ lọc request: robots, host, https, user:pass, budget, redirect sang host lạ, Cloudflare challenge;
+    - kiểm tra tĩnh (template đạt; 11 mẫu code xấu bị chặn); sandbox chặn socket / ghi file / subprocess;
+    - phiên template đạt và không cài gì; phiên AI giả (sửa lỗi `import os`, chặn ghi ngoài bản nháp, lịch sử chỉ nối thêm);
+    - refusal, hết ngân sách, nói "ready" khi chưa chạy thử → `failed`, `max_tokens`, huỷ;
+    - SDK `anthropic` 2.9.0 thật nối vào server SSE cục bộ (header beta, `fallbacks`, `output_config`, `cache_control`, cờ tool, tool_result, usage);
+    - giao thức worker, và khoá không xuất hiện trong output.
+  - Toàn bộ suite: 164 test + `tests.py` đạt; ruff sạch; `node --check` sạch.
+  - Chạy thật chế độ không AI: safebooru.org (7 request, đạt 14/14 kiểm tra) và xbooru.com bằng lõi đóng băng (đạt 14/14). Bản build PyInstaller kèm `anthropic` nặng 51,3 MiB, qua smoke test `server` / `cli` / `aigen`.
+  - Self-test Electron (`LUSTRA_SELFTEST_QUICK=1`): bước `generator` đạt. Khoá được mã hoá, không có trong `settings.json` dạng chữ thường và không lộ ra renderer. Phiên `http://` bị từ chối R10. Bản nháp chưa đạt không cài được. Cài cần xác nhận: từ chối → không cài; đồng ý → extension xuất hiện trong `ext.list`. Gỡ và xoá bản nháp sạch sẽ.
+  - UI mock: wizard, tiến độ, chi phí, chi tiết, khoá trong Cài đặt; không có lỗi console.
+- **Chưa kiểm:** gọi Claude thật (máy dev không có `ANTHROPIC_API_KEY`); site cần viết code tay (không phải Gelbooru / Danbooru) ở chế độ AI; Windows / macOS thật.
+
 ### 8. Việc tiếp theo
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đóng gói app (electron-builder + Python embed hoặc PyInstaller sidecar).

@@ -170,6 +170,31 @@
           <div><button class="btn ghost" id="ext-zip">Cài từ file .zip…</button><button class="btn ghost" id="ext-refresh">Làm mới</button></div></div>
         <p class="muted">Mỗi website là một extension. <b>Rule34</b> và <b>Danbooru</b> có sẵn; các site khác cài thêm khi cần. Extension là code Python chạy trên máy bạn: chỉ cài từ nguồn tin cậy.</p>
         <div class="ext-grid" id="ext-grid"></div>
+        <div class="glass panel gen" id="gen-panel">
+          <h2>Tạo extension cho site mới</h2>
+          <p class="muted">Dán link một website: Lustra đọc robots.txt và API của site, sinh <code>manifest.json</code> + <code>downloader.py</code>, chạy thử trong sandbox rồi lưu thành <b>bản nháp</b>. Bản nháp không tự cài: bạn xem lại rồi bấm <b>Cài vào app</b>, hoặc xuất file .zip.</p>
+          <div class="gen-form">
+            <input type="text" id="gen-url" placeholder="https://booru.example.com" spellcheck="false" autocomplete="off">
+            <div class="seg" id="gen-mode"><button data-mode="ai">Dùng AI (Claude)</button><button data-mode="template">Không dùng AI</button></div>
+            <button class="btn primary" id="gen-start">Tạo bản nháp</button>
+            <button class="btn ghost danger" id="gen-cancel" hidden>Huỷ</button>
+          </div>
+          <div class="row gen-opts">
+            <label class="check"><input type="checkbox" id="gen-m-image" checked> ảnh</label>
+            <label class="check"><input type="checkbox" id="gen-m-video" checked> video</label>
+            <label class="check"><input type="checkbox" id="gen-m-audio"> âm thanh</label>
+            <label class="check">Tag chạy thử <input type="text" id="gen-query" class="gen-short" placeholder="tự chọn" spellcheck="false"></label>
+            <label class="check" id="gen-budget-wrap">Chi phí tối đa <input type="number" id="gen-budget" class="tiny" min="0.1" max="20" step="0.1"> USD</label>
+          </div>
+          <p class="muted gen-hint" id="gen-hint"></p>
+          <div class="notice" id="gen-note" hidden></div>
+          <div class="gen-run" id="gen-run" hidden>
+            <div class="gen-status"><span class="dot" id="gen-dot"></span><b id="gen-phase"></b><span class="muted" id="gen-usage"></span></div>
+            <pre class="gen-log" id="gen-log"></pre>
+          </div>
+          <h3>Bản nháp</h3>
+          <div class="gen-drafts" id="gen-drafts"></div>
+        </div>
         <div class="glass panel">
           <h2>Catalog từ xa</h2>
           <div class="row"><input type="text" id="catalog-url" placeholder="https://…/index.json"><button class="btn" id="catalog-load">Tải danh sách</button></div>
@@ -231,6 +256,16 @@
             <h3>Giới hạn tag của tài khoản</h3>
             <p class="muted">Số tag tối đa mỗi lần tìm mà tài khoản của bạn được phép (0 = mặc định của module). Danbooru: 2 (thường), 6 (Gold), 12 (Platinum).</p>
             <div id="tag-limits"></div>
+          </div>
+
+          <div class="glass panel">
+            <h2>AI tạo extension</h2>
+            <p class="muted" id="ai-key-note"></p>
+            <div class="setting key-row"><span>Khoá Claude API <span id="ai-key-state"></span></span>
+              <span class="row"><input type="password" id="ai-key" autocomplete="off" spellcheck="false"><button class="btn sm" id="ai-key-save">Lưu</button><button class="btn sm ghost danger" id="ai-key-clear" hidden>Xoá khoá</button></span></div>
+            <div class="setting"><span>Model</span><select id="ai-model"><option value="claude-opus-5-5">Claude Opus 5.5 (mặc định)</option><option value="claude-sonnet-5-5">Claude Sonnet 5.5 (rẻ hơn)</option></select></div>
+            <div class="setting"><span>Chi phí tối đa mỗi lần tạo (USD)</span><input type="number" id="ai-budget" class="tiny" min="0.1" max="20" step="0.1"></div>
+            <p class="muted">Link site, phản hồi của site và kết quả chạy thử được gửi tới Claude API (Anthropic) để phân tích. Mọi yêu cầu tới website vẫn đi từ máy bạn qua bộ lọc của Lustra (robots.txt, giới hạn tốc độ, chỉ đúng site đó).</p>
           </div>
 
           <div class="glass panel">

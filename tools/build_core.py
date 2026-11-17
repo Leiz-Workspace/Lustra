@@ -17,6 +17,7 @@ tag lists (2tags/, large: ~124 MB for all modules; the app can download fresh li
 
 import argparse
 import ast
+import importlib.util
 import json
 import os
 import pathlib
@@ -43,9 +44,10 @@ def _lustra_modules() -> list[str]:
     """Core modules importable without tkinter (GUI modules fail to import and are left out). Catalog extensions are loaded from
     files at run time and import lustra modules the core itself may not use, so every importable module is bundled"""
     names = []
-    for pkg in ('lustra', 'lustra/vcs'):
+    for pkg in ('lustra', 'lustra/vcs', 'lustra/extgen', 'lustra/aigen'):
         for p in sorted((ROOT / pkg).glob('*.py')):
-            if p.stem not in ('__init__', '__main__', 'frozen_main'):
+            # sandbox_boot runs on import (added below without the import probe); extgen.__main__ is the extgen command
+            if p.stem not in ('__init__', '__main__', 'frozen_main', 'sandbox_boot') or (pkg, p.stem) == ('lustra/extgen', '__main__'):
                 names.append(f'{pkg.replace("/", ".")}.{p.stem}')
     probe = (
         'import importlib, json, sys\n'
@@ -84,6 +86,14 @@ def _stage_data(stage: pathlib.Path, tags: str) -> list[tuple[pathlib.Path, str]
         (ROOT / 'lustra' / 'builtin_ext', 'lustra/builtin_ext'),
         (ROOT / 'lustra' / 'gender_rules', 'lustra/gender_rules'),
     ]
+    # lustra.aigen reads real sources as references for the model (lustra/aigen/tools.py: REF_FILES)
+    sys.path.insert(0, str(ROOT))
+    from lustra.aigen.tools import REF_FILES
+    refs = stage / 'aigen_refs'
+    for rel in REF_FILES:
+        (refs / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, refs / rel)
+    data.append((refs, 'aigen_refs'))
     catalog = stage / 'extensions'
     shutil.copytree(ROOT / 'extensions', catalog, ignore=ignore)
     data.append((catalog, 'extensions'))
@@ -126,6 +136,11 @@ def _smoke_test(exe: pathlib.Path) -> None:
         if r.returncode != 0 or '-module' not in r.stdout:
             raise SystemExit(f'smoke test failed: cli --help exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
         print('smoke test: cli ok')
+        r = subprocess.run((str(exe), 'aigen'), input='{"cmd":"start","url":"http://example.com/","mode":"template"}\n', env=env,
+                           capture_output=True, text=True, encoding='utf-8', timeout=120)
+        if '"R10"' not in r.stdout:
+            raise SystemExit(f'smoke test failed: aigen exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
+        print('smoke test: aigen ok')
 
 
 def build(out_dir: pathlib.Path, tags: str, smoke: bool) -> pathlib.Path:
@@ -145,7 +160,11 @@ def build(out_dir: pathlib.Path, tags: str, smoke: bool) -> pathlib.Path:
             '--collect-data', 'fake_useragent',
             '--hidden-import', 'socks', '--hidden-import', 'urllib3.contrib.socks',
         ]
-        for name in (*_lustra_modules(), *_extension_imports()):
+        if importlib.util.find_spec('anthropic') is not None:  # optional: the AI mode of the extension generator
+            cmd += ['--collect-submodules', 'anthropic']
+        else:
+            print('note: the anthropic package is not installed: the bundled core will offer only the template mode of the generator')
+        for name in (*_lustra_modules(), 'lustra.extgen.sandbox_boot', *_extension_imports()):
             cmd += ['--hidden-import', name]
         for name in EXCLUDED_MODULES:
             cmd += ['--exclude-module', name]

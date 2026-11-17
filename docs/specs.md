@@ -31,6 +31,7 @@ Ngoài phạm vi:
 | F-14 | Giới hạn 2 tag của Danbooru: metatag miễn phí (`rating:`, `id:`, `date:`, `score:`, `status:`, `parent:`) không bị tính. Tag dương vượt giới hạn được kiểm tra cục bộ (tag hiếm nhất theo danh sách tag được gửi lên server); tag phủ định vượt giới hạn chuyển thành nhóm loại trừ cục bộ |
 | F-15 | Nhận diện trang bot challenge (`cf-mitigated: challenge`): dừng ngay, không retry, báo hướng dẫn |
 | F-16 | Lọc theo giới tính nhân vật, tầng 0 (chỉ dựa vào tag): `-gender only_female,only_male,both,none,unknown`, `-gender_conf low\|medium\|high` (mặc định medium), `-gender_strict` (futa/trap/mơ hồ không tính là only_*). `-gender_mode model` chưa có (P3). Bộ luật theo site nằm ở `lustra/gender_rules/*.json`; extension có thể tự mang bộ luật riêng |
+| F-18 | Tạo extension cho site mới, ra **bản nháp, không tự cài** (Extensions → "Tạo extension cho site mới"):<br>• Nhập link https và loại media. Có 2 chế độ: **Dùng AI** (Claude, cần khoá API) và **Không dùng AI** (chỉ site Gelbooru 0.2 DAPI / Danbooru, dùng template có sẵn, miễn phí).<br>• Một phiên: khảo sát robots.txt, nhận diện engine → tạo `manifest.json` / `downloader.py` / `specs.md` → kiểm tra tĩnh → chạy thử trong sandbox (ghi fixture, chỉ lấy link file, không tải file) → kiểm tra độc lập offline. Kết quả nằm ở `<data>/extgen/drafts/<phiên>/` kèm `report.json`.<br>• Trên bản nháp, người dùng có thể: xem chi tiết, mở thư mục, xuất .zip (kèm sha256), hoặc bấm **Cài vào app…**. Nút cài chỉ có với bản nháp đạt; khi bấm, main kiểm tra lại offline, đóng gói rồi hỏi bằng hộp thoại của hệ điều hành.<br>• Giới hạn mỗi phiên: chi phí tối đa (mặc định 2 USD, tối đa 20), 30 lượt model, 5 lần chạy thử, 60 request tới site, 1 request/giây.<br>• Id / abbr không trùng extension đã biết. Nếu site đã có extension, bản tóm tắt nói rõ.<br>• Rule R1–R13: [plan](plans/site-extension-skill-and-ai-generator.md) Phần C |
 | F-17 | Danh sách chặn an toàn (tag gợi ý trẻ vị thành niên, `lustra/safety.py`): **chỉ chạy khi bật bộ lọc giới tính** (quyết định 2026-11-16); khi đang lọc thì không tắt được; chạy cho mọi task kể cả task parent; post bị chặn không xuất hiện trong preview (kể cả thumbnail). Extension chỉ được thêm tag (`safetyTags`) |
 
 ## 3. Yêu cầu phi chức năng
@@ -97,6 +98,27 @@ Notification từ sidecar: `ready` (giống `app.info`), `log {text, scope?}`, `
   - Resume bằng Range/If-Range; 400/401/403/404/405/410/451 không retry; 429/503 theo `Retry-After`, mọi thread cùng chờ.
   - Sau 3 lần bot challenge liên tiếp thì không tải tiếp các file còn lại.
 
+## 5b. Worker tạo extension (`python -m lustra.aigen.worker`, lõi đóng băng: `lustra-core aigen`)
+- Mỗi tiến trình chạy một phiên. Main sinh tiến trình, không truyền tham số dòng lệnh.
+- stdin, mỗi dòng một JSON:
+  - dòng đầu: `{"cmd":"start","url","media":[…],"mode":"ai"|"template","model":"claude-opus-5-5"|"claude-sonnet-5-5","maxUsd","maxTurns","query","apiKey"}`;
+  - về sau: `{"cmd":"cancel"}`. Đóng stdin cũng tính là huỷ.
+  - Khoá API **chỉ** đi qua stdin, không nằm trong argv, biến môi trường, file hay event. Worker xoá `ANTHROPIC_API_KEY` khỏi môi trường của chính nó.
+- stdout chỉ gồm các dòng `@@GEN {"type": …}`; mọi output khác đi ra stderr. Các loại:
+  - `start {session,url,mode,model}`;
+  - `phase {tool,label,state: writing|running,detail}`;
+  - `log {text,source?: model,tool?,error?}`;
+  - `usage {usd,maxUsd,turns,input,output,cacheRead,cacheWrite,requests}`;
+  - `done {session,status,summary,ruleIds,draftDir,extId,usd,report}`.
+- `status` nhận một trong các giá trị `ready`, `failed`, `refused`, `cancelled`, `error`. Exit code: `0` khi ready, `1` khi failed / refused / cancelled, `2` khi error.
+- Lời gọi Claude:
+  - `client.beta.messages.stream`, model `claude-opus-5-5` (mặc định), `max_tokens` 64000, `output_config.effort = "high"`; adaptive thinking là mặc định nên không gửi tham số `thinking`.
+  - Prompt caching: `cache_control` ở system và ở cấp request (tự động).
+  - Fallback khi model từ chối: `fallbacks: "default"` với beta `server-side-fallback-2026-07-01`.
+  - Tool: 9 tool phía client, `strict` cho mọi tool trừ `write_file` (`eager_input_streaming`, input được kiểm tra thủ công). `tool_choice` để mặc định (auto).
+  - Phản hồi `refusal` → `refused`; `max_tokens` giữa chừng một tool → tool đó không chạy; JSON tool không parse được → gửi lại lượt đó (tối đa 2 lần).
+- Hai lệnh dùng chung thư viện `lustra.extgen`: `python -m lustra.extgen survey | fetch | new | record | check | pack` (skill Claude Code dùng). Kết quả là JSON. Exit code: `0` ok, `1` có kiểm tra không đạt, `2` bị từ chối hoặc lỗi.
+
 ## 6. Manifest extension
 Schema: [`schemas/extension-manifest.schema.json`](schemas/extension-manifest.schema.json). Ràng buộc chính:
 - `id` trùng tên thư mục;
@@ -132,9 +154,10 @@ Sanity check: nếu số tag lấy được < 50% file hiện có, hoặc lần 
   "connection": { "proxy": "", "ignoreProxy": false, "proxyNoDownload": false, "timeout": 0, "retries": 0, "headers": {}, "cookies": {} },
   "tags": { "autoUpdate": false, "autoUpdateDays": 7, "lastAutoUpdate": {} },
   "advanced": { "pythonPath": "", "verbose": false, "catalogUrl": "" },
-  "secrets": { "<abbr>": { "enc": "<base64 safeStorage>" } }
+  "ai": { "model": "claude-opus-5-5|claude-sonnet-5-5", "maxUsd": 2 },
+  "secrets": { "<abbr>": { "enc": "<base64 safeStorage>" }, "@anthropic": { "enc": "<base64 safeStorage>" } }  // khoá Claude: chỉ dạng mã hoá
 }
 ```
 
 ## 9. Thư mục dữ liệu
-`LUSTRA_DATA_DIR`, hoặc mặc định: `~/.config/Lustra` (Linux), `%APPDATA%\Lustra` (Windows), `~/Library/Application Support/Lustra` (macOS). Đây cũng là `userData` của Electron. Bên trong gồm: `settings.json`, `extensions/`, `tags/`, `backgrounds/`, `icons/`, `cache/thumbs/`.
+`LUSTRA_DATA_DIR`, hoặc mặc định: `~/.config/Lustra` (Linux), `%APPDATA%\Lustra` (Windows), `~/Library/Application Support/Lustra` (macOS). Đây cũng là `userData` của Electron. Bên trong gồm: `settings.json`, `extensions/`, `tags/`, `backgrounds/`, `icons/`, `cache/thumbs/`, `extgen/drafts/<phiên>/` (bản nháp extension: `report.json` và `<id>/` gồm manifest, downloader, specs, tests/fixtures).
