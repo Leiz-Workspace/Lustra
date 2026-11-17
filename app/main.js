@@ -66,7 +66,9 @@ const DEFAULT_SETTINGS = {
   },
   download: {
     path: path.join(os.homedir(), 'Downloads', 'Lustra'), threads: 4, images: true, videos: true, audio: true, videoFormat: '',
-    gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags' }, // op 'exclude': the picked labels are dropped; mode 'model': image model
+    // op 'exclude': the picked labels are dropped; mode 'model': image model; verifyMedia: videos / animated pictures labeled by the
+    // model are checked again on several frames once downloaded (-gender_verify_media), a mismatch is moved to _gender_mismatch/
+    gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags', verifyMedia: false },
     lowRes: false, prefix: true, appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false,
     skipKnown: false, // -skip_known: skip posts found in the local download index (core lustra/dlindex.py)
     subfolderPerQuery: false, dumpTags: false, dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run',
@@ -1007,7 +1009,10 @@ function genderArgs(g) {
   if (exclude && sel.length === labels.length) return []; // dropping every label would leave nothing: not a filter
   const a = exclude ? ['-gender_exclude', sel.join(',')] : ['-gender', sel.join(',')];
   if (['low', 'medium', 'high'].includes(g.conf)) a.push('-gender_conf', g.conf);
-  if (g.mode === 'model' && genderModelOn()) a.push('-gender_mode', 'model', '-gender_model_url', settings.genderModel.url);
+  if (g.mode === 'model' && genderModelOn()) {
+    a.push('-gender_mode', 'model', '-gender_model_url', settings.genderModel.url);
+    if (g.verifyMedia === true) a.push('-gender_verify_media'); // checks downloaded files: only with the model
+  }
   if (g.strict) a.push('-gender_strict');
   return a;
 }
@@ -1656,8 +1661,9 @@ function registerIpc() {
   handle('search:preview', async (_e, q, page) => {
     const params = {
       module: asQuery(q).module, tags: q.tags, page: page || 0,
-      args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender),
-        ...(await genderSecretArgs(q.gender))],
+      // the preview downloads nothing: no media check (a model server older than /v1/frames would fail it)
+      args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module),
+        ...genderArgs(isPlainObject(q.gender) ? { ...q.gender, verifyMedia: false } : q.gender), ...(await genderSecretArgs(q.gender))],
     };
     if (Number.isInteger(q.pageSize) && q.pageSize > 0) params.pageSize = q.pageSize; // the sidecar caps it to the module page size
     return sidecar.call('search.preview', params, 180000);
@@ -2194,10 +2200,47 @@ async function selfTestContract(js, quick) {
   out.genderArgs.model = ga({ select: ['only_male'], op: 'exclude', mode: 'model' });
   settings.genderModel.enabled = false;
   out.genderArgs.modelOff = ga({ select: ['only_male'], op: 'exclude', mode: 'model' });
+  // -gender_verify_media: only with the model turned on and 'Tag + model' picked
+  out.genderArgs.verifyOff = ga({ select: ['only_female'], mode: 'model', verifyMedia: true });
+  settings.genderModel.enabled = true;
+  out.genderArgs.verify = ga({ select: ['only_female'], mode: 'model', verifyMedia: true });
+  out.genderArgs.verifyTags = ga({ select: ['only_female'], mode: 'tags', verifyMedia: true });
+  out.genderArgs.verifyNo = ga({ select: ['only_female'], mode: 'model', verifyMedia: false });
   settings.genderModel.enabled = wasOn;
   out.genderArgs.ok = out.genderArgs.keep === '-gender only_female,both' && out.genderArgs.exclude === '-gender_exclude only_male -gender_conf high'
     && out.genderArgs.all === '' && out.genderArgs.model === `-gender_exclude only_male -gender_mode model -gender_model_url ${settings.genderModel.url}`
-    && out.genderArgs.modelOff === '-gender_exclude only_male';
+    && out.genderArgs.modelOff === '-gender_exclude only_male'
+    && out.genderArgs.verify === `-gender only_female -gender_mode model -gender_model_url ${settings.genderModel.url} -gender_verify_media`
+    && out.genderArgs.verifyOff === '-gender only_female' && out.genderArgs.verifyTags === '-gender only_female'
+    && out.genderArgs.verifyNo === `-gender only_female -gender_mode model -gender_model_url ${settings.genderModel.url}`;
+  // the media check box: hidden while 'Tag + model' cannot be picked, disabled with 'Chỉ dựa vào tag', saved in download.gender
+  try {
+    const savedGender = structuredClone(settings.download.gender);
+    const ui = await js(`(() => {
+      const was = { on: S.settings.genderModel.enabled, g: { ...genderState() } };
+      const read = () => ({ hidden: $('#f-gender-verify-wrap').hidden, disabled: $('#f-gender-verify').disabled, checked: $('#f-gender-verify').checked });
+      S.settings.genderModel.enabled = false; S.settings.download.gender = { ...was.g, mode: 'tags', verifyMedia: false }; renderGenderFilter();
+      const off = read();
+      S.settings.genderModel.enabled = true; renderGenderFilter();
+      const tags = read();
+      S.settings.download.gender = { ...was.g, mode: 'model', verifyMedia: false }; renderGenderFilter();
+      const box = $('#f-gender-verify');
+      box.checked = true;
+      box.dispatchEvent(new Event('change'));
+      const model = read();
+      S.settings.genderModel.enabled = was.on; renderGenderFilter();
+      return { off, tags, model };
+    })()`);
+    await new Promise((r) => setTimeout(r, 300)); // the renderer saves through settings:set
+    ui.saved = settings.download.gender.verifyMedia === true && settings.download.gender.mode === 'model';
+    settings.download.gender = savedGender;
+    saveSettings();
+    await js(`(() => { S.settings.download.gender = ${JSON.stringify(savedGender)}; renderGenderFilter(); })()`);
+    out.genderVerifyUi = { ...ui, ok: ui.off.hidden && !ui.tags.hidden && ui.tags.disabled && !ui.model.hidden && !ui.model.disabled
+      && ui.model.checked && ui.saved };
+  } catch (e) {
+    out.genderVerifyUi = { ok: false, error: String(e.message || e) };
+  }
   // gender model server: status through main, the token never reaches the renderer, the core gets it as a secret argument
   try {
     const fakeToken = 'selftest-model-token-0123';

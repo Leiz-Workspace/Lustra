@@ -275,7 +275,7 @@ function renderModuleButton() {
 function genderState() {
   const g = S.settings?.download?.gender || {};
   return { select: Array.isArray(g.select) ? g.select : [], conf: g.conf || 'medium', strict: !!g.strict, op: g.op === 'exclude' ? 'exclude' : 'keep',
-    mode: g.mode === 'model' ? 'model' : 'tags' };
+    mode: g.mode === 'model' ? 'model' : 'tags', verifyMedia: g.verifyMedia === true };
 }
 function renderGenderFilter() {
   if (!S.settings) return;
@@ -286,6 +286,14 @@ function renderGenderFilter() {
   $('#f-gender-conf').value = g.conf;
   $('#f-gender-mode').value = g.mode;
   $('#f-gender-strict').checked = g.strict;
+  // -gender_verify_media: shown while 'Tag + model' can be picked, usable with it picked
+  const verify = $('#f-gender-verify');
+  $('#f-gender-verify-wrap').hidden = !gmOn();
+  verify.checked = g.verifyMedia;
+  verify.disabled = g.mode !== 'model';
+  $('#f-gender-verify-wrap').title = g.mode === 'model'
+    ? 'Sau khi tải, video và ảnh động mà tag chưa đủ kết luận được model xem lại trên tối đa 8 khung hình. File không khớp bộ lọc được chuyển vào thư mục con _gender_mismatch của thư mục lưu (không xoá). Model server cần ffmpeg để đọc video.'
+    : 'Chỉ dùng được với cách xác định "Tag + model (ảnh)"';
   const hint = [];
   if (g.select.length) hint.push(`${ex ? 'loại' : 'giữ'}: ${genderPicked(g)}`);
   if (g.select.length) hint.push('danh sách chặn an toàn cũng được áp dụng');
@@ -337,6 +345,7 @@ $('#f-gender-mode').addEventListener('change', (e) => {
   saveGender({ mode: e.target.value });
 });
 $('#f-gender-strict').addEventListener('change', (e) => saveGender({ strict: e.target.checked }));
+$('#f-gender-verify').addEventListener('change', (e) => saveGender({ verifyMedia: e.target.checked }));
 function renderModuleMenu() {
   const menu = $('#module-menu');
   const installed = S.modules.filter((m) => m.installed);
@@ -864,6 +873,7 @@ function filtersSummary() {
     o.limit ? `tối đa ${o.limit} post` : '',
     `${o.threads} luồng`,
     g.select.length ? `giới tính ${g.op === 'exclude' ? 'bỏ' : 'giữ'}: ${genderPicked(g)}` : '',
+    g.select.length && g.mode === 'model' && g.verifyMedia && gmOn() ? 'xem lại video sau khi tải' : '',
     o.skipKnown ? 'bỏ file đã tải' : '',
     o.lowRes ? 'ảnh nhẹ' : '',
   ].filter(Boolean);
@@ -1269,6 +1279,7 @@ function createJobView(id) {
     scan: h('span', { class: 'hint', title: 'Vẫn đang quét thêm trang kết quả, tổng số file có thể còn tăng' }, 'đang quét thêm…'),
     counts: h('span'), cf: h('span', { class: 'danger' }, 'Bị bot challenge chặn'), error: h('span', { class: 'danger' }),
     partial: h('span', { class: 'warn' }, 'Xong, một số file lỗi'), gender: h('span'), blocked: h('span'), known: h('span'),
+    mismatch: h('span', { class: 'warn', title: 'Video / ảnh động được model xem lại sau khi tải mà không khớp bộ lọc giới tính: đã chuyển vào thư mục con _gender_mismatch, không xoá' }),
     speed: h('span', { class: 'mono' }), eta: h('span'),
     dest: h('span', { class: 'mono' }),
   };
@@ -1319,6 +1330,7 @@ function updateJobView(v, j) {
   slot(m.gender, p.genderFiltered ? `Lọc giới tính: ${nf.format(p.genderFiltered)}` : null);
   slot(m.blocked, p.blocked ? `Chặn (an toàn): ${nf.format(p.blocked)}` : null);
   slot(m.known, p.known ? `Bỏ qua (đã tải): ${nf.format(p.known)}` : null);
+  slot(m.mismatch, p.genderMismatch ? `Không khớp, đã chuyển: ${nf.format(p.genderMismatch)} / ${nf.format(p.genderVerified || 0)} file đã xem lại` : null);
   const transfer = jobTransfer(v, j, p);
   slot(m.speed, transfer.speed);
   slot(m.eta, transfer.eta);
@@ -2406,6 +2418,7 @@ async function refreshGenderModel() {
   opt.disabled = !gmOn();
   opt.textContent = gmOn() ? 'Tag + model (ảnh)' : 'Tag + model (bật model trong Cài đặt)';
   if (!gmOn() && genderState().mode === 'model') saveGender({ mode: 'tags' });
+  else renderGenderFilter(); // the media check box follows the model switch
   if (!url) { S.genderModel = null; renderGenderModelStatus(null); return; }
   setText($('#gm-status'), 'đang kiểm tra…');
   try {
