@@ -13,6 +13,8 @@ The model runs on a GPU when onnxruntime has a GPU provider (onnxruntime-gpu: CU
 (LUSTRA_GENDER_MODEL_DEVICE: auto, cpu, gpu). lustra/model_hw.py tells which, the app warns before turning the model on.
 Images are fetched by the downloader like thumbnails and never stored; the model server decodes them in memory. Only the
 verdict (label, confidence, evidence) is cached per post. The model is a download of ~380 MB (pinned revision, sha256 checked).
+-gender_verify_media (plan §3.5, P4): a downloaded video / animated picture is sent to the model server (POST /v1/frames), which
+tags up to 8 of its frames (lustra/media_frames.py); classify_frames turns them into one verdict.
 
   python -m lustra.gender_model status | install | remove | classify FILE...
 """
@@ -25,6 +27,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -39,7 +42,8 @@ from .gender import GenderConf, GenderLabel, GenderResult, infer_from_tags, rule
 from .model_hw import GPU_PROVIDERS, hardware_check
 from .safety import blocked_tag
 
-__all__ = ('MODEL_ID', 'BadImage', 'GenderTagger', 'ModelUnavailable', 'combine', 'install_model', 'model_status', 'remove_model')
+__all__ = ('MODEL_ID', 'BadImage', 'GenderTagger', 'MediaUnreadable', 'ModelUnavailable', 'classify_frames', 'combine', 'install_model',
+           'media_support', 'model_status', 'remove_model', 'verdict_for_media')
 
 MODEL_ID = 'wd-vit-tagger-v3'
 MODEL_REPO = 'SmilingWolf/wd-vit-tagger-v3'
@@ -57,6 +61,12 @@ SAFETY_THRESHOLD = 0.15
 '''minor coded tag at this probability or above: the post is blocked (low on purpose, plan §4.2)'''
 REAL_THRESHOLD = 0.5
 '''photo_(medium) / realistic: the model is meant for drawings and 3D renders, a photo stays 'unknown' (plan §4.3)'''
+CLIP_T_HI = GENERAL_THRESHOLD
+'''a tag is seen on a frame of a clip at this probability or above (as on a picture)'''
+CLIP_T_LO = 0.2
+'''a tag is absent from a clip when every frame has it at this probability or below; in between it is undecided (plan §3.5)'''
+CLIP_UNDECIDED_MAX = 8
+'''undecided rule tags of a clip are tried in every combination; more of them: the clip is unknown'''
 GENDER_TAGS_PREFIX_MAX = 64
 ENV_MODEL_DIR = 'LUSTRA_GENDER_MODEL_DIR'
 '''tests / developers / model server: a folder holding model.onnx + selected_tags.csv'''
@@ -70,6 +80,8 @@ DEVICES = ('auto', 'cpu', 'gpu')
 API_DEFAULT_URL = 'http://127.0.0.1:8765'
 API_VERSION = 'v1'
 API_TIMEOUT = 60
+FRAMES_TIMEOUT = 300
+'''seconds to wait for the answer of /v1/frames (frames read by ffmpeg, then tagged one by one)'''
 API_LAN_SUFFIXES = ('.local', '.lan', '.home.arpa', '.internal')
 
 
@@ -79,6 +91,11 @@ class ModelUnavailable(Exception):
 
 class BadImage(ValueError):
     """this picture only: not an image, or one Pillow cannot decode (the model itself is fine)"""
+
+
+class MediaUnreadable(ValueError):
+    """this video / animated picture only (-gender_verify_media): too large, unreadable, or no decoder for it on the model
+    server. The file stays where it is, not checked"""
 
 
 def model_dir() -> pathlib.Path:
@@ -250,24 +267,108 @@ class GenderTagger:
         out = self.session.run(None, {self.input: x})[0][0]
         return {self.names[i]: float(out[i]) for i in self.general if out[i] >= 0.05}
 
+    def predict_frames(self, path: pathlib.Path) -> list[dict[str, float]]:
+        """predict() on up to 8 frames of a video / animated picture (lustra/media_frames.py: ffmpeg or PyAV, Pillow)"""
+        from .media_frames import MEDIA_MAX_BYTES, MediaError, extract_frames
+        if path.stat().st_size > MEDIA_MAX_BYTES:
+            raise MediaUnreadable(f'larger than {MEDIA_MAX_BYTES // 1048576} MB')
+        try:
+            clip = extract_frames(path)
+        except MediaError as err:
+            raise MediaUnreadable(str(err)) from None
+        out = []
+        for _, image in clip.frames:
+            try:
+                out.append(self.predict(image))
+            except BadImage:
+                continue
+        return out
+
 
 def classify(probs: dict[str, float], *, video: bool = False) -> ModelVerdict:
     """Predicted tags -> label through the tier 0 rules ('db': the tagger vocabulary is danbooru's).
     Confidence: the weakest probability among the tags the label rests on (>= 0.85 high, >= 0.6 medium), a video thumbnail
     is one frame of the video: at most medium (plan §3.5)"""
     safety = next((t for t, p in sorted(probs.items(), key=lambda x: -x[1]) if p >= SAFETY_THRESHOLD and blocked_tag([t])), '')
-    real = max(probs.get('photo_(medium)', 0.0), probs.get('realistic', 0.0) if probs.get('photo_(medium)', 0.0) > 0.2 else 0.0) >= REAL_THRESHOLD
+    real = _is_photo(probs)
     tags = [t for t, p in probs.items() if p >= GENERAL_THRESHOLD]
     res = infer_from_tags(tags, rules_for_module('db'))
     if real or res.label == GenderLabel.UNKNOWN or res.conf is None:
         return ModelVerdict(GenderResult(GenderLabel.UNKNOWN, None, res.flags, (), False, 'model'), safety, real)
     weakest = min((probs.get(t, 0.0) for t in res.evidence), default=0.0)
-    conf = GenderConf.HIGH if weakest >= 0.85 else GenderConf.MEDIUM if weakest >= 0.6 else GenderConf.LOW
+    conf = _conf_of(weakest)
     conf = min(conf, res.conf)
     if video:
         conf = min(conf, GenderConf.MEDIUM)
     evidence = tuple(f'{t}~{probs.get(t, 0.0):.2f}' for t in res.evidence)[:8]
     return ModelVerdict(GenderResult(res.label, conf, res.flags, evidence, res.conflict, 'model'), safety, False)
+
+
+def _is_photo(probs: dict[str, float]) -> bool:
+    photo = probs.get('photo_(medium)', 0.0)
+    return max(photo, probs.get('realistic', 0.0) if photo > 0.2 else 0.0) >= REAL_THRESHOLD
+
+
+def _conf_of(p: float) -> GenderConf:
+    return GenderConf.HIGH if p >= 0.85 else GenderConf.MEDIUM if p >= 0.6 else GenderConf.LOW
+
+
+def _rule_tags(rules) -> frozenset[str]:
+    """every tag a ruleset reads (an undecided one of these can change a label)"""
+    out = set(rules.both | rules.exclusive_female | rules.exclusive_male | rules.exclusive_futa | rules.solo | rules.other
+              | rules.none | rules.male_bodypart) | set(rules.aliases)
+    for table in (rules.female, rules.male, rules.flags):
+        for tags in table.values():
+            out |= tags
+    return frozenset(out)
+
+
+def classify_frames(frames: list[dict[str, float]]) -> ModelVerdict:
+    """Predicted tags of several frames of one video / animated picture -> one verdict (plan §3.5). Per tag: present when at
+    least 2 frames have it at p >= CLIP_T_HI (1 frame for a clip of fewer than 3), absent when every frame has p <= CLIP_T_LO,
+    undecided otherwise. The present tags go through the tier 0 rules ('db') like the tags of a picture; the label holds only
+    when every combination of the undecided rule tags gives the same label, else unknown (both outputs must be decided, §3.4).
+    Flags of every combination are kept (strict mode). Confidence: the weakest evidence tag, at its probability on the frame
+    that makes it present (no cap: unlike a poster frame, the clip itself was looked at). Safety gate on every frame; a photo
+    on enough frames -> unknown"""
+    n = len(frames)
+    if not n:
+        return ModelVerdict(GenderResult(GenderLabel.UNKNOWN, None, frozenset(), (), False, 'model'))
+    need = 1 if n < 3 else 2
+    safety, best = '', 0.0
+    for probs in frames:
+        for t, p in probs.items():
+            if p >= SAFETY_THRESHOLD and p > best and blocked_tag([t]):
+                safety, best = t, p
+    real = sum(1 for probs in frames if _is_photo(probs)) >= need
+    rules = rules_for_module('db')
+    relevant = _rule_tags(rules)
+    present: dict[str, tuple[float, int]] = {}
+    undecided: list[str] = []
+    for tag in sorted(set().union(*frames)):
+        ps = sorted((probs.get(tag, 0.0) for probs in frames), reverse=True)
+        seen = sum(1 for p in ps if p >= CLIP_T_HI)
+        if seen >= need:
+            present[tag] = (ps[need - 1], seen)
+        elif ps[0] > CLIP_T_LO and tag in relevant:
+            undecided.append(tag)
+    res = infer_from_tags(present, rules)
+
+    def unknown(flags: frozenset[str]) -> ModelVerdict:
+        return ModelVerdict(GenderResult(GenderLabel.UNKNOWN, None, flags, (), False, 'model'), safety, real)
+    if real or res.label == GenderLabel.UNKNOWN or res.conf is None or len(undecided) > CLIP_UNDECIDED_MAX:
+        return unknown(res.flags)
+    conf, flags = res.conf, set(res.flags)
+    for k in range(1, len(undecided) + 1):
+        for combo in itertools.combinations(undecided, k):
+            alt = infer_from_tags([*present, *combo], rules)
+            if alt.label != res.label or alt.conf is None:
+                return unknown(res.flags | alt.flags)
+            conf, flags = min(conf, alt.conf), flags | alt.flags
+    weakest = min((present[t][0] for t in res.evidence if t in present), default=0.0)
+    conf = min(conf, _conf_of(weakest))
+    evidence = tuple(f'{t}~{present[t][0]:.2f} ({present[t][1]}/{n})' for t in res.evidence if t in present)[:8]
+    return ModelVerdict(GenderResult(res.label, conf, frozenset(flags), evidence, res.conflict, 'model'), safety, False)
 
 
 def combine(tag_res: GenderResult, model: GenderResult, min_conf: GenderConf) -> GenderResult:
@@ -431,13 +532,17 @@ class ModelApi:
             return True
 
     @staticmethod
-    def _fail(r) -> None:
+    def _reason(r) -> str:
+        try:
+            return str(r.json().get('error') or '')[:200]
+        except Exception:
+            return ''
+
+    @classmethod
+    def _fail(cls, r) -> None:
         if r.status_code == 401:
             raise ModelUnavailable('model server: wrong or missing token')
-        try:
-            why = str(r.json().get('error') or '')[:200]
-        except Exception:
-            why = ''
+        why = cls._reason(r)
         raise ModelUnavailable(f'model server: HTTP {r.status_code}{f": {why}" if why else ""}')
 
     def status(self, timeout: float = 5) -> dict:
@@ -454,6 +559,8 @@ class ModelApi:
         self.info = {k: info[k] for k in self.INFO_KEYS if isinstance(info.get(k), str | int | bool)}
         if isinstance(info.get('hardware'), dict):
             self.info['hardware'] = info['hardware']
+        if isinstance(media := info.get('media'), dict):  # decoders of /v1/frames (servers before -gender_verify_media: none)
+            self.info['media'] = {k: str(media.get(k) or '')[:80] for k in ('video', 'animated')}
         self.info['ms'] = int((time.monotonic() - t0) * 1000)
         return self.info
 
@@ -478,9 +585,45 @@ class ModelApi:
         if r.status_code != 200:
             self._fail(r)
         try:
-            tags = r.json()['tags']
-            assert isinstance(tags, dict) and len(tags) <= self.TAGS_MAX
-            return {str(t)[:128]: min(max(float(p), 0.0), 1.0) for t, p in tags.items() if isinstance(p, int | float)}
+            return self._tags(r.json()['tags'])
+        except Exception:
+            raise ModelUnavailable('model server: malformed answer') from None
+
+    def _tags(self, tags) -> dict[str, float]:
+        assert isinstance(tags, dict) and len(tags) <= self.TAGS_MAX
+        return {str(t)[:128]: min(max(float(p), 0.0), 1.0) for t, p in tags.items() if isinstance(p, int | float)}
+
+    FRAMES_MAX = 64
+
+    def predict_frames(self, path: pathlib.Path) -> list[dict[str, float]]:
+        """Tags of up to 8 frames of a video / animated picture file (POST /v1/frames, the file is streamed). MediaUnreadable:
+        this file only (too large, unreadable, no decoder for it on the server); ModelUnavailable: the server cannot be used"""
+        import requests
+
+        from .media_frames import MEDIA_MAX_BYTES
+        if path.stat().st_size > MEDIA_MAX_BYTES:
+            raise MediaUnreadable(f'larger than {MEDIA_MAX_BYTES // 1048576} MB')
+        for attempt in range(3):
+            try:
+                with path.open('rb') as f:  # opened again for a retry: the body is read from the file each time
+                    r = self._session.post(f'{self.url}/{API_VERSION}/frames', data=f, allow_redirects=False,
+                                           headers={'Content-Type': 'application/octet-stream'}, timeout=(10, FRAMES_TIMEOUT))
+            except requests.RequestException as err:
+                raise ModelUnavailable(f'model server {self.url} is not reachable ({type(err).__name__})') from None
+            if r.status_code == 503 and attempt < 2 and self._busy(r):
+                time.sleep(1 + attempt)
+                continue
+            break
+        if r.status_code == 404:
+            raise ModelUnavailable('model server: no /v1/frames, update it to check videos (-gender_verify_media)')
+        if r.status_code in (400, 413, 415):
+            raise MediaUnreadable(self._reason(r) or f'HTTP {r.status_code}')
+        if r.status_code != 200:
+            self._fail(r)
+        try:
+            frames = r.json()['frames']
+            assert isinstance(frames, list) and len(frames) <= self.FRAMES_MAX
+            return [self._tags(fr['tags']) for fr in frames]
         except Exception:
             raise ModelUnavailable('model server: malformed answer') from None
 
@@ -530,6 +673,30 @@ def api_status(url: str, token: str = '', action: str = '') -> dict:
 
 def classify_image(image: bytes, *, video: bool = False) -> ModelVerdict:
     return classify(GenderTagger.get().predict(image), video=video)
+
+
+def media_support(api_url: str = '', token: str = '') -> dict[str, str]:
+    """what -gender_verify_media can read with the model of this process: {'video': decoder or '', 'animated': decoder or ''}.
+    ModelUnavailable: the model cannot be used, or the model server predates /v1/frames"""
+    tagger = backend(api_url, token)
+    if isinstance(tagger, ModelApi):
+        media = tagger.info.get('media')
+        if not isinstance(media, dict):
+            raise ModelUnavailable(f'model server {tagger.url} cannot check videos (no /v1/frames): update it')
+        return dict(media)
+    from .media_frames import decoders
+    return decoders()
+
+
+def verdict_for_media(dwn, path: pathlib.Path) -> tuple[ModelVerdict, int]:
+    """-gender_verify_media: verdict of a downloaded video / animated picture on several of its frames, and how many frames were
+    tagged. Not cached: a file is checked once, right after its download. MediaUnreadable: this file only; ModelUnavailable:
+    the model cannot be used (the job stops)"""
+    tagger = backend(getattr(dwn, 'gender_model_url', ''), getattr(dwn, 'gender_model_token', ''))
+    frames = tagger.predict_frames(path)
+    if not frames:
+        raise MediaUnreadable('no frame could be tagged')
+    return classify_frames(frames), len(frames)
 
 
 # ---------------- posts of a downloader (download pipeline and preview) ----------------
@@ -631,11 +798,18 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == 'remove':
         print(json.dumps(remove_model(), indent=1))
         return 0
-    if cmd == 'classify':
+    if cmd == 'classify':  # a video / animated picture: on its frames, like -gender_verify_media
+        from .media_frames import file_media_kind
         tagger = backend()  # LUSTRA_GENDER_MODEL_URL: through the model server
         for f in args[1:]:
-            v = classify(tagger.predict(pathlib.Path(f).read_bytes()), video=f.lower().endswith(('.mp4', '.webm')))
-            print(json.dumps({'file': f, **v.result.as_dict(), 'safety': v.safety_tag, 'real': v.real}, ensure_ascii=False))
+            frames = 0
+            if file_media_kind(pathlib.Path(f)):
+                probs = tagger.predict_frames(pathlib.Path(f))
+                v, frames = classify_frames(probs), len(probs)
+            else:
+                v = classify(tagger.predict(pathlib.Path(f).read_bytes()))
+            print(json.dumps({'file': f, **v.result.as_dict(), 'safety': v.safety_tag, 'real': v.real, 'frames': frames},
+                             ensure_ascii=False))
         return 0
     print(__doc__, file=sys.stderr)
     return 2
