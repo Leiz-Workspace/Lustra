@@ -640,6 +640,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 ### 7ah. Bản 2.0.3 — 2026-11-18
 - **Nội dung:** sửa index khi nhiều tiến trình cùng mở file mới (7ag); hộp "Giới thiệu", `help.py` và thông tin gói ghi công tác giả bản gốc (7af); thêm khoá công khai `keys/` (7ag).
 - **Phát hành:** version 2.0.3 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r3`), ghi chú `docs/releases/v2.0.3.md`; `develop` → `staging` (rc) → `production` qua PR. Đây cũng là lần đầu tag của GitHub kích hoạt `forgejo-release.yml` trên Forgejo: package generic và Debian, Release, image ký cosign.
+- **CI trên Forgejo sau khi merge PR #6** (run 3, push lên `develop`): 333 test offline đạt, kể cả test index nhiều tiến trình. Bước test cũ (`lustra/tests/tests.py`) lỗi `No module named 'tkinter'`: các test này import giao diện Tk, mà image Debian không có `python3-tk`, và `ci.yml` còn bỏ `tkinterdnd2` khỏi danh sách cài. Ở run 1 bước này chưa chạy tới vì job đã dừng ở test index. Sửa: cài `python3-tk` và đủ `requirements.txt` như workflow của GitHub. Đã chạy nguyên văn các bước của `ci.yml` trong container `node:22-bookworm`: ruff, 333 test offline, 54 test cũ và test icon đều đạt.
 
 ### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ah)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
