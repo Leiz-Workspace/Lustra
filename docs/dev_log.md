@@ -617,7 +617,27 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Trang của PR đã merge (#1–#3) vẫn trỏ tới commit cũ (GitHub không cho sửa), và 3 commit gộp tạo trên GitHub mất chữ ký "Verified".
   - Bản sao lưu trước khi viết lại là một git bundle trong `~/Workspace/_backup/`. Clone cũ cần `git fetch` rồi `git reset --hard origin/<nhánh>`.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-17, sau 7x–7af)
+### 7ag. Lustra trên Forgejo của tổ chức; lỗi index khi nhiều tiến trình cùng mở file mới — 2026-11-17 / 18
+- **Ruleset và auto-merge trên GitHub:** ruleset "develop, staging, production: CI must pass" đã bật cho ba nhánh: phải qua PR, check `Tests passed` và `Package (linux)` phải đạt, không xoá nhánh, không force-push, không ai được bỏ qua. Repo cho phép auto-merge; PR #5 tự merge sau khi CI đạt.
+- **Đưa repo vào platform** (GUIDE §7 của platform):
+  - tạo pull mirror `mirror/Lustra` và bật Actions;
+  - thêm Lustra vào `RELEASE_REPOSITORIES` rồi chạy lại bootstrap, nên mirror có secret `PACKAGES_TOKEN`;
+  - `signing_keys.py init --repository Lustra` tạo cặp khoá cosign và minisign: khoá bí mật nằm trong Vault và secret của mirror, khoá công khai nằm trong `keys/` (repo này) và `keys/repos/Lustra/` (platform).
+- **Chạy thử bằng `workflow_dispatch`:**
+  - `forgejo-release.yml` trên `production` (run 2, không đăng) đạt sau 10,5 phút: lõi đóng băng 38,5 MiB, `.deb` 121 MB, AppImage 148 MB, self-test của app đạt (8 bước), model server chạy độc lập 44,7 MiB (nén), `SHA256SUMS-linux` được ký minisign. Job image bỏ qua, vì chỉ chạy với tag.
+  - `ci.yml` trên `develop` (run 1) lỗi ở `test_concurrent_writers`.
+  - Phần còn lại (đăng package, Release, image ký cosign) chạy lần đầu với tag phát hành tiếp theo.
+- **Lỗi index do run 1 tìm ra** (không thấy trên runner của GitHub; ở máy dev, test lỗi 1/12 lần):
+  - Khi nhiều tiến trình cùng mở một index chưa có, `PRAGMA journal_mode = WAL` bị báo `database is locked` ngay mà không chờ `busy_timeout`, vì SQLite tránh deadlock. Thử 8 tiến trình mở cùng lúc: 104/120 lần mở lỗi.
+  - Ghi lỗi xong, `_fail` gọi `trace`; ngoài app, logger chưa có cửa sổ nên ném `AssertionError`. Luồng ghi chết, 149 bản ghi còn lại bị bỏ âm thầm, trong khi `close()` vẫn trả `True`.
+  - **Sửa:**
+    - `_enable_wal` thử lại tới `BUSY_TIMEOUT`, cách nhau `RETRY_PAUSE`, và không đổi gì nếu file đã là WAL;
+    - `_flush` nghỉ giữa các lần ghi lại;
+    - lỗi khi báo cáo không còn làm dừng luồng ghi.
+  - **Test:** chuyển WAL khi đang bị khoá (giả lập), 8 tiến trình cùng mở index mới, báo cáo lỗi không làm dừng luồng ghi. Cả 3 test lỗi trên code cũ.
+  - **Sau khi sửa:** 0/120 lần mở lỗi; `MultiProcessTests` đạt 15/15 lần; 333 test offline, test cũ và ruff đạt.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ag)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad).
@@ -631,4 +651,4 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - ký từng mục catalog và danh sách thu hồi; chuyển 6 extension của catalog sang `lustra.sdk`, rồi chỉ cho import qua `lustra.sdk`;
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
-  - đưa repo vào Forgejo của tổ chức (mirror, khoá ký minisign / cosign, tag thử); ruleset cho `develop`, `staging`, `production`: bắt buộc PR, check "Tests passed", không xoá nhánh, không force-push (7af).
+  - Forgejo: lần phát hành tiếp theo (cần nâng phiên bản, ví dụ 2.0.3, vì `develop` đã đổi file được phát hành) là lần đầu chạy trọn đường đăng package, Release và image ký cosign; kiểm `SHA256SUMS-linux` bằng `keys/minisign.pub` và image bằng `keys/cosign.pub` (7ag).
