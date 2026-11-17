@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('lustra', {
     list: () => invoke('jobs:list'),
     clear: () => invoke('jobs:clear'),
     rerun: (id, allowDuplicate) => invoke('jobs:rerun', id, allowDuplicate === true),
+    // one query on several sites: one job per module, one after another, -skip_known forced (main builds the group)
+    startMulti: (query, modules) => invoke('jobs:startMulti', query, modules),
   },
   dialogs: {
     folder: (current) => invoke('dialog:folder', current),
@@ -70,6 +72,14 @@ contextBridge.exposeInMainWorld('lustra', {
     // files of the download index: open with the default app (media extensions only) or show in the file manager
     open: (file) => invoke('library:open', file),
     reveal: (file) => invoke('library:reveal', file),
+  },
+  index: {
+    // download index maintenance. clean: rows whose file is gone (main confirms natively; {dryRun: true} only counts).
+    // Library import: the folder comes from pickImportFolder (native dialog), the import runs as a job
+    clean: (opts) => invoke('index:clean', opts),
+    cleanCancel: () => invoke('index:cleanCancel'),
+    pickImportFolder: () => invoke('index:pickFolder'),
+    importLibrary: (opts) => invoke('index:import', opts),
   },
   appearance: {
     setBackgroundImage: (file) => invoke('appearance:setBackgroundImage', file),

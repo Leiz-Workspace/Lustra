@@ -147,6 +147,15 @@ def _smoke_test(exe: pathlib.Path) -> None:
         if r.returncode != 0 or '-module' not in r.stdout:
             raise SystemExit(f'smoke test failed: cli --help exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
         print('smoke test: cli ok')
+        # download index tools (library import jobs of the app): a dry run recognizes names only, no request
+        lib = pathlib.Path(data_dir) / 'lib'
+        lib.mkdir()
+        (lib / 'db_1.jpg').write_bytes(b'x')
+        r = subprocess.run((str(exe), 'index', 'import', str(lib), '--dry-run', '--json'), env=env, capture_output=True, text=True,
+                           encoding='utf-8', timeout=120)
+        if r.returncode != 0 or '"totalAll": 1' not in r.stdout:
+            raise SystemExit(f'smoke test failed: index import exit {r.returncode}\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
+        print('smoke test: index tools ok')
         r = subprocess.run((str(exe), 'aigen'), input='{"cmd":"start","url":"http://example.com/","mode":"template"}\n', env=env,
                            capture_output=True, text=True, encoding='utf-8', timeout=120)
         if '"R10"' not in r.stdout:
