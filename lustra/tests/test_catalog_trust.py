@@ -320,9 +320,11 @@ class SignToolTests(TestCase):
     @unittest.skipUnless(shutil.which('openssl'), 'openssl is not installed')
     def test_openssl_interop(self) -> None:
         key = self.root / 'ossl.pem'
-        version = subprocess.run(['openssl', 'version'], capture_output=True, text=True).stdout
-        if version.startswith('LibreSSL'):  # macOS: no 'pkeyutl -rawin', the Ed25519 one-shot interface
-            self.skipTest(f'{version.strip()} cannot verify Ed25519 signatures with pkeyutl -rawin')
+        # Ed25519 signatures need the one-shot 'pkeyutl -rawin' of OpenSSL 3: not in OpenSSL 1.1 or LibreSSL (macOS runners)
+        usage = subprocess.run(['openssl', 'pkeyutl', '-help'], capture_output=True, text=True)
+        if '-rawin' not in usage.stdout + usage.stderr:
+            version = subprocess.run(['openssl', 'version'], capture_output=True, text=True).stdout.strip()
+            self.skipTest(f'{version or "openssl"} has no pkeyutl -rawin')
         if subprocess.run(['openssl', 'genpkey', '-algorithm', 'ed25519', '-out', str(key)], capture_output=True).returncode:
             self.skipTest('this openssl has no Ed25519')
         seed = self.tool.read_key(key)
