@@ -68,5 +68,5 @@ jobs:
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-line-length=140 --statistics
           python -m unittest lustra/tests/tests.py
-          python -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_model_server
+          python -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_model_server lustra.tests.test_gender_eval
           node app/test/icon-utils.test.js
