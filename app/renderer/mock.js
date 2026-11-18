@@ -21,7 +21,7 @@
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },
     tags: { autoUpdate: false, autoUpdateDays: 7 },
-    advanced: { pythonPath: '', verbose: false, catalogUrl: '' },
+    advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
     ai: { model: 'claude-opus-5-5', maxUsd: 2 },
     genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
   };
@@ -454,7 +454,7 @@
     },
     appearance: { setBackgroundImage: async () => appearance() },
     app: {
-      info: async () => ({ version: '2.0.3', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
+      info: async () => ({ version: '2.0.4', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
       relaunch: async () => location.reload(), installLauncher: async () => ({ ok: false, message: 'mock' }), openPath: async () => '', openExternal: async () => false,
     },
     thumbUrl: (url) => url,
