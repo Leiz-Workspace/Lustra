@@ -492,20 +492,24 @@ def _id_cursor_pages(fetch: Callable[[int], list[dict]], max_pages: int, what: s
 
 
 def _pid_pages(fetch: Callable[[int], list[dict]], max_pages: int, resume: Resume | None = None) -> Iterator[list[dict]]:
-    """Pages of a listing by page number (pid from 0), in the site's own order. Ends at an empty page or at a page shorter than the
-    site's page size (a short first page sets the size: some sites cap 'limit'). resume.cursor: the next pid"""
+    """Pages of a listing by page number (pid from 0), in the site's own order, until an empty page. A short page is not the end:
+    rule34.xxx page 1583 holds 999 tags and one with an empty name, and the most used tags are on the last pages.
+    resume.cursor: the next pid"""
     pid = resume.cursor if resume else 0
-    pages, page_size = 0, PAGE_LIMIT
+    pages = 0
     previous: tuple | None = None
     while True:
         tags = fetch(pid)
         if not tags:
             return
-        # a site that ignores pid answers the same page forever: stop, or the list (and memory) would grow without end
-        names = tuple(t.get('name') for t in tags)
-        if names == previous:
+        # a site that ignores pid answers the same page forever: stop, or the list (and memory) would grow without end.
+        # The same short page again: a site that answers its last page for any pid past the end
+        ids = tuple((t.get('id'), t.get('name')) for t in tags)
+        if ids == previous:
+            if len(tags) < PAGE_LIMIT:
+                return
             raise RuntimeError(f'page {pid:d} is the same as page {pid - 1:d}: the site ignores pid, stopping')
-        previous = names
+        previous = ids
         yield tags
         pid += 1
         pages += 1
@@ -515,10 +519,6 @@ def _pid_pages(fetch: Callable[[int], list[dict]], max_pages: int, resume: Resum
                 resume.on_page(pid)
         if max_pages and pages >= max_pages:
             return
-        if len(tags) < page_size:
-            if pages > 1:
-                return
-            page_size = len(tags)
 
 
 def _iter_gelbooru(client: PoliteClient, auth: str, min_posts: int, max_pages: int, resume: Resume | None = None) -> Iterator[tuple[str, int, str]]:
@@ -529,7 +529,8 @@ def _iter_gelbooru(client: PoliteClient, auth: str, min_posts: int, max_pages: i
         if 'Missing authentication' in text:
             raise RuntimeError('website requires API key (use --api-key KEY,USER_ID)')
         rows = ({k: v for k, _, v in re_attr.findall(m.group(1))} for m in re_xml_tag.finditer(text))
-        return [r for r in rows if r.get('name')]  # an empty page is '<tag type="array"/>' on rule34.xxx: not a tag
+        # an empty page is '<tag type="array"/>' on rule34.xxx (no id, no name); a tag with an empty name has an id: it counts
+        return [r for r in rows if r.get('id') or r.get('name')]
 
     for page in _pid_pages(fetch, max_pages, resume):
         for t in page:

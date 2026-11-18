@@ -96,6 +96,7 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Nhập số cao hơn mức site thật sự cho thì site trả 429: lõi tự chậm lại theo câu báo của site, chờ rồi tải tiếp.
 - **Rule34 mất lâu:** danh sách đầy đủ khoảng 1.620 trang (1.000 tag mỗi trang, site không cho trang lớn hơn), khoảng 1,6 triệu tag.
   - Site trả tag theo thứ tự lưu trong database: tag vừa đổi số post bị dời xuống cuối, nên các tag phổ biến (`female`, `breasts`, `1girls`…) chỉ có ở **vài trang cuối**. Danh sách dở thiếu đúng những tag hay dùng nhất, vì vậy không bao giờ được dùng.
+  - Bộ đọc chỉ dừng ở trang rỗng: trang có ít hơn 1.000 tag (ví dụ có tag tên rỗng) không phải trang cuối.
   - Trang càng sâu site trả càng chậm (trang 5: 0,5 giây, trang 1.200: 4 giây, trang 1.600: 6–7 giây). Một lần cập nhật đầy đủ mất khoảng 1,5–2 giờ. Giới hạn của khoá chỉ là nút thắt ở khoảng 100 trang đầu (site trả nhanh hơn 1 giây), nên khoá được cấp thêm request gần như không làm việc này nhanh hơn; nó giúp nhiều hơn cho việc tải ảnh.
   - Đóng app giữa chừng không sao: lần sau tải tiếp từ trang đã dừng.
 - **Tải tiếp sau khi dừng giữa chừng** (Gelbooru: theo số trang `pid`; Danbooru: theo con trỏ id):
