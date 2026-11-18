@@ -30,11 +30,13 @@ from typing import Any
 _PROTO_OUT = sys.stdout
 sys.stdout = sys.stderr
 
+from . import tags_learned  # noqa: E402
 from .defines import ThreadInterruptException  # noqa: E402
 from .extensions import ENV_CATALOG_AUTOLOAD, Extensions, data_dir  # noqa: E402
 from .gender import decide, infer_from_tags, rules_for_module  # noqa: E402
 from .help import APP_ADDRESS  # noqa: E402
 from .logger import Logger  # noqa: E402
+from .modspec import re_abbr  # noqa: E402
 from .module import ProcModule  # noqa: E402
 from .rex import re_api_credentials  # noqa: E402
 from .safety import blocked_tag  # noqa: E402
@@ -200,11 +202,13 @@ def m_ext_install(p: dict) -> dict:
         m = Extensions.install_from_dir(pathlib.Path(p['path']))
     else:
         raise RpcError(-32602, 'id, remoteId, url, archivePath or path required')
+    TagsDB.locate_default_lists(reload=(m.abbr,))  # a tag list shipped in the extension (the generator's drafts) is used at once
     return {**m.to_public_dict(), 'restartRequired': Extensions.restart_required(m)}
 
 
 def m_ext_uninstall(p: dict) -> dict:
     Extensions.uninstall(p['id'])
+    TagsDB.locate_default_lists()  # its shipped tag list is gone with its folder
     return {'ok': True}
 
 
@@ -284,22 +288,56 @@ def m_tags_fuzzy(p: dict) -> list[dict]:
 
 
 def m_tags_status(_: dict) -> list[dict]:
+    """learned: the list is learned from the posts seen here (lustra/tags_learned.py), its counts are not the site's"""
     rows = []
     for module, path in sorted(TagsDB.files().items()):
         st = path.stat() if path.is_file() else None
         rows.append({'module': module, 'path': path.as_posix(), 'size': st.st_size if st else 0, 'mtime': st.st_mtime if st else 0,
-                     'loaded': TagsDB.is_loaded(module)})
+                     'loaded': TagsDB.is_loaded(module), 'learned': tags_learned.is_learned(module, path)})
     return rows
+
+
+def m_tags_learn(p: dict) -> dict:
+    """Learns a module's tag list from its downloaded files (download index) when it has no list from a source; the app calls it
+    after each download job. No request is made. -> {module, posts (new), learned, tags}"""
+    module = str(p.get('module', ''))
+    if not re_abbr.fullmatch(module):
+        raise RpcError(-32602, f'invalid module \'{module}\'')
+    new = tags_learned.learn_from_index(module)
+    return {'module': module, **tags_learned.status(module), 'newPosts': new}
+
+
+def _learn_from_preview(module: str, items: list[dict]) -> None:
+    """A module without a tag list learns it from the posts shown in Preview (in the background, no request)"""
+    posts = [(it.get('id'), it.get('tags') or ()) for it in items if it.get('tags')]
+    if posts and tags_learned.may_learn(module):
+        threading.Thread(target=_learn_quietly, args=(module, posts), daemon=True, name=f'learn-{module}').start()
+
+
+def _learn_quietly(module: str, posts: list) -> None:
+    try:
+        if tags_learned.learn(module, posts):
+            notify('tags.learned', {'module': module, **tags_learned.status(module)})  # the app reloads its list of lists
+    except Exception as err:
+        Logger.log(f'Warning: tag list of {module} not learned: {err}', False, False)
 
 
 _tags_updates_lock = threading.Lock()
 _tags_updates: set[str] = set()
 
 
+def m_tags_sources(_: dict) -> list[dict]:
+    """Installed modules with a tag list source (the five reviewed ones, extensions made from a known engine): the Tags A-Z page
+    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'"""
+    from .tags_updater import tag_sources
+    return [s.as_dict() for s in tag_sources()]
+
+
 def m_tags_update(p: dict) -> dict:
-    from .tags_updater import SUPPORTED_MODULES, update_tag_list
-    module = p.get('module', '')
-    if module not in SUPPORTED_MODULES:
+    from .tags_updater import tag_source, update_tag_list
+    module = str(p.get('module', ''))
+    source = tag_source(module) if module else None
+    if source is None:
         raise RpcError(-32602, f'tag list update is not supported for \'{module}\'')
     out_dir = pathlib.Path(p['outDir']) if p.get('outDir') else tags_dirs()[0] if os.environ.get(ENV_TAGS_DIR) else data_dir() / 'tags'
     job = f'tags-{module}'
@@ -312,6 +350,7 @@ def m_tags_update(p: dict) -> dict:
     def run() -> None:
         try:
             res = update_tag_list(module, out_dir, api_key=p.get('apiKey', ''), delay=float(p.get('delay', 0.5)), reference=reference,
+                                  source=source,
                                   progress=lambda msg, n: notify('tags.updateProgress', {'job': job, 'module': module, 'count': n, 'message': msg}))
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
@@ -392,13 +431,14 @@ def _fetch_results_page(dwn, page: int, page_size: int, maxlim: int | None) -> t
 
 
 class _ResultsFilter:
-    """Local filters of a results page, as the download applies them: safety blacklist (gender filter on), required tags,
+    """Local filters of a results page, as the download applies them: safety blacklist (-safety_blacklist), required tags,
     negative groups, gender. Counts what it hides"""
 
     def __init__(self, dwn) -> None:
         self.dwn = dwn
         self.required = {t.lower() for t in dwn.required_tags}
         self.gender_on = bool(dwn.gender_select)
+        self.safety_on = bool(dwn.safety_blacklist)
         self.rules = rules_for_module(dwn._get_module_abbr()) if self.gender_on else None
         self.with_tags = bool(dwn._can_extract_item_info_without_fetch())
         self.gender_stats: dict[str, int] = {}
@@ -415,7 +455,7 @@ class _ResultsFilter:
         if item['mediaKind'] != 'image':  # the in-app player streams the original file
             item['file'] = _attr(h, 'file_url')
         if not self.with_tags:
-            if self.gender_on:
+            if self.safety_on:
                 # tags are unknown without fetching each post: the safety blacklist cannot be checked -> fail closed,
                 # the post (and its thumbnail url) is not returned at all
                 self.hidden_no_tags += 1
@@ -425,7 +465,7 @@ class _ResultsFilter:
         tags = info.tags.split(' ') if info.tags else []
         item.update({'tags': tags, 'score': info.score, 'width': info.width, 'height': info.height, 'ext': info.ext,
                      'date': info.date, 'rating': _attr(h, 'rating'), 'md5': getattr(info, 'md5', '') or ''})
-        if self.gender_on and blocked_tag(tags):
+        if self.safety_on and blocked_tag(tags):
             self.blocked += 1  # safety: never returned, not even a thumbnail url
             return None
         tl = {t.lower() for t in tags}
@@ -455,8 +495,8 @@ PREVIEW_MODEL_MAX = 40
 
 
 def _apply_gender_model(filt: _ResultsFilter, items: list[dict]) -> None:
-    """-gender_mode model: the image model labels the posts of the page whose tags were not conclusive, its safety gate
-    removes posts entirely (like the blacklist: never returned). Posts past PREVIEW_MODEL_MAX keep their tag label"""
+    """-gender_mode model: the image model labels the posts of the page whose tags were not conclusive; with -safety_blacklist
+    its safety gate removes posts entirely (like the blacklist: never returned). Posts past PREVIEW_MODEL_MAX keep their tag label"""
     if not filt.model_pending:
         return
     from .gender_model import ModelUnavailable, combine, verdicts_for
@@ -477,7 +517,7 @@ def _apply_gender_model(filt: _ResultsFilter, items: list[dict]) -> None:
             continue
         old = it['gender']['effective']
         stats[old] = stats.get(old, 1) - 1
-        if v.safety_tag:
+        if v.safety_tag and filt.safety_on:
             dropped.add(id(it))
             filt.blocked += 1
             continue
@@ -528,7 +568,10 @@ def m_search_preview(p: dict) -> dict:
                 'requiredTags': list(dwn.required_tags), 'site': dwn._get_sitename(), 'genderStats': filt.gender_stats,
                 'blockedCount': filt.blocked, 'hiddenNoTags': filt.hidden_no_tags, 'genderEnabled': filt.gender_on,
                 'genderModel': filt.model_info}
-    return _with_downloader(p.get('module', 'rx'), p.get('tags', ''), list(p.get('args', [])), fn)
+    module = p.get('module', 'rx')
+    res = _with_downloader(module, p.get('tags', ''), list(p.get('args', [])), fn)
+    _learn_from_preview(module, res.get('items', []))
+    return res
 
 
 def _query_tag_matchers(query: str) -> tuple[set[str], list[re.Pattern]]:
@@ -706,6 +749,8 @@ METHODS: dict[str, Callable[[dict], Any]] = {
     'tags.resolve': m_tags_resolve,
     'tags.fuzzy': m_tags_fuzzy,
     'tags.status': m_tags_status,
+    'tags.sources': m_tags_sources,
+    'tags.learn': m_tags_learn,
     'tags.update': m_tags_update,
     'search.count': m_search_count,
     'search.preview': m_search_preview,

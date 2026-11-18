@@ -22,6 +22,7 @@ const dnsp = require('node:dns').promises;
 // so launchers must use StartupWMClass=lustra (lowercase) for docks to group the window with its launcher
 const DESKTOP_ID = 'lustra';
 const { pngsToIco } = require('./icon-utils');
+const { shq, hasTagBlock, withoutTagBlock, withTagBlock, scheduleWhen } = require('./tag-schedule');
 
 app.setName('Lustra');
 if (process.env.LUSTRA_USER_DATA) app.setPath('userData', path.resolve(process.env.LUSTRA_USER_DATA));
@@ -71,13 +72,17 @@ const DEFAULT_SETTINGS = {
     gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags', verifyMedia: false },
     lowRes: false, prefix: true, appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false,
     skipKnown: false, // -skip_known: skip posts found in the local download index (core lustra/dlindex.py)
+    // -safety_blacklist: drop posts whose tags suggest minors (core lustra/safety.py); its own filter, off by default,
+    // independent of the gender filter (product decision 2026-11-18). Saved with each query (q.safetyBlacklist)
+    safetyBlacklist: false,
     subfolderPerQuery: false, dumpTags: false, dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run',
     warnNonEmpty: true, maxConcurrentJobs: 1, notify: true,
   },
   connection: {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
   },
-  tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {} },
+  // schedule: the system scheduler updates the lists even while the app is closed (crontab / Task Scheduler, see tagScheduleStatus)
+  tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {}, schedule: { enabled: false, frequency: 'weekly' } },
   // the official signed catalog (tools/build_catalog.py, docs/operations.md 3d); the user may point it elsewhere
   advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
   ai: { model: 'claude-opus-5-5', maxUsd: 2 }, // extension generator (the Claude API key itself is a secret, see AI_SECRET)
@@ -530,7 +535,8 @@ function coreCommand(kind, args = []) {
   const core = bundledCore();
   // 'aigen' (extension generator worker) and 'extgen' (draft tools: check / pack) are commands of the same core
   if (core) return { cmd: core, args: [kind, ...args], cwd: userData(), frozen: true };
-  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen', index: 'lustra.dlindex_tools' }[kind];
+  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen', index: 'lustra.dlindex_tools',
+    tags: 'lustra.tags_updater' }[kind];
   if (!mod) throw new Error(`unknown core command ${kind}`);
   return { cmd: resolvePython(), args: ['-m', mod, ...args], cwd: REPO_ROOT, frozen: false };
 }
@@ -846,7 +852,7 @@ class Generator {
       + 'Extension là code Python chạy trên máy bạn với quyền của bạn. Hãy xem downloader.py trước khi cài (nút "Mở thư mục").',
       ['Huỷ', 'Cài']);
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { archivePath: zip, sha256: data.sha256 });
+    return installExtension({ archivePath: zip, sha256: data.sha256 });
   }
 
   async remove(session) {
@@ -1005,7 +1011,7 @@ async function connectionArgs(module) {
 }
 
 function genderArgs(g) {
-  // content filter; enabling it also enables the safety blacklist in the core
+  // content filter (character gender); the safety blacklist is a separate option, see safetyArgs
   const labels = ['only_female', 'only_male', 'both', 'none', 'unknown'];
   const sel = [...new Set((g && Array.isArray(g.select) ? g.select : []).filter((x) => labels.includes(x)))];
   if (!sel.length) return [];
@@ -1019,6 +1025,11 @@ function genderArgs(g) {
   }
   if (g.strict) a.push('-gender_strict');
   return a;
+}
+
+function safetyArgs(q) {
+  // '-safety_blacklist': only when the query asks for it (the check box of the filters panel); never implied by the gender filter
+  return q && q.safetyBlacklist === true ? ['-safety_blacklist'] : [];
 }
 
 function searchArgs(q) {
@@ -1126,7 +1137,7 @@ class Jobs {
       startedAt: 0, endedAt: 0, exitCode: null, logTail: [], label: q.label || '',
       secretArgs: [...(await connectionArgs(q.module)), ...(await genderSecretArgs(q.gender))],
       // '--': tags like '-webm' or '-v' are never parsed as options
-      args: ['-module', q.module, ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender), ...args, '--',
+      args: ['-module', q.module, ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender), ...safetyArgs(q), ...args, '--',
         ...String(q.tags).trim().split(/\s+/)],
       query,
       autoKey: typeof q.autoKey === 'string' ? q.autoKey : '',
@@ -1292,6 +1303,7 @@ class Jobs {
       this.emit(job);
       this.pump();
       notifyJob(job);
+      if (job.status === 'done' && !job.coreKind && RE_ABBR.test(String(job.module))) learnTagList(job.module);
       if (job.autoKey) autoJobFinished(job);
     };
     proc.on('error', (err) => { onLine(`ERROR: ${err.message}`); finish(null, err.message); });
@@ -1675,11 +1687,148 @@ async function maybeAutoUpdateTags() {
   for (const module of ['rx', 'db']) {
     const last = settings.tags.lastAutoUpdate[module] || 0;
     if (Date.now() - last < days) continue;
+    if (module === 'rx' && !(await getSecret('rx'))) continue; // rx needs the user's own key: nothing to try without it
     try {
       await sidecar.call('tags.update', { module, apiKey: await getSecret(module) });
     } catch (err) {
       send('log', { source: 'tags', text: `auto update ${module} failed: ${err.message}` });
     }
+  }
+}
+
+// ---------- every extension has a tag list at once ----------
+// The generator puts the site's list into the draft (lustra/extgen/taglist.py), the core uses it as soon as it is installed.
+// A list too big for the draft (or one that needs the user's key) is read right after the install. A site without a tag listing,
+// or whose robots.txt forbids it, gets its list learned from the posts previewed (core, search.preview) and downloaded (below):
+// no request is made for it (lustra/tags_learned.py).
+async function installExtension(params) {
+  const m = await sidecar.call('ext.install', params);
+  if (RE_ABBR.test(String(m?.abbr || ''))) {
+    fetchNewTagList(m.abbr).catch((err) => send('log', { source: 'tags', text: `tag list of ${m.abbr} not started: ${err.message}` }));
+  }
+  return m;
+}
+
+async function fetchNewTagList(abbr) {
+  const status = await sidecar.call('tags.status', {});
+  if ((Array.isArray(status) ? status : []).some((r) => r.module === abbr && r.size > 0 && !r.learned)) return; // shipped with it
+  const src = ((await sidecar.call('tags.sources', {})) || []).find((x) => x.module === abbr);
+  if (!src) return; // no tag listing: learned from the posts previewed and downloaded
+  const apiKey = await getSecret(abbr);
+  if (src.key === 'required' && !apiKey) return; // read once the user saves a key (Tags A-Z button, auto update)
+  await sidecar.call('tags.update', { module: abbr, apiKey });
+  send('log', { source: 'tags', text: `${abbr}: đang tải danh sách tag của extension vừa cài` });
+}
+
+function learnTagList(module) {
+  // after a download job: the module's downloaded posts teach its list when it has none from a source (no request)
+  sidecar.call('tags.learn', { module }, 60000).then((r) => {
+    if (r?.newPosts && r.learned) send('sidecar:notify', { method: 'tags.learned', params: r });
+  }).catch(() => { /* sidecar not running: the next job or preview learns it */ });
+}
+
+// ---------- scheduled tag list update (system scheduler) ----------
+// The system scheduler runs 'lustra-core tags' (development: python -m lustra.tags_updater) even while the app is closed, for the
+// modules that need no key; the lists go to <userData>/tags, where the app looks for the newest list of each module. A scheduled
+// run cannot read the app's keys (OS keyring): rx keeps the in-app update. Linux / macOS: a marked block of the user's crontab
+// (the rest of the crontab is left as it is); Windows: a Task Scheduler task; AppImage: unsupported (its core only exists while
+// the app runs). The entry is written again at every start, so a new install path or version is picked up.
+// 'auto': the core picks the modules when it runs (lustra/tags_updater.py tag_sources): every installed module with a tag source
+// that needs no key of the user, the reviewed ones (db, xb, bb, en) and extensions made from a known engine. An extension
+// installed later is covered without writing the entry again.
+const TAG_SCHEDULE_MODULES = 'auto';
+const WIN_TASK = 'Lustra tag lists';
+const tagScheduleLog = () => path.join(userData(), 'logs', 'tags-schedule.log');
+
+function tagScheduleSupport() {
+  if (process.env.APPIMAGE) {
+    return { ok: false, reason: 'Bản AppImage không hỗ trợ lịch hệ thống: lõi của app chỉ tồn tại khi app đang chạy. Dùng bản .deb, hoặc cron trong tools/cron/.' };
+  }
+  if (process.platform === 'win32') return { ok: true, kind: 'schtasks' };
+  const r = spawnSync('crontab', ['-l'], { encoding: 'utf8' });
+  if (r.error) return { ok: false, reason: 'Máy không có lệnh crontab (cài gói cron hoặc cronie).' };
+  return { ok: true, kind: 'crontab' };
+}
+
+function tagScheduleArgs() {
+  return ['--modules', TAG_SCHEDULE_MODULES, '--out', path.join(userData(), 'tags'), '--min-posts', '2', '--log', tagScheduleLog()];
+}
+
+function tagScheduleCommand() {
+  // POSIX shell line for crontab: absolute paths only (cron has a minimal PATH), no secret in it
+  const c = coreCommand('tags', tagScheduleArgs());
+  const env = `LUSTRA_DATA_DIR=${shq(userData())}${c.frozen ? '' : ` PYTHONPATH=${shq(REPO_ROOT)}`}`;
+  return `cd ${shq(c.cwd)} && ${env} ${[c.cmd, ...c.args].map(shq).join(' ')}`;
+}
+
+const tagScheduleWhen = (frequency) => scheduleWhen(userData(), frequency);
+
+function readCrontab() {
+  const r = spawnSync('crontab', ['-l'], { encoding: 'utf8' });
+  if (r.status === 0) return r.stdout;
+  if (/no crontab/i.test(r.stderr || '')) return '';
+  throw new Error(`không đọc được crontab: ${(r.stderr || r.error?.message || '').trim()}`); // never overwrite a crontab we could not read
+}
+
+function writeCrontab(text) {
+  const r = spawnSync('crontab', ['-'], { input: text.endsWith('\n') ? text : `${text}\n`, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`không ghi được crontab: ${(r.stderr || r.error?.message || '').trim()}`);
+}
+
+function tagScheduleStatus() {
+  const sup = tagScheduleSupport();
+  const sched = settings.tags.schedule || {};
+  let lastRun = 0;
+  try { lastRun = fs.statSync(tagScheduleLog()).mtimeMs; } catch { /* never ran */ }
+  let installed = false;
+  if (sup.ok && sup.kind === 'crontab') {
+    try { installed = hasTagBlock(readCrontab()); } catch { /* unreadable: not ours */ }
+  }
+  if (sup.ok && sup.kind === 'schtasks') installed = spawnSync('schtasks', ['/Query', '/TN', WIN_TASK], { windowsHide: true }).status === 0;
+  const frequency = sched.frequency === 'daily' ? 'daily' : 'weekly';
+  return {
+    ...sup, installed, enabled: sched.enabled === true, frequency, time: tagScheduleWhen(frequency).time, log: tagScheduleLog(), lastRun,
+  };
+}
+
+function applyTagSchedule(enabled, frequency) {
+  const sup = tagScheduleSupport();
+  if (!sup.ok) throw new Error(sup.reason);
+  const freq = frequency === 'daily' ? 'daily' : 'weekly';
+  fs.mkdirSync(path.dirname(tagScheduleLog()), { recursive: true });
+  const when = tagScheduleWhen(freq);
+  if (sup.kind === 'crontab') {
+    const current = readCrontab();
+    if (enabled) writeCrontab(withTagBlock(current, `${when.cron} ${tagScheduleCommand()}`));
+    else if (hasTagBlock(current)) writeCrontab(withoutTagBlock(current));
+  } else if (enabled) {
+    const c = coreCommand('tags', tagScheduleArgs());
+    if (!c.frozen) throw new Error('Trên Windows, lịch hệ thống chỉ dùng được với bản cài đặt (lõi đóng gói)');
+    const tr = [c.cmd, ...c.args].map((a) => (/[\s"]/.test(a) ? `"${a}"` : a)).join(' ');
+    const r = spawnSync('schtasks', ['/Create', '/F', '/TN', WIN_TASK, '/SC', freq === 'daily' ? 'DAILY' : 'WEEKLY',
+      ...(freq === 'daily' ? [] : ['/D', 'MON']), '/ST', when.time, '/TR', tr], { encoding: 'utf8', windowsHide: true });
+    if (r.status !== 0) throw new Error(`schtasks: ${(r.stderr || r.stdout || r.error?.message || '').trim()}`);
+  } else {
+    spawnSync('schtasks', ['/Delete', '/F', '/TN', WIN_TASK], { windowsHide: true });
+  }
+  settings.tags.schedule = { enabled, frequency: freq };
+  saveSettings();
+  return tagScheduleStatus();
+}
+
+async function scheduledTagModules() {
+  // what 'auto' covers now (shown in Tags A-Z): installed modules with a tag source that needs no key; [] while the core is not up
+  try {
+    const rows = await sidecar.call('tags.sources', {}, 5000);
+    return (Array.isArray(rows) ? rows : []).filter((s) => s.key !== 'required').map((s) => ({ module: s.module, name: s.name }));
+  } catch { return []; }
+}
+
+function refreshTagSchedule() {
+  // at start: write the entry again, so it runs the core of the version installed now
+  if (settings.tags.schedule?.enabled !== true) return;
+  try { applyTagSchedule(true, settings.tags.schedule.frequency); } catch (err) {
+    send('log', { source: 'tags', text: `scheduled tag update not refreshed: ${err.message}` });
   }
 }
 
@@ -1704,7 +1853,7 @@ function registerIpc() {
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
+      'tags.validate', 'tags.status', 'tags.sources', 'tags.learn', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};
     if (method === 'ext.uninstall' && !RE_EXT_ID.test(String(params.id || ''))) throw new Error('invalid extension id');
@@ -1717,7 +1866,7 @@ function registerIpc() {
   });
   handle('ext:installCatalog', async (_e, id) => {
     if (!RE_EXT_ID.test(String(id || ''))) throw new Error('invalid extension id');
-    return sidecar.call('ext.install', { id });
+    return installExtension({ id });
   });
   // remote catalog: only the id comes from the renderer. The entry (archive url, sha256) is taken from the catalog the core
   // verified (Ed25519 signature, lustra/trust.py); the install verifies it again and pins the sha256 the user confirmed
@@ -1736,9 +1885,11 @@ function registerIpc() {
       `Extension là code Python sẽ chạy trên máy bạn với quyền của bạn.\nNguồn: ${String(entry.url || '').slice(0, 300)}\n`
       + `sha256: ${entry.sha256}\n${trust}\nChỉ cài từ nguồn bạn tin cậy.`);
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { catalogUrl, remoteId: id, sha256: entry.sha256 });
+    return installExtension({ catalogUrl, remoteId: id, sha256: entry.sha256 });
   });
   handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
+  handle('tags:scheduleStatus', async () => ({ ...tagScheduleStatus(), modules: await scheduledTagModules() }));
+  handle('tags:schedule', async (_e, o) => ({ ...applyTagSchedule(o?.enabled === true, o?.frequency), modules: await scheduledTagModules() }));
   handle('search:count', async (_e, q) => sidecar.call('search.count', {
     module: asQuery(q).module, tags: q.tags, args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module)],
   }));
@@ -1747,7 +1898,8 @@ function registerIpc() {
       module: asQuery(q).module, tags: q.tags, page: page || 0,
       // the preview downloads nothing: no media check (a model server older than /v1/frames would fail it)
       args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module),
-        ...genderArgs(isPlainObject(q.gender) ? { ...q.gender, verifyMedia: false } : q.gender), ...(await genderSecretArgs(q.gender))],
+        ...genderArgs(isPlainObject(q.gender) ? { ...q.gender, verifyMedia: false } : q.gender), ...safetyArgs(q),
+        ...(await genderSecretArgs(q.gender))],
     };
     if (Number.isInteger(q.pageSize) && q.pageSize > 0) params.pageSize = q.pageSize; // the sidecar caps it to the module page size
     return sidecar.call('search.preview', params, 180000);
@@ -1869,7 +2021,7 @@ function registerIpc() {
     const ok = await confirmMain(`Cài extension từ ${path.basename(file)}?`,
       'Extension là code Python sẽ chạy trên máy bạn với quyền của bạn. Chỉ cài từ nguồn bạn tin cậy.');
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { archivePath: file, sha256: String(sha256).trim() });
+    return installExtension({ archivePath: file, sha256: String(sha256).trim() });
   });
 
   // extension generator: drafts only; installing one is its own confirmed action (Generator.install)
@@ -2307,6 +2459,16 @@ async function selfTestContract(js, quick) {
   const hasSkip = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_known');
   out.skipKnownArgs = { on: hasSkip({ skipKnown: true }), off: hasSkip({ skipKnown: false }), default: hasSkip({}) };
   out.skipKnownArgs.ok = out.skipKnownArgs.on && !out.skipKnownArgs.off && out.skipKnownArgs.default === Boolean(settings.download.skipKnown);
+  // scheduled tag update: the command line only (a self-test never writes the user's crontab / tasks)
+  {
+    const cmd = tagScheduleCommand();
+    out.tagSchedule = {
+      cmd, when: tagScheduleWhen('weekly').cron,
+      ok: (cmd.includes("'tags' '--modules' 'auto'") || cmd.includes("'lustra.tags_updater' '--modules' 'auto'"))
+        && cmd.includes(shq(path.join(userData(), 'tags'))) && cmd.includes(shq(tagScheduleLog())) && !/api.?key/i.test(cmd)
+        && /^\d+ 4 \* \* 1$/.test(tagScheduleWhen('weekly').cron) && /^\d+ 4 \* \* \*$/.test(tagScheduleWhen('daily').cron),
+    };
+  }
   // audio: '-skip_aud' only when the audio option is off (default on)
   const hasSkipAud = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_aud');
   out.audioArgs = { off: hasSkipAud({ audio: false }), on: hasSkipAud({ audio: true }), default: hasSkipAud({}) };
@@ -2336,6 +2498,13 @@ async function selfTestContract(js, quick) {
     && out.genderArgs.verify === `-gender only_female -gender_mode model -gender_model_url ${settings.genderModel.url} -gender_verify_media`
     && out.genderArgs.verifyOff === '-gender only_female' && out.genderArgs.verifyTags === '-gender only_female'
     && out.genderArgs.verifyNo === `-gender only_female -gender_mode model -gender_model_url ${settings.genderModel.url}`;
+  // safety blacklist: its own option; the gender filter never implies it
+  out.safetyArgs = {
+    on: safetyArgs({ safetyBlacklist: true }).join(' '), off: safetyArgs({ safetyBlacklist: false }).join(' '), missing: safetyArgs({}).join(' '),
+    genderOnly: [...genderArgs({ select: ['only_female'] }), ...safetyArgs({ gender: { select: ['only_female'] } })].join(' '),
+  };
+  out.safetyArgs.ok = out.safetyArgs.on === '-safety_blacklist' && out.safetyArgs.off === '' && out.safetyArgs.missing === ''
+    && out.safetyArgs.genderOnly === '-gender only_female' && settings.download.safetyBlacklist !== undefined;
   // the media check box: hidden while 'Tag + model' cannot be picked, disabled with 'Chỉ dựa vào tag', saved in download.gender
   try {
     const savedGender = structuredClone(settings.download.gender);
@@ -2789,6 +2958,7 @@ if (!app.requestSingleInstanceLock()) {
     pruneThumbCache();
     if (process.env.LUSTRA_SELFTEST_DIR) mainWindow.webContents.once('did-finish-load', () => runSelfTest(process.env.LUSTRA_SELFTEST_DIR));
     sidecar.ready.then(() => maybeAutoUpdateTags()).catch(() => {});
+    if (!process.env.LUSTRA_SELFTEST_DIR) refreshTagSchedule(); // a self-test never touches the user's crontab
     sidecar.ready.then(() => {
       setTimeout(() => runDueSaved().catch(() => {}), 60000); // saved queries due while the app was closed
       setInterval(() => runDueSaved().catch(() => {}), AUTO_CHECK_MS);

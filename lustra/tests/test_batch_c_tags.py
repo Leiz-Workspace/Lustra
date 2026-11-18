@@ -130,7 +130,7 @@ class TagsLockingTests(_TagsTestBase):
                 done.set()
 
         with (mock.patch.object(tags_updater, 'update_tag_list', fake_update), mock.patch.object(server, 'notify', fake_notify),
-              mock.patch.dict(tags_updater.SUPPORTED_MODULES, {'zz': 'test'})):
+              mock.patch.object(tags_updater, 'tag_source', lambda m, *_a: tags_updater.TagSource(m, 'danbooru_json', 'https://x.test/'))):
             self._hold_core_lock()
             server.m_tags_update({'module': 'zz', 'outDir': self.tags_dir.as_posix()})
             self.assertTrue(done.wait(WAIT), 'tags.update reload waited for _core_lock')

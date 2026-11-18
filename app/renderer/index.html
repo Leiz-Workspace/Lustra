@@ -57,6 +57,8 @@
           </div>
         </div>
 
+        <p class="multi-warn key-needed" id="key-needed" hidden><span id="key-needed-text"></span> <button class="btn sm" id="key-needed-btn">Nhập khoá</button></p>
+
         <div class="chip-actions glass" id="chip-actions" hidden>
           <span id="chip-sel-count">0 tag đã chọn</span>
           <button class="btn sm" data-act="or">Gộp OR (a~b)</button>
@@ -97,6 +99,7 @@
             <label class="field"><span>Thứ tự</span><select id="f-order"><option value="asc">ID tăng dần</option><option value="desc">ID giảm dần</option></select></label>
             <label class="field" id="f-parchi-wrap"><span>Kèm post cha/con</span><input type="checkbox" id="f-parchi"></label>
             <label class="field" title="Bỏ qua post đã có trong index các lần tải (cùng md5, hoặc cùng module và id) khi file vẫn còn trên đĩa, kể cả file ở thư mục khác hoặc tải từ site khác"><span>Bỏ qua file đã tải</span><input type="checkbox" id="f-skip-known"></label>
+            <label class="field" title="Bỏ mọi post có tag gợi ý trẻ vị thành niên (danh sách cố định của Lustra, extension chỉ thêm được tag), ở Preview và khi tải. Khi bật, post không có tag để kiểm thì bị ẩn khỏi Preview, và với 'Tag + model' model cũng chặn post nó nhận ra. Độc lập với bộ lọc giới tính, mặc định tắt"><span>Chặn nội dung gợi ý trẻ vị thành niên</span><input type="checkbox" id="f-safety"></label>
             <div class="field wide gender-field" id="f-gender">
               <span>Giới tính nhân vật <em class="gender-hint" id="f-gender-hint"></em></span>
               <div class="row">
@@ -195,9 +198,14 @@
         <div class="page-head"><h1>Tags A–Z</h1></div>
         <div class="glass panel">
           <h2>Danh sách tag (autocomplete)</h2>
-          <p class="muted">Danh sách tag là bản chụp offline. Cập nhật thủ công ở đây, bật tự cập nhật, hoặc dùng cronjob trong <code>tools/cron/</code>.</p>
+          <p class="muted">Danh sách tag là bản chụp offline, mỗi site một danh sách. Cập nhật thủ công ở đây, tự cập nhật khi mở app, hoặc theo lịch của hệ thống (kể cả khi app đóng).</p>
           <table class="table" id="tag-status"></table>
           <label class="check"><input type="checkbox" id="tags-autoupdate"> Tự cập nhật mỗi <input type="number" id="tags-autoupdate-days" min="1" max="60" class="tiny"> ngày khi mở app</label>
+          <div class="tags-schedule" id="tags-schedule">
+            <label class="check"><input type="checkbox" id="tags-schedule-on"> Cập nhật theo lịch của hệ thống, kể cả khi app đóng</label>
+            <select id="tags-schedule-freq" title="Lịch chạy (khoảng 4 giờ sáng)"><option value="weekly">mỗi tuần (thứ Hai)</option><option value="daily">mỗi ngày</option></select>
+            <p class="muted" id="tags-schedule-status"></p>
+          </div>
         </div>
         <div class="glass panel az-page"><div class="az-host" id="az-page-host"></div></div>
       </section>

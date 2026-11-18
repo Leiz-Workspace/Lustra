@@ -64,6 +64,7 @@ class GenRequest:
     mode: str = 'ai'  # 'ai': Claude writes / fixes the code; 'template': no model, only gelbooru / danbooru sites
     query: str = ''  # template mode: tags of the test run (empty: picked from the site's tags)
     repair: str = ''  # session id of a draft that did not pass: copied into this session, the model fixes it (ai mode only)
+    tag_list: bool = True  # a ready draft gets the site's tag list (lustra/extgen/taglist.py); the eval harness turns it off
 
     @classmethod
     def from_dict(cls, d: dict) -> GenRequest:
@@ -79,7 +80,7 @@ class GenRequest:
             raise ValueError('repair needs the ai mode and a draft session id')
         return cls(url=str(d.get('url') or ''), media=media, model=model, max_usd=max(0.1, min(float(d.get('maxUsd') or 2.0), 20.0)),
                    max_turns=max(5, min(int(d.get('maxTurns') or 30), 60)), mode=mode, query=str(d.get('query') or '')[:200],
-                   repair=repair)
+                   repair=repair, tag_list=d.get('tagList', True) is not False)
 
 
 @dataclass
@@ -315,6 +316,18 @@ class GenSession:
 
     # ----- result
 
+    def _bundle_tag_list(self, draft: pathlib.Path) -> dict:
+        """The site's tag list into the ready draft (lustra/extgen/taglist.py), through the session's own transport (no cookies)"""
+        from ..extgen.taglist import bundle_tag_list
+        self.emit('phase', tool='tags', label='Tải danh sách tag của site', state='running')
+        fetcher = self.box.fetcher
+        try:
+            res = bundle_tag_list(draft, session=fetcher._session, allow_local=fetcher.allow_local, min_interval=fetcher.min_interval)
+        except Exception as err:  # never fails a ready draft: the app reads the list after the install
+            res = {'status': 'failed', 'file': '', 'count': 0, 'requests': 0, 'message': str(err)}
+        self.emit('log', text=f'Danh sách tag: {_tag_list_note(res)}', tool='tags', error=False)
+        return res
+
     def _finalize(self, status: str, summary: str, rule_ids: list[str], error: str) -> dict:
         box = self.box
         draft = box.draft if box else None
@@ -339,6 +352,9 @@ class GenSession:
                     status, summary = 'failed', f'{summary}\n\nKiểm tra độc lập không đạt: {failed}.'.strip()
         elif box and box.last_test:
             checks = box.last_test.get('checks', [])
+        tag_list: dict = {}
+        if status == 'ready' and draft is not None and self.req.tag_list:
+            tag_list = self._bundle_tag_list(draft)
         files = sorted(str(p.relative_to(draft)) for p in draft.rglob('*') if p.is_file()) if draft is not None and draft.is_dir() else []
         report = {
             'session': self.id, 'url': self.req.url, 'site': box.site_url if box else '', 'mode': self.req.mode,
@@ -349,13 +365,22 @@ class GenSession:
             'draftDir': str(draft) if draft is not None else '', 'files': files, 'checks': checks,
             'testRuns': box.test_runs if box else 0, 'requests': box.fetcher.used if box else 0,
             'usage': self.usage.to_dict(), 'usd': self._usd(), 'maxUsd': self.req.max_usd, 'turns': self.turns,
-            'startedAt': self.started, 'finishedAt': _now(), 'log': self.log[-200:], 'repairOf': self.req.repair,
+            'startedAt': self.started, 'finishedAt': _now(), 'log': self.log[-200:], 'repairOf': self.req.repair, 'tagList': tag_list,
         }
         try:
             (self.dir / 'report.json').write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str) + '\n', encoding='utf-8')
         except OSError:
             pass
         return report
+
+
+def _tag_list_note(res: dict) -> str:
+    status = res.get('status')
+    if status == 'bundled':
+        return f'đã kèm {res.get("count", 0):,} tag vào bản nháp ({res.get("file")})'.replace(',', '.')
+    if status == 'learned':
+        return 'site không có danh sách tag dùng được (hoặc robots.txt cấm): app học dần từ post bạn xem và tải'
+    return 'app sẽ tải danh sách ngay sau khi cài'
 
 
 def _short_result(name: str, text: str, is_error: bool) -> str:

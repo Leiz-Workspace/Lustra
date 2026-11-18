@@ -12,15 +12,18 @@
     { id: 'full-mask-orange', name: 'Full mask · Orange' }, { id: 'exposed-jaw-orange', name: 'Exposed jaw · Orange' },
     { id: 'full-mask-monochrome', name: 'Full mask · Mono' }, { id: 'exposed-jaw-monochrome', name: 'Exposed jaw · Mono' },
   ];
+  const mockSchedule = { ok: true, kind: 'crontab', enabled: false, installed: false, frequency: 'weekly', time: '04:31',
+    modules: [{ module: 'db', name: 'Danbooru' }, { module: 'fb', name: 'Fakebooru' }], log: '~/.config/Lustra/logs/tags-schedule.log', lastRun: 0 };
   const settings = {
     appearance: { theme: 'ember', icon: 'full-mask-orange', background: { mode: 'icon', image: '', blur: 4, opacity: 0.9, dim: 0.18 } },
     search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {}, filtersOpen: true },
     download: { path: '/home/user/Downloads/Lustra', threads: 4, images: true, videos: true, videoFormat: '', lowRes: false, prefix: true,
       gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags', verifyMedia: false },
+      safetyBlacklist: false,
       appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },
-    tags: { autoUpdate: false, autoUpdateDays: 7 },
+    tags: { autoUpdate: false, autoUpdateDays: 7, schedule: { enabled: false, frequency: 'weekly' } },
     advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
     ai: { model: 'claude-opus-5-5', maxUsd: 2 },
     genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
@@ -78,11 +81,18 @@
     { id: 'danbooru', name: 'Danbooru', abbr: 'db', version: '1.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['gender_tags', 'parent_child', 'preview'],
       site: 'https://danbooru.donmai.us/', description: 'Danbooru JSON API. Anonymous search is limited to 2 tags: extra tags are checked locally.', auth: { apiKey: true, apiKeyFormat: 'API_KEY,LOGIN' },
       syntax: { maxTags: 2 } },
-    { id: 'rule34', name: 'Rule34', abbr: 'rx', version: '2.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['gender_tags', 'parent_child', 'preview'],
+    { id: 'rule34', name: 'Rule34', abbr: 'rx', version: '2.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['api_key', 'api_key_required', 'gender_tags', 'parent_child', 'preview'],
       site: 'https://rule34.xxx/', description: 'Gelbooru-based DAPI (XML). API key + user id recommended.', auth: { apiKey: true, apiKeyFormat: 'KEY,USER_ID' }, syntax: { maxTags: 0 } },
     { id: 'e621', name: 'e621', abbr: 'en', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://e621.net/', description: 'e621 JSON API (2 requests/second).', auth: {}, syntax: { maxTags: 40 } },
     { id: 'paheal', name: 'Rule34 Paheal', abbr: 'rp', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://rule34.paheal.net/', description: 'Shimmie danbooru-compatible API. Max 3 tags.', auth: {}, syntax: { maxTags: 3 } },
     { id: 'xbooru', name: 'Xbooru', abbr: 'xb', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://xbooru.com/', description: 'Gelbooru-based DAPI (XML).', auth: {}, syntax: { maxTags: 0 } },
+    // made by the extension generator (lustra.extgen): its tag list comes from its engine (tags.sources)
+    { id: 'fakebooru', name: 'Fakebooru', abbr: 'fb', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://fakebooru.example/',
+      description: 'Fakebooru: Gelbooru 0.2 DAPI (XML)', auth: {}, syntax: { maxTags: 0 }, tagList: 'fb_tags.json',
+      generator: { tool: 'lustra.extgen', engine: 'gelbooru_dapi', createdAt: '2026-11-18T08:00:00Z' } },
+    // a site without a tag listing: its list is learned from the posts previewed and downloaded (tags.learn, learned: true)
+    { id: 'htmlsite', name: 'Htmlsite', abbr: 'hs', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image'], site: 'https://htmlsite.example/',
+      description: 'Htmlsite: custom HTML', auth: {}, syntax: { maxTags: 0 }, generator: { tool: 'lustra.aigen', engine: 'custom', createdAt: '2026-11-18T09:00:00Z' } },
   ];
   const PAGE_MAX = { db: 200, rx: 1000 };
   const TAGS = [
@@ -230,7 +240,15 @@
         return { total: rows.length, items: rows.slice(p.offset, p.offset + p.limit).map(([tag, posts, type]) => ({ tag, posts, type })) };
       }
       if (method === 'tags.validate') return { valid: !/[\s]{2,}|\(\)/.test(p.tags), tags: p.tags.split(' ') };
-      if (method === 'tags.status') return [{ module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }];
+      if (method === 'tags.sources') {
+        return [
+          { module: 'rx', name: 'Rule34', engine: 'gelbooru_dapi', site: 'https://api.rule34.xxx/', key: 'required', keyFormat: 'KEY,USER_ID', robots: false, curated: true, description: 'DAPI tag index, after_id cursor' },
+          { module: 'db', name: 'Danbooru', engine: 'danbooru_json', site: 'https://danbooru.donmai.us/', key: 'optional', keyFormat: 'API_KEY,LOGIN', robots: false, curated: true, description: 'tags.json, id cursor' },
+          { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, description: 'DAPI tag index, after_id cursor' },
+        ];
+      }
+      if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12 };
+      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;
@@ -253,7 +271,11 @@
       }
       throw new Error(`mock: ${method}`);
     },
-    tags: { update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; } },
+    tags: {
+      update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; },
+      scheduleStatus: async () => ({ ...mockSchedule }),
+      schedule: async (o) => { Object.assign(mockSchedule, { enabled: !!o.enabled, installed: !!o.enabled, frequency: o.frequency || 'weekly' }); return { ...mockSchedule }; },
+    },
     search: {
       count: async (q) => { await delay(300 + latency('search.count', q)); return { count: 143815, requiredTags: [] }; },
       preview: async (q, page) => {
@@ -454,7 +476,7 @@
     },
     appearance: { setBackgroundImage: async () => appearance() },
     app: {
-      info: async () => ({ version: '2.0.4', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
+      info: async () => ({ version: '2.0.5', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
       relaunch: async () => location.reload(), installLauncher: async () => ({ ok: false, message: 'mock' }), openPath: async () => '', openExternal: async () => false,
     },
     thumbUrl: (url) => url,

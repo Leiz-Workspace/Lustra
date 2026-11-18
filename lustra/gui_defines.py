@@ -104,6 +104,7 @@ OPTION_CMD_GENDER_CONF_CMD = '-gender_conf'
 OPTION_CMD_GENDER_STRICT = ('', '-gender_strict')
 OPTION_CMD_GENDER_VERIFY_MEDIA = ('', '-gender_verify_media')
 OPTION_CMD_SKIP_KNOWN = ('', '-skip_known')
+OPTION_CMD_SAFETY_BLACKLIST = ('', '-safety_blacklist')
 GENDER_MODES = ('tags', 'model')
 GENDER_CONFS = ('low', 'medium', 'high')
 # non-gui
