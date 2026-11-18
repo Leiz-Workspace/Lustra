@@ -147,12 +147,26 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
 ## 3d. Catalog extension từ xa: ký số
 App và CLI chỉ tin catalog từ xa (`Settings → Advanced → Catalog URL`, `LUSTRA_CATALOG_URL`) khi `index.json` có file chữ ký `index.json.sig` cạnh nó, ký bằng Ed25519 với khoá có trong `lustra/safety_data/catalog_keys.json`. Lõi kiểm chữ ký trên đúng các byte của `index.json` trước khi đọc bất kỳ mục nào; mỗi mục ghi sha256 của archive nên chữ ký phủ luôn các archive. Kiểm bằng `lustra/ed25519.py` (Python thuần theo RFC 8032, có test vector), không cần thư viện thêm.
 
-Hiện trạng: `catalog_keys.json` để **danh sách rỗng (khoá giữ chỗ)**, nên mọi catalog từ xa bị từ chối với lời nhắn "chưa có khoá công khai". Người bảo trì giữ khoá bí mật và làm một lần:
+**Catalog chính thức** (từ Lustra 2.0.4): `https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json`, là mặc định của ô "Catalog URL" (`settings.advanced.catalogUrl`; ô để trống cũng dùng URL này).
+- Các file nằm trong release `catalog` của repo GitHub: `index.json`, `index.json.sig` và một zip cho mỗi extension trong `extensions/`. Tag `catalog` không khớp `v*`, nên không kích workflow phát hành nào.
+- Chữ ký dùng khoá `b852144452eea5dc`; khoá công khai có trong `catalog_keys.json`. Bản Lustra cũ hơn 2.0.4 không có khoá nên từ chối catalog này.
+- Khoá bí mật nằm ngoài repo, trên máy của người bảo trì: `~/lustra-keys/signing-key.pem` (thư mục 0700, file 0600). Phải có bản sao lưu offline: mất khoá thì phải phát hành khoá mới; lộ khoá thì phải bỏ khoá khỏi app ngay (xem "Lộ khoá" bên dưới).
+
+Tạo khoá (đã làm một lần, ngày 2026-11-18):
 ```bash
 python tools/sign_catalog.py genkey --out ~/lustra-keys/signing-key.pem    # file 0600, không ghi đè; giữ offline, có bản sao lưu
 python tools/sign_catalog.py pubkey --key ~/lustra-keys/signing-key.pem    # in mục {keyId, publicKey, comment}
 ```
 Dán mục in ra vào `"keys"` của `lustra/safety_data/catalog_keys.json`, commit file đó (chỉ có khoá công khai) rồi phát hành bản Lustra mới. Không bao giờ commit khoá bí mật (`.gitignore` bỏ qua `*.pem`, `*.key`, `signing-key*`); có thể tạo khoá bằng `openssl genpkey -algorithm ed25519 -out signing-key.pem`, cùng định dạng.
+
+Cập nhật catalog chính thức (khi một extension trong `extensions/` đổi `version`, và trước ngày `expires`, hiện là 2027-05-17):
+```bash
+python tools/build_catalog.py --out /tmp/lustra-catalog     # zip tất định cho mỗi extension + index.json
+python tools/sign_catalog.py sign /tmp/lustra-catalog/index.json --key ~/lustra-keys/signing-key.pem --expires-days 180
+python tools/sign_catalog.py verify /tmp/lustra-catalog/index.json
+gh release upload catalog /tmp/lustra-catalog/* --repo Leiz-Workspace/Lustra --clobber
+```
+Extension không đổi giữ nguyên sha256, vì zip tất định. Zip của bản cũ có thể giữ lại trong release cho tới khi người dùng đã cập nhật.
 
 Mỗi lần sửa catalog:
 ```bash

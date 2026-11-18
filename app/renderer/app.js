@@ -2095,10 +2095,12 @@ $('#tags-autoupdate').addEventListener('change', (e) => saveSettings({ tags: { a
 $('#tags-autoupdate-days').addEventListener('change', (e) => saveSettings({ tags: { autoUpdateDays: Math.max(1, Number(e.target.value) || 7) } }));
 
 // ---------------- extensions ----------------
+// the official signed catalog, also the default of settings.advanced.catalogUrl (main.js): an empty field falls back to it
+const OFFICIAL_CATALOG_URL = 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json';
 async function renderExtensions() {
   await loadModules();
   $('#ext-grid').replaceChildren(...S.modules.map((m) => extCard(m, false)));
-  $('#catalog-url').value = S.settings.advanced.catalogUrl || '';
+  $('#catalog-url').value = S.settings.advanced.catalogUrl || OFFICIAL_CATALOG_URL;
   renderGen();
 }
 function extCard(m, remote) {
