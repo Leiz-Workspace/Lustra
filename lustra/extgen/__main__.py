@@ -5,8 +5,11 @@ python -m lustra.extgen <command> ...   (used by the Claude Code skill new-site-
   fetch <url> [--accept A] [--max-chars N]
                                        one GET through the guarded fetcher (robots.txt, https only, no cookies, 2 MB):
                                        status, type and the body (scripts / styles removed) to read an api / page
-  new <url> --out DIR [--id --abbr --name --media image,video --engine E]
-                                       create DIR/<id>/ (manifest.json, specs.md, downloader.py for template engines)
+  new <url> --out DIR [--id --abbr --name --media image,video --engine E] [--no-tags]
+                                       create DIR/<id>/ (manifest.json, specs.md, downloader.py for template engines) and read
+                                       the site's tag list into it (<abbr>_tags.json, see tags)
+  tags DIR                             read the site's tag list into the draft (engines with a tag listing, robots.txt
+                                       applies, 30 requests / 90 s / 8 MB at most: bigger lists are read by the app after the install)
   record DIR --query "tags" [--limit 3]
                                        live test run in the sandbox: records fixtures + expected.json
   check DIR                            offline: manifest + static policy + replay of the fixtures
@@ -34,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     from .fetch import FetchPolicyError, normalize_site, redact_url, strip_html
     from .sandbox import check_draft, pack, record
     from .scaffold import create_draft, fetcher_for, survey
+    from .taglist import bundle_tag_list
 
     p = argparse.ArgumentParser(prog='python -m lustra.extgen', allow_abbrev=False)
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -51,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument('--name', default='')
     n.add_argument('--media', default='image,video')
     n.add_argument('--engine', default='')
+    n.add_argument('--no-tags', action='store_true')
+    g = sub.add_parser('tags')
+    g.add_argument('draft')
     r = sub.add_parser('record')
     r.add_argument('draft')
     r.add_argument('--query', required=True)
@@ -80,10 +87,15 @@ def main(argv: list[str] | None = None) -> int:
             draft = create_draft(pathlib.Path(a.out), sv, ext_id=a.id, abbr=a.abbr, name=a.name, engine=a.engine,
                                  media=[x.strip() for x in a.media.split(',') if x.strip()])
             has_code = (draft / 'downloader.py').is_file()
-            _print({'draft': str(draft), 'survey': sv, 'downloaderGenerated': has_code,
+            tags = {'status': 'skipped', 'message': '--no-tags'} if a.no_tags else bundle_tag_list(draft)
+            _print({'draft': str(draft), 'survey': sv, 'downloaderGenerated': has_code, 'tagList': tags,
                     'next': f'python -m lustra.extgen record {draft} --query "<tags>"' if has_code else
                     'write downloader.py (no template for this engine), then record'})
             return 0
+        if a.cmd == 'tags':
+            res = bundle_tag_list(pathlib.Path(a.draft))
+            _print(res)
+            return 0 if res['status'] in ('bundled', 'later', 'learned') else 1
         if a.cmd == 'record':
             draft = pathlib.Path(a.draft)
             site = json.loads((draft / 'manifest.json').read_text(encoding='utf-8'))['site']

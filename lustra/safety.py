@@ -1,9 +1,11 @@
 # coding=UTF-8
 """
 Lustra: hard safety blacklist for content suggesting minors (docs/plans/gender-filter-model.md §4.1)
-Product decision 2026-11-16: the blacklist runs whenever a content filter (-gender) is enabled, it is not app-wide.
-While a filter is enabled it cannot be turned off. The list is hard-coded: settings, CLI, environment and tag lists
-cannot change it; extensions may only ADD tags (manifest "safetyTags"). There is intentionally no removal API.
+Product decision 2026-11-18 (replaces the one of 2026-11-16, where the gender filter turned it on): the blacklist is its own
+filter, -safety_blacklist, independent of -gender and off by default; the user turns it on. Once on it applies to previews
+and downloads, fails closed when tags are unknown, and also enables the image model's safety gate. The list is hard-coded:
+settings, CLI, environment and tag lists cannot change it; extensions may only ADD tags (manifest "safetyTags"). There is
+intentionally no removal API.
 """
 #########################################
 #

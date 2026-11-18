@@ -294,7 +294,8 @@ def run_target(t: Target, *, mode: str, drafts_root: pathlib.Path, model: str, m
             recorder = Recorder(pathlib.Path(record) / t.name, site)
             fetcher._session = RecordingSession(fetcher._session, recorder)
     req = GenRequest(url=t.url, media=t.media, model=model, max_usd=t.max_usd or max_usd, max_turns=t.max_turns or max_turns,
-                     mode='template' if mode == 'template' else 'ai', query=t.query)
+                     mode='template' if mode == 'template' else 'ai', query=t.query,
+                     tag_list=False)  # the eval measures the generator: no tag list traffic (not in the fixtures either)
     client = None
     if mode == 'fake':
         client = FakeModelClient(query=t.query, media=t.media)

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import pathlib
 
+from lustra.tags_updater import ENGINE_TAG_SOURCES
+
 from .engines import ENGINES, detect_engine
 from .fetch import FetchPolicyError, SafeFetcher, check_denied, host_of, normalize_site
 from .templates import TEMPLATE_ENGINES, existing_extensions, make_manifest, render_downloader, suggest_names, validate_names
@@ -22,6 +24,7 @@ SPECS_TEMPLATE = '''# {name} ({abbr}) — extension specs
 - Site: {site}
 - Engine: {engine} ({engine_desc}), confidence {confidence}
 - robots.txt: {robots}
+- Tag list: {tag_list}
 - Generated: lustra.extgen ({how})
 
 ## Evidence
@@ -89,6 +92,8 @@ def create_draft(base_dir: pathlib.Path, survey_result: dict, *, ext_id: str = '
     (draft / 'specs.md').write_text(SPECS_TEMPLATE.format(
         name=name, abbr=abbr, site=site, engine=engine, engine_desc=ENGINES[engine]['description'], confidence=eng['confidence'],
         robots=f'{robots.get("status", "?")}, crawl-delay {robots.get("crawlDelay", 0)} s', evidence=evidence, notes=notes,
+        tag_list=(f'`{manifest["tagList"]}` from {ENGINE_TAG_SOURCES[engine]} (lustra-core tags --modules {abbr}, robots.txt applies)'
+                  if manifest.get('tagList') else 'none (no tag listing known for this engine)'),
         how='template' if engine in TEMPLATE_ENGINES else 'downloader.py must be written (AI or developer)'), encoding='utf-8')
     return draft
 

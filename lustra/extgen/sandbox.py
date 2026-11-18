@@ -31,6 +31,7 @@ from lustra.modspec import ExtensionManifest
 
 from .fetch import FetchPolicyError, SafeFetcher, host_of, redact_url
 from .policy import check_manifest, check_source
+from .taglist import draft_tag_list
 
 __all__ = ('check_draft', 'pack', 'record', 'run_sandbox')
 
@@ -266,10 +267,13 @@ def check_draft(draft: pathlib.Path) -> dict:
 
 
 def pack(draft: pathlib.Path, dest: pathlib.Path) -> dict:
-    """Deterministic zip (sorted names, fixed timestamps, no caches / reports) + sha256"""
+    """Deterministic zip (sorted names, fixed timestamps, no caches / reports) + sha256. The site's tag list (the manifest's
+    tagList, lustra/extgen/taglist.py) goes in too"""
     draft = pathlib.Path(draft).resolve()
     m = ExtensionManifest.load(draft / 'manifest.json', 'user')
     files = [draft / f for f in PACK_FILES if (draft / f).is_file()]
+    if (tag_list := draft_tag_list(draft)) is not None:
+        files.append(tag_list)
     tests = draft / 'tests'
     if tests.is_dir():
         files += sorted(p for p in tests.rglob('*') if p.is_file() and '__pycache__' not in p.parts)

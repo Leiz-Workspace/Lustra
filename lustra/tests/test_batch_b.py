@@ -374,9 +374,9 @@ class TagListTests(TestCase):
 
     def test_gelbooru_unescape_and_cursor_guard(self) -> None:
         xml = '<tags><tag type="0" count="5" name="tom_&amp;_jerry" id="10"/><tag type="0" count="3" name="it&#039;s" id="11"/></tags>'
-        resp = SimpleNamespace(text=xml)
-        with mock.patch.object(tags_updater, '_get', return_value=resp), mock.patch.object(tags_updater, 'PAGE_LIMIT', 2):
-            gen = tags_updater._iter_gelbooru('https://x/', '', 1, 0, 0)
+        client = SimpleNamespace(site='https://x/', get=lambda *_a, **_k: SimpleNamespace(text=xml))  # the same page every time
+        with mock.patch.object(tags_updater, 'PAGE_LIMIT', 2):
+            gen = tags_updater._iter_gelbooru(client, '', 1, 0)
             self.assertEqual(('tom_&_jerry', 5, 'general'), next(gen))
             self.assertEqual(("it's", 3, 'general'), next(gen))
             with self.assertRaises(RuntimeError):  # same page again: cursor did not move
@@ -387,12 +387,13 @@ class TagListTests(TestCase):
         active.parent.mkdir()
         tags_updater.write_tag_list(active, {f't{i}': (i + 1, 'general') for i in range(100)})
         out = self.dir / 'data'
-        with mock.patch.object(tags_updater, '_iter_module', return_value=iter([('a', 1, 'general')])):
-            res = tags_updater.update_tag_list('zz', out, reference=active)
+        src = tags_updater.TagSource('zz', 'gelbooru_dapi', 'https://x.test/')
+        with mock.patch.object(tags_updater, '_iter_source', return_value=iter([('a', 1, 'general')])):
+            res = tags_updater.update_tag_list('zz', out, reference=active, source=src)
         self.assertFalse(res.written)
         self.assertEqual(100, res.previous)
-        with mock.patch.object(tags_updater, '_iter_module', return_value=iter([])):
-            res = tags_updater.update_tag_list('zz', out, force=True)
+        with mock.patch.object(tags_updater, '_iter_source', return_value=iter([])):
+            res = tags_updater.update_tag_list('zz', out, force=True, source=src)
         self.assertFalse(res.written)
         self.assertFalse((out / 'zz_tags.json').exists())
         self.assertEqual([], [p.name for p in out.iterdir() if p.name.endswith('.tmp')])

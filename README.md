@@ -19,12 +19,17 @@ site cannot, and download in the background, at the pace each site allows.
   schedule; one query on several sites at once, with files already downloaded from another site skipped.
 - **Local index**: every finished file is recorded (tags, score, rating, md5, path), so the **Downloaded** page searches
   your library offline; import a library you downloaded before, clean rows whose files are gone.
-- **Character gender filter**: keep or exclude `only_female`, `only_male`, `both`, `none` from tags, with an extra safety
-  blacklist; optionally an image model for posts whose tags are not enough (see [Gender model server](#gender-model-server)).
+- **Character gender filter**: keep or exclude `only_female`, `only_male`, `both`, `none` from tags; optionally an image
+  model for posts whose tags are not enough (see [Gender model server](#gender-model-server)).
+- **Safety blacklist** (its own filter, off by default): drops posts whose tags suggest minors, in previews and downloads.
 - **Extensions**: Rule34 (`rx`) and Danbooru (`db`) are built in; e621, Xbooru, Rule34.us, Rule34 Paheal,
   Rule34 Hentai and Bbooru are optional extensions. **Create an extension for a new site** from its address, with or
   without Claude: the result is always a draft you review, never installed on its own.
 - Proxies (http, https, socks5), per-site headers and cookies, encrypted API keys, 4 themes and 4 icons.
+- **Rule34 needs your own API key** (rule34.xxx: My Account > Options > API Access Credentials), entered in Settings >
+  API key theo module as `KEY,USER_ID`. Lustra ships no shared key.
+- Tag lists for autocompletion, one per site, updated on demand, when the app opens, or on a system schedule (crontab /
+  Task Scheduler) that runs while the app is closed.
 
 Lustra is based on the original work of [trickerer01](https://github.com/trickerer01) (MIT License). Full documentation, in
 Vietnamese: [docs/README.md](docs/README.md) (specifications, components, operations, plans) and the development log

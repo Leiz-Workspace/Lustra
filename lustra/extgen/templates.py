@@ -16,6 +16,7 @@ import re
 
 from lustra.module import ProcModule
 from lustra.sdk import SDK_VERSION
+from lustra.tags_updater import ENGINE_TAG_SOURCES
 from lustra.vcs.version import APP_VERSION
 
 from .fetch import host_of
@@ -129,10 +130,12 @@ def class_name(abbr: str) -> str:
 
 def make_manifest(*, ext_id: str, abbr: str, name: str, site: str, engine: str, media: list[str], description: str = '',
                   syntax: dict | None = None, api_key: bool = False, generator: dict | None = None) -> dict:
-    """manifest.json content. '$generator' records the origin (modspec ignores '$' keys)"""
+    """manifest.json content. '$generator' records the origin (modspec ignores '$' keys). An engine with a tag listing gets
+    'tagList': lustra.tags_updater reads that site's tags into '<abbr>_tags.json' (autocompletion, Tags A-Z)"""
     m = {
         'id': ext_id, 'name': name, 'abbr': abbr, 'version': '1.0.0', 'apiVersion': 1, 'kind': 'downloader', 'default': False,
         'site': site, 'media': [x for x in media if x in ('image', 'video', 'audio')] or ['image', 'video'],
+        **({'tagList': f'{abbr}_tags.json'} if engine in ENGINE_TAG_SOURCES else {}),
         'entry': f'downloader.py:{class_name(abbr)}', 'minSdkVersion': SDK_VERSION, 'description': description[:300],
         'syntax': syntax if syntax is not None else SYNTAX_BY_ENGINE.get(engine, DANBOORU_SYNTAX),
         '$generator': {'tool': 'lustra.extgen', 'toolVersion': APP_VERSION, 'engine': engine, 'sourceUrl': site,

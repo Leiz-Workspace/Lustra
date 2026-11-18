@@ -496,11 +496,22 @@ class VerifyDownloadedMediaTests(TestCase):
         self.assertEqual(GenderConf.HIGH, self.dwn.gender_results['1'].conf)
 
     def test_safety_gate_on_a_frame(self) -> None:
+        # with -safety_blacklist the model's minor coded tag on a frame moves the file away
+        self.dwn.safety_blacklist = True
         p = self.file('1.mp4')
         with mock.patch('lustra.gender_model.verdict_for_media', return_value=(self.verdict(GenderLabel.ONLY_FEMALE, 'loli'), 8)):
             moved = self.dwn._verify_media_file('1', p)
         self.assertEqual(self.dest / GENDER_MISMATCH_DIR / '1.mp4', moved)
         self.assertTrue(moved.exists())
+
+    def test_no_safety_gate_without_the_option(self) -> None:
+        # the gender filter alone does not turn the model's safety gate on: the frame label decides, only_female is kept
+        self.assertFalse(self.dwn.safety_blacklist)
+        p = self.file('1.mp4')
+        with mock.patch('lustra.gender_model.verdict_for_media', return_value=(self.verdict(GenderLabel.ONLY_FEMALE, 'loli'), 8)):
+            kept = self.dwn._verify_media_file('1', p)
+        self.assertEqual(p, kept)
+        self.assertTrue(kept.exists())
 
     def test_not_checked(self) -> None:
         cases = {

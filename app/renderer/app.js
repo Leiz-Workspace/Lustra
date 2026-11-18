@@ -203,11 +203,37 @@ const hasCap = (abbr, cap) => {
   return true;
 };
 
+// modules whose API needs the user's own key (Lustra ships no shared key): nothing runs without one
+const needsKey = (abbr) => {
+  const caps = moduleInfo(abbr)?.capabilities; // unknown until the module list is loaded: never claimed then
+  return Array.isArray(caps) && caps.includes('api_key_required') && !S.secrets?.modules?.[abbr];
+};
+function renderKeyNeeded() {
+  const m = moduleInfo(S.module);
+  const show = !!S.settings && needsKey(S.module);
+  $('#key-needed').hidden = !show;
+  if (show) {
+    $('#key-needed-text').textContent = `${m?.name || S.module} cần khoá API riêng của bạn (Lustra không dùng khoá chung). `
+      + 'Lấy khoá trên site (tài khoản → Options → API Access Credentials), rồi nhập dạng KEY,USER_ID.';
+  }
+}
+function requireKey(abbr) {
+  if (!needsKey(abbr)) return true;
+  toast(`${moduleInfo(abbr)?.name || abbr} cần khoá API riêng: Cài đặt → API key theo module`, 'err');
+  return false;
+}
+$('#key-needed-btn').addEventListener('click', () => {
+  showPage('settings');
+  const row = $('#api-keys');
+  row.scrollIntoView({ block: 'center' });
+  [...row.querySelectorAll('.key-row')].find((r) => r.querySelector('.mod-abbr')?.textContent === S.module)?.querySelector('input')?.focus();
+});
+
 // ---------------- navigation ----------------
 function showPage(name) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === name));
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${name}`));
-  if (name === 'tags') refreshTagStatus();
+  if (name === 'tags') { refreshTagStatus(); renderTagSchedule(); }
   if (name === 'settings') refreshIndexStats();
   if (name === 'library') openLibrary();
   if (name === 'extensions') renderExtensions();
@@ -268,6 +294,7 @@ function renderModuleButton() {
   $('#f-vformat-wrap').hidden = !hasCap(S.module, 'videoFormat');
   $('#f-audio-wrap').hidden = !(moduleInfo(S.module)?.media || []).includes('audio');
   $('#f-parchi-wrap').hidden = !hasCap(S.module, 'parchi');
+  renderKeyNeeded();
   renderGenderFilter();
   renderMultiSites();
 }
@@ -297,7 +324,6 @@ function renderGenderFilter() {
     : 'Chỉ dùng được với cách xác định "Tag + model (ảnh)"';
   const hint = [];
   if (g.select.length) hint.push(`${ex ? 'loại' : 'giữ'}: ${genderPicked(g)}`);
-  if (g.select.length) hint.push('danh sách chặn an toàn cũng được áp dụng');
   if (g.select.length && !hasCap(S.module, 'gender')) hint.push(`${S.module.toUpperCase()} ít tag giới tính, phần lớn post sẽ là "Không rõ"`);
   $('#f-gender-hint').textContent = hint.join(' · ');
 }
@@ -859,6 +885,7 @@ function currentQuery() {
     module: S.module, tags: queryString(),
     dateMin: $('#f-datemin').value, dateMax: $('#f-datemax').value,
     gender: genderState(),
+    safetyBlacklist: $('#f-safety').checked, // -safety_blacklist: its own filter, never implied by the gender filter
   };
 }
 // closed filters panel: one line summary of what differs from "everything" (media, dates, limit, gender...)
@@ -876,6 +903,7 @@ function filtersSummary() {
     g.select.length ? `giới tính ${g.op === 'exclude' ? 'bỏ' : 'giữ'}: ${genderPicked(g)}` : '',
     g.select.length && g.mode === 'model' && g.verifyMedia && gmOn() ? 'xem lại video sau khi tải' : '',
     o.skipKnown ? 'bỏ file đã tải' : '',
+    $('#f-safety').checked ? 'chặn nội dung gợi ý trẻ vị thành niên' : '',
     o.lowRes ? 'ảnh nhẹ' : '',
     multi.size ? `+${multi.size} site` : '',
   ].filter(Boolean);
@@ -886,6 +914,8 @@ $('#filters').addEventListener('toggle', () => {
   if (S.settings && S.settings.search.filtersOpen !== $('#filters').open) saveSettings({ search: { filtersOpen: $('#filters').open } });
 });
 $('#filters').addEventListener('change', filtersSummary);
+// the safety blacklist check box is remembered (download.safetyBlacklist) and sent with each query
+$('#f-safety').addEventListener('change', (e) => saveSettings({ download: { safetyBlacklist: e.target.checked } }));
 $('#filters').addEventListener('click', () => requestAnimationFrame(filtersSummary)); // gender pills are buttons
 
 function downloadOptions() {
@@ -900,6 +930,7 @@ function downloadOptions() {
 $('#btn-count').addEventListener('click', async () => {
   const q = currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!requireKey(q.module)) return;
   recordHistory(q);
   const seq = ++S.countSeq;
   const btn = $('#btn-count');
@@ -930,6 +961,7 @@ function previewPageSize() {
 async function runPreview(page = 0) {
   const q = { ...currentQuery(), pageSize: previewPageSize() };
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!requireKey(q.module)) return;
   recordHistory(q);
   // every request gets a sequence number: an older answer arriving late never replaces a newer one
   const seq = ++S.preview.seq;
@@ -1205,6 +1237,7 @@ $('#lib-next').addEventListener('click', () => runLibrary(LIB.page + 1));
 async function startDownload(override = null) {
   const q = override ? { ...currentQuery(), ...override } : currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!requireKey(q.module)) return;
   if (!override?.tags) recordHistory(q); // "download selected" builds an id: query, not something the user typed
   const path = $('#f-path').value.trim() || S.settings.download.path;
   try {
@@ -2061,38 +2094,107 @@ function pruneJobGroups() {
 }
 
 // ---------------- tag lists status / update ----------------
-const UPDATABLE = ['rx', 'db', 'xb', 'bb', 'en'];
+// sources come from the core (tags.sources, lustra/tags_updater.py): the reviewed modules (rx, db, xb, bb, en) and every installed
+// extension made from an engine with a tag listing (lustra.extgen writes '$generator.engine' and 'tagList' into its manifest)
+const TAG_KEY_NOTE = { required: 'Cần API key của bạn', optional: 'Dùng API key của bạn nếu có' };
+const LEARNED_TITLE = 'Site không có danh sách tag dùng được (không có API, hoặc robots.txt cấm): Lustra học dần từ tag của các post '
+  + 'đã xem trong Preview và đã tải, không gửi thêm request. Số post là số post đã thấy ở đây, không phải số trên site.';
+function tagSourceTitle(src) {
+  const rule = src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.';
+  const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
+  return `${src.site} — ${src.description}. ${rule}${key}`;
+}
 async function refreshTagStatus() {
   if (!azPage.loaded) { azPage.loaded = true; azPage.reload(); }
   let rows = [];
+  let sources = [];
   try {
     rows = await L.rpc('tags.status');
     S.tagLists = new Set(rows.filter((r) => r.size > 0).map((r) => r.module));
   } catch { /* ignore */ }
+  try { sources = await L.rpc('tags.sources'); } catch { /* core without tags.sources: no update buttons */ }
   const byMod = Object.fromEntries(rows.map((r) => [r.module, r]));
-  const mods = S.modules.filter((m) => m.installed).map((m) => m.abbr);
+  const srcByMod = Object.fromEntries((Array.isArray(sources) ? sources : []).map((src) => [src.module, src]));
+  const installed = S.modules.filter((m) => m.installed);
+  const mods = [...installed.filter((m) => srcByMod[m.abbr]), ...installed.filter((m) => !srcByMod[m.abbr])]; // updatable first
   const table = $('#tag-status');
   table.replaceChildren(
-    h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Cập nhật'), h('th', {}, '')),
-    ...mods.map((m) => {
+    h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'Nguồn'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Cập nhật'),
+      h('th', {}, '')),
+    ...mods.map(({ abbr: m, name }) => {
       const r = byMod[m];
+      const src = srcByMod[m];
+      const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
+      let action;
+      if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
+      else if (!src) {
+        action = h('button', { class: 'btn sm', title: 'Đọc tag của các file đã tải (index), không gửi request tới site', onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          try {
+            const res = await L.rpc('tags.learn', { module: m });
+            toast(res.newPosts ? `Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải` : `Tag ${m}: không có post đã tải mới`);
+            refreshTagStatus();
+            loadTagLists();
+          } catch (err) { toast(errMsg(err), 'err'); }
+        } }, 'Học từ file đã tải');
+      } else if (keyMissing) action = h('span', { class: 'muted', title: `Nhập key ở Cài đặt → API key (${src.keyFormat})` }, 'cần API key');
+      else {
+        action = h('button', { class: 'btn sm', onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          try { await L.tags.update(m); toast(`Đang cập nhật danh sách tag ${m}…`); } catch (err) { toast(errMsg(err), 'err'); }
+        } }, 'Cập nhật');
+      }
       return h('tr', {},
-        h('td', {}, h('span', { class: 'mod-abbr' }, m)),
+        h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),
+        h('td', { title: src ? tagSourceTitle(src) : (r && !r.learned ? '' : LEARNED_TITLE) },
+          src ? (src.name || name || m) : (r && !r.learned ? '—' : 'học từ post đã xem / đã tải')),
         h('td', { class: 'mono', title: r?.path || '' }, r ? r.path.split(/[\\/]/).slice(-2).join('/') : '—'),
-        h('td', {}, r ? `${(r.size / 1048576).toFixed(1)} MB` : '—'),
+        h('td', { title: r?.learned ? 'Danh sách học từ post đã xem / đã tải' : '' }, r ? `${r.size >= 1048576 ? `${(r.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(r.size / 1024))} KB`}${r.learned ? ' (đã học)' : ''}` : '—'),
         h('td', { id: `tagupd-${m}` }, r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
-        h('td', {}, UPDATABLE.includes(m)
-          ? h('button', { class: 'btn sm', onclick: async (e) => {
-            e.currentTarget.disabled = true;
-            try { await L.tags.update(m); toast(`Đang cập nhật danh sách tag ${m}…`); } catch (err) { toast(errMsg(err), 'err'); }
-          } }, 'Cập nhật')
-          : h('span', { class: 'muted' }, 'không có nguồn')));
+        h('td', {}, action));
     }));
   $('#tags-autoupdate').checked = !!S.settings.tags.autoUpdate;
   $('#tags-autoupdate-days').value = S.settings.tags.autoUpdateDays;
 }
 $('#tags-autoupdate').addEventListener('change', (e) => saveSettings({ tags: { autoUpdate: e.target.checked } }));
 $('#tags-autoupdate-days').addEventListener('change', (e) => saveSettings({ tags: { autoUpdateDays: Math.max(1, Number(e.target.value) || 7) } }));
+
+// ---------------- scheduled tag update (system scheduler, main.js tagScheduleStatus) ----------------
+function showTagSchedule(st) {
+  const on = $('#tags-schedule-on');
+  on.checked = !!(st.enabled && st.installed);
+  on.disabled = !st.ok;
+  $('#tags-schedule-freq').value = st.frequency || 'weekly';
+  $('#tags-schedule-freq').disabled = !st.ok;
+  // 'auto' (main.js TAG_SCHEDULE_MODULES): the core picks the installed modules with a tag source that need no key when it runs
+  const names = (st.modules || []).map((m) => m.name || m.module).filter(Boolean);
+  const mods = names.length ? `các module không cần khoá: ${names.join(', ')}` : 'các module đã cài có nguồn tag và không cần khoá';
+  const where = st.kind === 'schtasks' ? 'Task Scheduler' : 'crontab của bạn';
+  const last = st.lastRun ? new Date(st.lastRun).toLocaleString('vi-VN') : 'chưa chạy lần nào';
+  const text = !st.ok ? st.reason
+    : st.enabled && st.installed ? `Đã đặt lịch trong ${where}: ${st.frequency === 'daily' ? 'mỗi ngày' : 'thứ Hai hằng tuần'} lúc ${st.time}, cho ${mods}. `
+      + `Lần chạy gần nhất: ${last}. Log: ${st.log}.`
+      : st.enabled ? `Lịch đã bật nhưng không còn trong ${where} (bị xoá ngoài app?): tắt rồi bật lại để đặt lại.`
+        : `Chưa đặt lịch. Khi bật, app thêm một mục vào ${where} cho ${mods}.`;
+  $('#tags-schedule-status').textContent = `${text} Extension cài sau cũng được cập nhật theo lịch. Module cần khoá (Rule34) không chạy theo lịch: `
+    + 'được cập nhật khi mở app (ô ở trên) hoặc bằng nút Cập nhật.';
+}
+async function renderTagSchedule() {
+  if (typeof L.tags?.scheduleStatus !== 'function') { $('#tags-schedule').hidden = true; return; }
+  try { showTagSchedule(await L.tags.scheduleStatus()); } catch (err) { $('#tags-schedule-status').textContent = `Không đọc được lịch: ${errMsg(err)}`; }
+}
+async function saveTagSchedule() {
+  try {
+    const st = await L.tags.schedule({ enabled: $('#tags-schedule-on').checked, frequency: $('#tags-schedule-freq').value });
+    showTagSchedule(st);
+    toast(st.enabled ? 'Đã đặt lịch cập nhật danh sách tag' : 'Đã bỏ lịch cập nhật danh sách tag', 'ok');
+  } catch (err) {
+    toast(`Không đặt được lịch: ${errMsg(err)}`, 'err');
+    renderTagSchedule();
+  }
+}
+$('#tags-schedule-on').addEventListener('change', saveTagSchedule);
+$('#tags-schedule-freq').addEventListener('change', () => { if ($('#tags-schedule-on').checked) saveTagSchedule(); });
 
 // ---------------- extensions ----------------
 // the official signed catalog, also the default of settings.advanced.catalogUrl (main.js): an empty field falls back to it
@@ -2849,6 +2951,7 @@ function renderSettings() {
   $('#f-limit').value = s.download.limit;
   $('#f-parchi').checked = s.download.parchi;
   $('#f-skip-known').checked = !!s.download.skipKnown;
+  $('#f-safety').checked = s.download.safetyBlacklist === true;
   renderApiKeys();
   renderTagLimits();
 }
@@ -2900,6 +3003,7 @@ function renderApiKeys() {
         S.secrets = await L.secrets.set(m.abbr, input.value);
         input.value = '';
         renderApiKeys();
+        renderKeyNeeded();
         toast(`Đã lưu API key cho ${m.name}`, 'ok');
       } catch (err) { toast(`Không lưu được key: ${errMsg(err)}`, 'err'); }
     };
@@ -2909,6 +3013,7 @@ function renderApiKeys() {
       try {
         S.secrets = await L.secrets.clear(m.abbr);
         renderApiKeys();
+        renderKeyNeeded();
         toast(`Đã xoá API key của ${m.name}`, 'ok');
       } catch (err) { toast(`Không xoá được key: ${errMsg(err)}`, 'err'); }
     };
@@ -2994,6 +3099,11 @@ function listen() {
     } else if (method === 'app.notice') {
       // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');
+    } else if (method === 'tags.learned') {
+      // a module without a tag list learned it from previewed / downloaded posts (core, lustra/tags_learned.py)
+      resolveHasList.delete(params.module);
+      loadTagLists();
+      if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
       if (params.written) {

@@ -82,7 +82,7 @@
 
 ## UC-12 Lọc theo giới tính nhân vật (tầng 0)
 1. Trong **Bộ lọc & tuỳ chọn tải**, ND bật một hoặc nhiều chip: **Chỉ nữ**, **Chỉ nam**, **Cả hai**, **Không rõ / không có**. Chọn thêm độ tin cậy tối thiểu và có/không **Nghiêm ngặt**.
-2. Hệ thống lưu lựa chọn (`settings.download.gender`) và hiện nhắc "danh sách chặn an toàn cũng được áp dụng". Nếu module có ít tag giới tính, hiện thêm cảnh báo phần lớn post sẽ là "Không rõ".
+2. Hệ thống lưu lựa chọn (`settings.download.gender`). Nếu module có ít tag giới tính, hiện thêm cảnh báo phần lớn post sẽ là "Không rõ". Danh sách chặn nội dung gợi ý trẻ vị thành niên là ô riêng "Chặn nội dung gợi ý trẻ vị thành niên", mặc định tắt, không đi kèm bộ lọc giới tính (quyết định 2026-11-18, thay quyết định 2026-11-16).
 3. **Preview**: mỗi card có badge Nữ / Nam / Nam+Nữ / Không có / ?. Nền đặc nghĩa là tin cậy cao, viền liền là vừa, viền gạch là thấp; tooltip ghi bằng chứng. Post không khớp được đánh dấu "lọc giới tính" và bị ẩn trừ khi bật "Hiện post bị lọc". Post bị chặn không hiện, chỉ được đếm.
 4. **Tải xuống**: CLI nhận `-gender …`; card job hiện "Lọc giới tính: n · Chặn (an toàn): m".
 - Bỏ hết chip → tắt lọc; khi đó danh sách chặn cũng không chạy, hành vi như bản gốc.
