@@ -379,7 +379,7 @@ class TagListTests(TestCase):
             gen = tags_updater._iter_gelbooru(client, '', 1, 0)
             self.assertEqual(('tom_&_jerry', 5, 'general'), next(gen))
             self.assertEqual(("it's", 3, 'general'), next(gen))
-            with self.assertRaises(RuntimeError):  # same page again: cursor did not move
+            with self.assertRaisesRegex(RuntimeError, 'ignores pid'):  # same page again: the site ignores pid (never an endless list)
                 list(gen)
 
     def test_sanity_against_active_list_and_empty(self) -> None:

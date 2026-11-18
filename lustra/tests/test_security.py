@@ -214,9 +214,11 @@ class OwnApiKeyTests(TestCase):
         # 'lustra-core tags' / python -m lustra.tags_updater: the app's scheduled update. Keys: --api-key, else LUSTRA_API_KEY_<MODULE>
         from lustra import tags_updater
         seen: dict[str, str] = {}
+        references: dict[str, pathlib.Path | None] = {}
 
-        def fake_update(module, out_dir, *, api_key='', **_kw):
+        def fake_update(module, out_dir, *, api_key='', reference=None, **_kw):
             seen[module] = api_key
+            references[module] = reference
             if module == 'rx':
                 tags_updater._rx_auth(api_key)
             res = tags_updater.UpdateResult(module, out_dir / f'{module}_tags.json')
@@ -230,6 +232,8 @@ class OwnApiKeyTests(TestCase):
                 code = tags_updater.main(['--modules', 'db,rx', '--out', tmp, '--log', str(log)])
             self.assertEqual(1, code)  # rx without a key fails, db still updated
             self.assertEqual({'db': 'DBKEY,me', 'rx': ''}, seen)
+            # the sanity check compares with the list the app uses now (the bundled one here), not with an empty folder
+            self.assertEqual('rx_tags.json', references['rx'].name if references['rx'] else None)
             text = log.read_text(encoding='utf-8')
             self.assertIn('db: written 3 tags', text)
             self.assertIn('rx: FAILED: rx needs your own API key', text)

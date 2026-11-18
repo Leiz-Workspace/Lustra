@@ -55,7 +55,7 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 
 | Engine | Cách đọc danh sách | Khoá |
 |---|---|---|
-| `gelbooru_dapi` | `index.php?page=dapi&s=tag&q=index`, con trỏ `after_id` | bắt buộc nếu manifest có `auth.apiKey` (site trả "Missing authentication"), nếu không thì dùng khi có (`API_KEY,USER_ID`) |
+| `gelbooru_dapi` | `index.php?page=dapi&s=tag&q=index`, phân trang theo số trang `pid` (danh sách của site không theo thứ tự id) | bắt buộc nếu manifest có `auth.apiKey` (site trả "Missing authentication"), nếu không thì dùng khi có (`API_KEY,USER_ID`) |
 | `danbooru_json` | `tags.json`, con trỏ id `page=a<id>` | dùng khi có (`API_KEY,LOGIN`) |
 | `moebooru_json` | `tag.json?order=name`, theo trang | không |
 | `e621_json` | bản export `db_export/tags-<ngày>.csv.gz` (thử 4 ngày gần nhất) | không |
@@ -79,8 +79,29 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó.
 
 **Lịch sự** (mọi nguồn):
-- Khoảng cách giữa hai request là `--delay` (mặc định 0,5 giây; site của extension ít nhất 1 giây). `Crawl-delay` trong robots.txt được dùng nếu lớn hơn (tối đa 60 giây).
-- Gặp 429 / 503 thì chờ theo `Retry-After` rồi thử lại, tối đa 5 lần.
+- **Nhịp request:** khoảng cách giữa hai request là `--delay` (mặc định 0,5 giây). Bộ cập nhật dùng giá trị lớn nhất trong các mức sau, tối đa 60 giây:
+  - site của extension: ít nhất 1 giây;
+  - giới hạn của khoá API: Rule34 công bố 60 request mỗi 60 giây cho mỗi khoá, nên 1,05 giây (xem "Giới hạn theo khoá" bên dưới);
+  - `Crawl-delay` trong robots.txt.
+- **Gặp 429 / 503:**
+  - chờ theo `Retry-After`; nếu site không gửi thì chờ 5, 15, 30, 60, 120, 180 giây (tổng khoảng 7 phút), rồi mới dừng danh sách;
+  - phần còn lại của lượt tải chạy chậm hơn: theo nhịp site ghi trong phản hồi ("limit of N requests every M second(s)"), không thì chậm 1,5 lần;
+  - lỗi mạng thử lại tối đa 5 lần;
+  - mỗi lần chờ hoặc thử lại đều hiện trong tiến độ (app và log), ví dụ `api.rule34.xxx asks to wait (HTTP 429): waiting 5 s, then one request every 1.05 s`.
+- **Giới hạn theo khoá** (Rule34, và extension khai báo `auth.rateLimit` trong manifest):
+  - Mặc định là giới hạn site công bố (`RATE_LIMIT_RX` trong `lustra/defines.py`, `auth.rateLimit` trong manifest).
+  - Admin của site cấp thêm cho khoá của bạn thì nhập số mới ở **Cài đặt → API key theo module**, ô "Giới hạn của khoá" ngay dưới khoá (request mỗi phút; trống hoặc 0 = giới hạn site công bố).
+  - App ghi số đó vào `<thư mục dữ liệu>/ratelimit/limits.json` (`{"rx": 120}`). Mọi tiến trình lõi đọc file này nên dùng số mới ngay, kể cả sidecar đang chạy. Dòng lệnh / cron: biến `LUSTRA_RATE_LIMIT_RX=120` thắng file.
+  - Giới hạn tính theo khoá, nên mọi tiến trình dùng chung khoá giữ chung một nhịp qua file khoá `<thư mục dữ liệu>/ratelimit/<băm>.ts`: các job tải, Preview, cập nhật danh sách tag. Tải ảnh trong lúc cập nhật tag không còn làm vượt giới hạn. Trang yêu thích / pool của Rule34 là trang HTML của site chính, không tính vào giới hạn API.
+  - Nhập số cao hơn mức site thật sự cho thì site trả 429: lõi tự chậm lại theo câu báo của site, chờ rồi tải tiếp.
+- **Rule34 mất lâu:** danh sách đầy đủ khoảng 1.620 trang (1.000 tag mỗi trang, site không cho trang lớn hơn), khoảng 1,6 triệu tag.
+  - Site trả tag theo thứ tự lưu trong database: tag vừa đổi số post bị dời xuống cuối, nên các tag phổ biến (`female`, `breasts`, `1girls`…) chỉ có ở **vài trang cuối**. Danh sách dở thiếu đúng những tag hay dùng nhất, vì vậy không bao giờ được dùng.
+  - Trang càng sâu site trả càng chậm (trang 5: 0,5 giây, trang 1.200: 4 giây, trang 1.600: 6–7 giây). Một lần cập nhật đầy đủ mất khoảng 1,5–2 giờ. Giới hạn của khoá chỉ là nút thắt ở khoảng 100 trang đầu (site trả nhanh hơn 1 giây), nên khoá được cấp thêm request gần như không làm việc này nhanh hơn; nó giúp nhiều hơn cho việc tải ảnh.
+  - Đóng app giữa chừng không sao: lần sau tải tiếp từ trang đã dừng.
+- **Tải tiếp sau khi dừng giữa chừng** (Gelbooru: theo số trang `pid`; Danbooru: theo con trỏ id):
+  - tiến độ được lưu ở `<thư mục tags>/.partial/<module>_tags.json` sau mỗi 20 trang và ngay khi dừng (429, mạng, đóng app);
+  - lần cập nhật sau, trong vòng 3 ngày, tải tiếp từ con trỏ đó; xong thì xoá file tiến độ;
+  - danh sách dở không bao giờ được dùng làm danh sách thật.
 - Mỗi danh sách có ngân sách request `--max-requests` (mặc định 5000, tính cả robots.txt và các lần thử lại). Hết ngân sách thì dừng và không ghi danh sách dở.
 - Không gửi cookie. Gặp bot challenge (`cf-mitigated: challenge`) thì dừng.
 - Chỉ dùng https, chỉ gọi host của site (và tên miền cha), chỉ địa chỉ công khai, không gọi site trong danh sách chặn tên miền.

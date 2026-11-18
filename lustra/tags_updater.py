@@ -17,6 +17,7 @@ the desktop app (Tags A-Z -> Danh sách tag, sidecar tags.update / tags.sources)
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import datetime
 import gzip
@@ -40,9 +41,16 @@ from urllib import parse as url_parse
 
 import requests
 
-from .defines import UTF8
+from .defines import RATE_LIMIT_RX, UTF8
 from .denylist import denied, denied_message
-from .network import LUSTRA_USER_AGENT, is_cloudflare_challenge, parse_retry_after
+from .network import (
+    LUSTRA_USER_AGENT,
+    RATE_LIMIT_MARGIN,
+    is_cloudflare_challenge,
+    key_rate_interval,
+    parse_retry_after,
+    shared_rate_wait,
+)
 from .robots import ROBOTS_MAX_BYTES, RobotsRules
 
 __all__ = ('CURATED', 'ENGINE_TAG_SOURCES', 'TagSource', 'TagSourceError', 'UpdateResult', 'tag_source', 'tag_sources',
@@ -60,6 +68,13 @@ ENGINE_MIN_INTERVAL = 1.0
 '''extension sources: at least this many seconds between requests (the generator's downloaders use the same floor)'''
 CRAWL_DELAY_MAX = 60.0
 TRIES = 5
+'''network errors: tries of one request'''
+RATE_LIMIT_WAITS = (5.0, 15.0, 30.0, 60.0, 120.0, 180.0)
+'''seconds waited after each HTTP 429 / 503 of one request without Retry-After (6 min 50 s in all), then the list stops'''
+PARTIAL_DIR = '.partial'
+PARTIAL_MAX_AGE = 3 * 86400
+'''a list stopped half way (429, network, closed app) continues from where it stopped when updated again within this time'''
+PARTIAL_SAVE_PAGES = 20
 TIMEOUT = (15, 120)
 MAX_REDIRECTS = 5
 MAX_PAGE_BYTES = 32 * 1024 * 1024
@@ -81,13 +96,15 @@ PHILOMENA_TYPES = {'character': 'character', 'oc': 'character', 'species': 'spec
 re_xml_tag = re.compile(r'<tag\s([^>]*?)/?>')
 re_attr = re.compile(r'(\w+)=(["\'])(.*?)\2', re.DOTALL)
 re_site = re.compile(r'^https://[a-z\d.-]+(?::\d+)?/$')
+re_rate_limit = re.compile(r'limit of\s+(\d+)\s+requests?\s+(?:every|per)\s+(\d+)\s+second', re.IGNORECASE)
+'''the 429 text of rule34.xxx: "You currently have a limit of 60 requests every 60 second(s)."'''
 re_secret_param = re.compile(r'([?&](?:api_key|login|user_id|password|pass_hash|token|key)=)[^&#]*', re.IGNORECASE)
 
 ProgressCb = Callable[[str, int], None]
 '''(message, tags fetched so far)'''
 
 ENGINE_TAG_SOURCES: dict[str, str] = {
-    'gelbooru_dapi': 'DAPI tag index, after_id cursor',
+    'gelbooru_dapi': 'DAPI tag index, pages by number (pid)',
     'danbooru_json': 'tags.json, id cursor',
     'moebooru_json': 'tag.json, pages by name',
     'e621_json': 'daily database export (db_export/tags-DATE.csv.gz)',
@@ -120,6 +137,8 @@ class TagSource:
     robots: bool = True
     '''False: a reviewed exception to robots.txt Disallow lines (its Crawl-delay is still honored)'''
     curated: bool = False
+    rate_limit: tuple[int, int] | None = None
+    '''(requests, seconds) the site publishes for one API key; the user's key may have more (lustra.network.key_rate_limit)'''
 
     @property
     def description(self) -> str:
@@ -131,7 +150,9 @@ class TagSource:
 
 
 CURATED: dict[str, TagSource] = {
-    'rx': TagSource('rx', 'gelbooru_dapi', 'https://api.rule34.xxx/', 'Rule34', 'required', 'KEY,USER_ID', robots=False, curated=True),
+    # api.rule34.xxx: 'a limit of 60 requests every 60 second(s)' per key, shared with the downloads of that key
+    'rx': TagSource('rx', 'gelbooru_dapi', 'https://api.rule34.xxx/', 'Rule34', 'required', 'KEY,USER_ID', robots=False, curated=True,
+                    rate_limit=RATE_LIMIT_RX),
     'db': TagSource('db', 'danbooru_json', 'https://danbooru.donmai.us/', 'Danbooru', 'optional', 'API_KEY,LOGIN', robots=False,
                     curated=True),
     'xb': TagSource('xb', 'gelbooru_dapi', 'https://xbooru.com/', 'Xbooru', robots=False, curated=True),
@@ -180,7 +201,18 @@ def source_for_manifest(m) -> TagSource | None:
         key, fmt = 'optional', 'API_KEY,LOGIN'
     else:
         key, fmt = 'none', ''
-    return TagSource(m.abbr, engine, site, m.name, key, str(auth.get('apiKeyFormat') or fmt) if key != 'none' else '')
+    return TagSource(m.abbr, engine, site, m.name, key, str(auth.get('apiKeyFormat') or fmt) if key != 'none' else '',
+                     rate_limit=manifest_rate_limit(auth))
+
+
+def manifest_rate_limit(auth: object) -> tuple[int, int] | None:
+    """auth.rateLimit of a manifest, {"requests": 60, "seconds": 60}: the limit the site publishes for one API key"""
+    rl = auth.get('rateLimit') if isinstance(auth, dict) else None
+    if not isinstance(rl, dict):
+        return None
+    n, s = rl.get('requests'), rl.get('seconds')
+    ok = all(isinstance(v, int) and not isinstance(v, bool) and 0 < v <= 100000 for v in (n, s))
+    return (n, s) if ok else None
 
 
 def tag_source(module: str, manifests: list | None = None) -> TagSource | None:
@@ -239,7 +271,14 @@ class PoliteClient:
         host = _host(source.site)
         self.hosts = {host, _base_domain(host)}
         floor = (0.0 if source.curated else ENGINE_MIN_INTERVAL) if min_interval is None else float(min_interval)
-        self.interval = max(0.0, float(delay), floor)
+        key_interval = key_rate_interval(source.module, source.rate_limit)
+        self.interval = max(0.0, float(delay), floor, key_interval)
+        self._shared = source.site if key_interval > 0 else ''
+        '''a key limited per key: every process using it (download jobs too) keeps its pace together (shared_rate_wait)'''
+        self.waited = 0.0
+        '''seconds waited because the site asked to (429 / 503)'''
+        self.notify: Callable[[str], None] | None = None
+        '''told of each wait and retry (the update's progress): a slow list says why it is slow'''
         self.deadline = deadline
         self.budget = max(1, int(budget))
         self.used = 0
@@ -282,6 +321,9 @@ class PoliteClient:
         wait = self._last + self.interval - self._clock()
         if self.deadline is not None and self._clock() + max(0.0, wait) > self.deadline:
             raise TagSourceError('time budget of this list used up before the list was complete: not written', 'budget')
+        if self._shared and shared_rate_wait(self._shared, self.interval):
+            self._last = self._clock()
+            return
         if wait > 0:
             self._sleep(wait)
         self._last = self._clock()
@@ -336,24 +378,49 @@ class PoliteClient:
             path = url_parse.urlsplit(url).path
             raise TagSourceError(f'robots.txt of {_host(url)} does not allow {path} ({rules.status}): the tag list is not updated',
                                  'robots')
-        for attempt in range(TRIES):
+        errors = waits = 0
+        while True:
             self._pace()
             try:
                 r = self._request(url, accept, max_bytes)
             except TagSourceError:
                 raise
-            except requests.RequestException:
-                if attempt == TRIES - 1:
+            except requests.RequestException as err:
+                errors += 1
+                if errors >= TRIES:
                     raise
-                self._sleep(2.0 * (attempt + 1))
+                self._tell(f'{_host(url)}: {err.__class__.__name__}, trying again in {2.0 * errors:.0f} s')
+                self._sleep(2.0 * errors)
                 continue
             if r.status in (429, 503):
-                self._sleep(parse_retry_after(r.headers.get('retry-after')) or 2.0 * (attempt + 1))
+                self._slow_down(r)
+                if waits >= len(RATE_LIMIT_WAITS):
+                    raise RuntimeError(f'{_host(url)} still asks to wait (HTTP {r.status:d}) after {waits:d} waits '
+                                       f'({self.waited:.0f} s): try again later')
+                wait = parse_retry_after(r.headers.get('retry-after')) or RATE_LIMIT_WAITS[waits]
+                waits += 1
+                self.waited += wait
+                self._tell(f'{_host(url)} asks to wait (HTTP {r.status:d}): waiting {wait:.0f} s, then one request every '
+                           f'{self.interval:.2f} s')
+                self._sleep(wait)
                 continue
             if r.status not in ok:
                 raise RuntimeError(f'{_host(url)} answered HTTP {r.status:d} for {redact(url_parse.urlsplit(url).path)}')
             return r
-        raise RuntimeError(f'{_host(url)} still asks to wait (HTTP 429 / 503) after {TRIES:d} tries: try again later')
+
+    def _tell(self, msg: str) -> None:
+        if self.notify:
+            with contextlib.suppress(Exception):
+                self.notify(msg)
+
+    def _slow_down(self, r: _Answer) -> None:
+        """After a 429 / 503 the rest of the list goes slower: at the pace the site states ('limit of N requests every M seconds'),
+        else 1.5 times slower (1 s at least), never slower than CRAWL_DELAY_MAX"""
+        if (m := re_rate_limit.search(r.text[:4096])) and int(m.group(1)) > 0:
+            pace = int(m.group(2)) / int(m.group(1)) * RATE_LIMIT_MARGIN
+        else:
+            pace = max(self.interval * 1.5, 1.0)
+        self.interval = min(max(self.interval, pace), CRAWL_DELAY_MAX)
 
 
 # ----- readers: (name, posts count, type name) -----
@@ -385,12 +452,21 @@ def _dapi_auth(source: TagSource, api_key: str) -> str:
     return ''
 
 
-def _id_cursor_pages(fetch: Callable[[int], list[dict]], max_pages: int, what: str) -> Iterator[list[dict]]:
+class Resume:
+    """Where a listing stands: 'cursor' to start from (the next page number, or the last id), updated after every page the caller
+    consumed; on_page(cursor) is called then (update_tag_list keeps the progress in <out>/.partial/)"""
+
+    def __init__(self, cursor: int = 0, on_page: Callable[[int], None] | None = None) -> None:
+        self.cursor = cursor
+        self.on_page = on_page
+
+
+def _id_cursor_pages(fetch: Callable[[int], list[dict]], max_pages: int, what: str, resume: Resume | None = None) -> Iterator[list[dict]]:
     """Pages of a listing by id cursor (tags with an id above the cursor), each tag once. Ends at an empty page or at a page
     shorter than the site's page size. A short first page is the end or a site that answers fewer tags than asked (some cap
     'limit'): one more request tells. A cursor that includes its own id (only the last tag again) ends cleanly, a cursor the site
     ignores (the same tags again) is an error: the list would be incomplete"""
-    cursor, pages, page_size = 0, 0, PAGE_LIMIT
+    cursor, pages, page_size = (resume.cursor if resume else 0), 0, PAGE_LIMIT
     while True:
         tags = fetch(cursor)
         if not tags:
@@ -403,6 +479,10 @@ def _id_cursor_pages(fetch: Callable[[int], list[dict]], max_pages: int, what: s
         yield fresh
         cursor = max(_int(t.get('id')) for t in fresh)
         pages += 1
+        if resume:
+            resume.cursor = cursor
+            if resume.on_page:
+                resume.on_page(cursor)
         if max_pages and pages >= max_pages:
             return
         if len(tags) < page_size:
@@ -411,14 +491,47 @@ def _id_cursor_pages(fetch: Callable[[int], list[dict]], max_pages: int, what: s
             page_size = len(tags)
 
 
-def _iter_gelbooru(client: PoliteClient, auth: str, min_posts: int, max_pages: int) -> Iterator[tuple[str, int, str]]:
-    def fetch(after_id: int) -> list[dict]:
-        text = client.get(f'{client.site}index.php?page=dapi&s=tag&q=index&limit={PAGE_LIMIT:d}&after_id={after_id:d}{auth}').text
+def _pid_pages(fetch: Callable[[int], list[dict]], max_pages: int, resume: Resume | None = None) -> Iterator[list[dict]]:
+    """Pages of a listing by page number (pid from 0), in the site's own order. Ends at an empty page or at a page shorter than the
+    site's page size (a short first page sets the size: some sites cap 'limit'). resume.cursor: the next pid"""
+    pid = resume.cursor if resume else 0
+    pages, page_size = 0, PAGE_LIMIT
+    previous: tuple | None = None
+    while True:
+        tags = fetch(pid)
+        if not tags:
+            return
+        # a site that ignores pid answers the same page forever: stop, or the list (and memory) would grow without end
+        names = tuple(t.get('name') for t in tags)
+        if names == previous:
+            raise RuntimeError(f'page {pid:d} is the same as page {pid - 1:d}: the site ignores pid, stopping')
+        previous = names
+        yield tags
+        pid += 1
+        pages += 1
+        if resume:
+            resume.cursor = pid
+            if resume.on_page:
+                resume.on_page(pid)
+        if max_pages and pages >= max_pages:
+            return
+        if len(tags) < page_size:
+            if pages > 1:
+                return
+            page_size = len(tags)
+
+
+def _iter_gelbooru(client: PoliteClient, auth: str, min_posts: int, max_pages: int, resume: Resume | None = None) -> Iterator[tuple[str, int, str]]:
+    # pid paging: the tag index of Gelbooru 0.2 sites (rule34.xxx at least) is not in id order and ignores order / orderby, so an
+    # after_id cursor (the highest id of a page) skips every tag of a lower id that comes later: most of the popular ones
+    def fetch(pid: int) -> list[dict]:
+        text = client.get(f'{client.site}index.php?page=dapi&s=tag&q=index&limit={PAGE_LIMIT:d}&pid={pid:d}{auth}').text
         if 'Missing authentication' in text:
             raise RuntimeError('website requires API key (use --api-key KEY,USER_ID)')
-        return [{k: v for k, _, v in re_attr.findall(m.group(1))} for m in re_xml_tag.finditer(text)]
+        rows = ({k: v for k, _, v in re_attr.findall(m.group(1))} for m in re_xml_tag.finditer(text))
+        return [r for r in rows if r.get('name')]  # an empty page is '<tag type="array"/>' on rule34.xxx: not a tag
 
-    for page in _id_cursor_pages(fetch, max_pages, 'after_id'):
+    for page in _pid_pages(fetch, max_pages, resume):
         for t in page:
             count = _int(t.get('count'))
             if count >= min_posts and t.get('name'):
@@ -426,7 +539,7 @@ def _iter_gelbooru(client: PoliteClient, auth: str, min_posts: int, max_pages: i
                 yield html.unescape(t['name']), count, GELBOORU_TYPES.get(_int(t.get('type')), 'general')
 
 
-def _iter_danbooru(client: PoliteClient, api_key: str, min_posts: int, max_pages: int) -> Iterator[tuple[str, int, str]]:
+def _iter_danbooru(client: PoliteClient, api_key: str, min_posts: int, max_pages: int, resume: Resume | None = None) -> Iterator[tuple[str, int, str]]:
     auth = ''
     if api_key and ',' in api_key:
         key, login = api_key.split(',', 1)
@@ -438,7 +551,7 @@ def _iter_danbooru(client: PoliteClient, api_key: str, min_posts: int, max_pages
                           f'&search[hide_empty]=true&only=id,name,post_count,category{auth}', accept='application/json').json()
         return [t for t in tags if isinstance(t, dict)] if isinstance(tags, list) else []
 
-    for page in _id_cursor_pages(fetch, max_pages, 'id'):
+    for page in _id_cursor_pages(fetch, max_pages, 'id', resume):
         for t in page:
             count = _int(t.get('post_count'))
             if count >= min_posts and t.get('name'):
@@ -543,12 +656,17 @@ def _iter_shimmie(client: PoliteClient, min_posts: int) -> Iterator[tuple[str, i
             yield t['name'], count, 'general'
 
 
-def _iter_source(source: TagSource, client: PoliteClient, api_key: str, min_posts: int, max_pages: int) -> Iterator[tuple[str, int, str]]:
+RESUMABLE_ENGINES = {'gelbooru_dapi': 'pid', 'danbooru_json': 'id'}
+'''listings a list stopped half way continues: the kind of cursor kept (next page number, last id)'''
+
+
+def _iter_source(source: TagSource, client: PoliteClient, api_key: str, min_posts: int, max_pages: int,
+                 resume: Resume | None = None) -> Iterator[tuple[str, int, str]]:
     engine = source.engine
     if engine == 'gelbooru_dapi':
-        return _iter_gelbooru(client, _dapi_auth(source, api_key), min_posts, max_pages)
+        return _iter_gelbooru(client, _dapi_auth(source, api_key), min_posts, max_pages, resume)
     if engine == 'danbooru_json':
-        return _iter_danbooru(client, api_key, min_posts, max_pages)
+        return _iter_danbooru(client, api_key, min_posts, max_pages, resume)
     if engine == 'e621_json':
         return _iter_e621_export(client, min_posts)
     if engine == 'moebooru_json':
@@ -565,11 +683,13 @@ def _iter_source(source: TagSource, client: PoliteClient, api_key: str, min_post
 # ----- list files -----
 
 class UpdateResult:
-    __slots__ = ('count', 'message', 'module', 'path', 'previous', 'requests', 'written')
+    __slots__ = ('count', 'message', 'module', 'path', 'previous', 'requests', 'waited', 'written')
 
     def __init__(self, module: str, path: pathlib.Path) -> None:
         self.module, self.path = module, path
         self.count = self.previous = self.requests = 0
+        self.waited = 0.0
+        '''seconds the site made the update wait (429 / 503)'''
         self.written = False
         self.message = ''
 
@@ -602,6 +722,28 @@ def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None
         tmp.unlink(missing_ok=True)
 
 
+def _load_partial(path: pathlib.Path, src: TagSource) -> tuple[int, dict[str, tuple[int, str]]] | None:
+    """(cursor, tags) of a list stopped half way, None when there is none (or it belongs to another site / engine, or is too old)"""
+    try:
+        d = json.loads(path.read_text(encoding=UTF8))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(d, dict) or d.get('site') != src.site or d.get('engine') != src.engine
+            or d.get('cursorKind') != RESUMABLE_ENGINES.get(src.engine) or time.time() - float(d.get('saved') or 0) > PARTIAL_MAX_AGE):
+        return None
+    tags = {str(k): (int(v[0]), str(v[1])) for k, v in (d.get('tags') or {}).items() if isinstance(v, list) and len(v) == 2}
+    return int(d.get('cursor') or 0), tags
+
+
+def _save_partial(path: pathlib.Path, src: TagSource, cursor: int, tags: dict[str, tuple[int, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'{path.name}.{uuid.uuid4().hex[:8]}.tmp')
+    tmp.write_text(json.dumps({'site': src.site, 'engine': src.engine, 'cursorKind': RESUMABLE_ENGINES.get(src.engine), 'cursor': cursor,
+                               'saved': time.time(),
+                               'tags': {k: [c, ty] for k, (c, ty) in tags.items()}}, ensure_ascii=False), encoding=UTF8)
+    os.replace(tmp, path)
+
+
 def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.5, max_pages=0, api_key='', force=False,
                     progress: ProgressCb | None = None, reference: pathlib.Path | None = None, source: TagSource | None = None,
                     budget=REQUEST_BUDGET, allow_local=False, session=None, min_interval: float | None = None,
@@ -620,14 +762,44 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     client = PoliteClient(src, delay=delay, budget=budget, allow_local=allow_local, session=session, min_interval=min_interval,
                           deadline=deadline)
     tags: dict[str, tuple[int, str]] = {}
+    if progress:
+        client.notify = lambda msg: progress(f'[{module}] {msg}', len(tags))
+    # page / id cursor listings keep their progress in <out>/.partial/: a list stopped half way (rate limit, network, closed app)
+    # continues from its cursor next time instead of starting over (the app only reads *_tags.json of <out> itself)
+    partial_path = out_dir / PARTIAL_DIR / f'{module}_tags.json'
+    resume: Resume | None = None
+    if src.engine in RESUMABLE_ENGINES and not max_pages:
+        start = 0
+        if saved := _load_partial(partial_path, src):
+            start, tags = saved
+            if progress:
+                where = f'page {start:d}' if RESUMABLE_ENGINES[src.engine] == 'pid' else f'id {start:d}'
+                progress(f'[{module}] continuing a stopped update: {len(tags):d} tags kept, from {where}', len(tags))
+        pages = [0]
+
+        def on_page(cursor: int) -> None:
+            pages[0] += 1
+            if pages[0] % PARTIAL_SAVE_PAGES == 0:
+                _save_partial(partial_path, src, cursor, tags)
+        resume = Resume(start, on_page)
     try:
-        for i, (name, count, ttype) in enumerate(_iter_source(src, client, api_key, min_posts, max_pages)):
+        for i, (name, count, ttype) in enumerate(_iter_source(src, client, api_key, min_posts, max_pages, resume)):
             if name not in tags or tags[name][0] < count:
                 tags[name] = (count, ttype)
             if progress and i % 5000 == 0:
                 progress(f'[{module}] {len(tags):d} tags...', len(tags))
+    except BaseException:
+        if resume is not None and tags:
+            with contextlib.suppress(OSError):
+                _save_partial(partial_path, src, resume.cursor, tags)
+            if progress:
+                progress(f'[{module}] stopped: {len(tags):d} tags kept, the next update continues from there', len(tags))
+        raise
     finally:
         res.requests = client.used
+        res.waited = client.waited
+    if resume is not None:
+        partial_path.unlink(missing_ok=True)  # the listing is complete: nothing to continue
     res.count = len(tags)
     if res.count == 0:
         res.message = 'not written: no tags fetched'
@@ -639,7 +811,8 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
         return res
     write_tag_list(res.path, tags)
     res.written = True
-    res.message = f'written {res.count:d} tags (was {res.previous:d}, {res.requests:d} requests)'
+    waited = f', waited {res.waited:.0f} s for the site\'s rate limit' if res.waited else ''
+    res.message = f'written {res.count:d} tags (was {res.previous:d}, {res.requests:d} requests{waited})'
     return res
 
 
@@ -652,6 +825,17 @@ def _modules_arg(value: str) -> list[str]:
         elif m:
             mods.append(m)
     return list(dict.fromkeys(mods))
+
+
+def _lists_in_use() -> dict[str, pathlib.Path]:
+    """module -> the list the app uses now (an earlier update, an extension's list, the bundled one): the reference of the CLI's
+    sanity check, so a broken first update into an empty folder is not written over a good bundled list"""
+    try:
+        from .tagsdb import TagsDB
+        TagsDB.locate_default_lists()
+        return TagsDB.files()
+    except Exception:
+        return {}
 
 
 def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = None) -> int:
@@ -687,6 +871,7 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
     failed = 0
     try:
         modules = _modules_arg(args.modules)
+        in_use = _lists_in_use()
         if not modules:
             say(f'[{time.strftime("%F %T")}] no installed module with a tag source that needs no API key: nothing to update')
         for module in modules:
@@ -698,7 +883,7 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
                 key = args.api_key or os.environ.get(f'LUSTRA_API_KEY_{module.upper()}', '').strip()
                 res = update_tag_list(module, pathlib.Path(args.out), min_posts=args.min_posts, delay=args.delay, max_pages=args.max_pages,
                                       api_key=key, force=args.force, progress=lambda msg, _n: say(f'  {msg}'), source=src,
-                                      budget=args.max_requests)
+                                      budget=args.max_requests, reference=in_use.get(module))
                 say(f'[{time.strftime("%F %T")}] {module}: {res.message} in {time.monotonic() - started:.0f}s -> {res.path}')
             except Exception as err:
                 failed += 1

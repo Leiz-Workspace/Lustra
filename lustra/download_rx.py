@@ -17,6 +17,7 @@ from .defines import (
     ID_VALUE_SEPARATOR_CHAR_RX,
     ITEMS_PER_PAGE_RX,
     MODULE_ABBR_RX,
+    RATE_LIMIT_RX,
     SITENAME_B_RX,
     TAGS_CONCAT_CHAR_RX,
     Comment,
@@ -24,6 +25,7 @@ from .defines import (
 )
 from .download_gelbooru import DownloaderGelbooru
 from .logger import trace
+from .network import key_rate_interval
 from .rex import (
     re_post_page_rx,
     re_tags_exclude_rx,
@@ -76,6 +78,12 @@ class DownloaderRx(DownloaderGelbooru):
 
     def _get_re_post_page(self) -> re.Pattern:
         return re_post_page_rx
+
+    def _get_min_request_interval(self) -> float:
+        # the API allows each key RATE_LIMIT_RX (more when the site's admins gave the user's key more: Settings > API keys). Every process
+        # using the key keeps this pace together (shared_rate_wait): download jobs, Preview, the tag list updater. Favorites and pools
+        # are html pages of the main site, not the API
+        return key_rate_interval(MODULE_ABBR_RX, RATE_LIMIT_RX) if self._get_sitename() == SITENAME else 0.0
 
     def _get_sitename(self) -> str:
         return SITENAME.replace('api.', '') if self.favorites_search_user or self.pool_search_str else SITENAME

@@ -277,6 +277,9 @@ FMT_DATE = '%d-%m-%Y'
 LAUCH_DATE = datetime.datetime.today().date()
 DATE_MAX_DEFAULT = LAUCH_DATE.strftime(FMT_DATE)
 ITEMS_PER_PAGE_RX = 1000  # fixed 42 for html, up to 1000 for dapi
+RATE_LIMIT_RX = (60, 60)
+'''(requests, seconds) api.rule34.xxx allows one API key: "You currently have a limit of 60 requests every 60 second(s)."
+The site's admins may give a key more: Settings > API keys (lustra.network.key_rate_limit)'''
 ITEMS_PER_PAGE_RN = 63  # fixed 63
 ITEMS_PER_PAGE_RS = 42  # fixed 42
 ITEMS_PER_PAGE_RP = 100  # fixed 70 for html, up to 100 for api
