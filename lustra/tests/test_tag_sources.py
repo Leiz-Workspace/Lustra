@@ -4,6 +4,9 @@ Lustra: tag list sources for any extension (lustra/tags_updater.py, lustra/robot
 A fake site answers every engine's tag listing through a fake transport; the updater's real policy code runs (robots.txt, pacing,
 Retry-After, request budget, bot challenges, hosts). End to end: a Gelbooru-type extension made by the generator (lustra.extgen)
 gets its list from the updater and autocompletion shows it.
+Every new extension has a list at once: the generator puts the site's list into the draft and the archive (lustra/extgen/taglist.py),
+the installed extension's list is used (TagsDB.extension_lists), and a site without a tag listing gets its list learned from the
+posts previewed and downloaded (lustra/tags_learned.py).
 Run: python -m unittest lustra.tests.test_tag_sources
 """
 #########################################
@@ -22,6 +25,8 @@ import pathlib
 import shutil
 import tempfile
 import threading
+import time
+import zipfile
 from unittest import TestCase, mock
 from urllib import parse as url_parse
 
@@ -31,12 +36,17 @@ from lustra.logger import Logger
 
 Logger.init(True, True)
 
-from lustra import server, tags_updater  # noqa: E402
+from lustra import server, tags_learned, tags_updater  # noqa: E402
+from lustra.aigen.session import GenRequest, GenSession  # noqa: E402
+from lustra.dlindex import DownloadIndex, IndexRecord  # noqa: E402
 from lustra.extgen.fetch import SafeFetcher  # noqa: E402
+from lustra.extgen.sandbox import pack  # noqa: E402
 from lustra.extgen.scaffold import create_draft, survey  # noqa: E402
+from lustra.extgen.taglist import bundle_tag_list  # noqa: E402
 from lustra.extgen.templates import make_manifest  # noqa: E402
 from lustra.modspec import ExtensionManifest  # noqa: E402
 from lustra.robots import RobotsRules  # noqa: E402
+from lustra.tags import TagTypes  # noqa: E402
 from lustra.tags_updater import CURATED, PoliteClient, TagSource, TagSourceError, tag_source, tag_sources, update_tag_list  # noqa: E402
 from lustra.tagsdb import TagsDB  # noqa: E402
 
@@ -435,6 +445,173 @@ class GeneratedExtensionEndToEndTests(TestCase):
         self.assertEqual(f'{SITE}robots.txt', session.calls[0][0])
         self.assertEqual(['scenery'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sc'})])
         self.assertEqual(['tom_&_jerry'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'tom'})])
+
+
+
+def _draft(root: pathlib.Path, engine: str = 'gelbooru_dapi', api_key: bool = False, abbr: str = 'fq') -> pathlib.Path:
+    draft = root / 'drafts' / 'fakebooru'
+    draft.mkdir(parents=True)
+    m = make_manifest(ext_id='fakebooru', abbr=abbr, name='Fakebooru', site=SITE, engine=engine, media=['image'], api_key=api_key)
+    (draft / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+    (draft / 'downloader.py').write_text('# test\n', encoding='utf-8')
+    return draft
+
+
+class _DataDirTest(TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.data = self.root / 'data'
+        self.env = mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': self.data.as_posix()})
+        self.env.start()
+        os.environ.pop('LUSTRA_TAGS_DIR', None)  # restored by the patch
+        TagsDB.clear()
+        TagsDB.locate_default_lists()
+
+    def tearDown(self) -> None:
+        TagsDB.clear()
+        self.env.stop()
+        self.tmp.cleanup()
+
+
+class DraftTagListTests(_DataDirTest):
+    """the generator puts the site's list into the draft; what does not fit is left to the app (read after the install)"""
+
+    def _bundle(self, draft: pathlib.Path, site: FakeTagSite | None = None, **kw) -> tuple[dict, FakeSession]:
+        session = FakeSession(site or FakeTagSite())
+        return bundle_tag_list(draft, session=session, allow_local=True, min_interval=0.0, **kw), session
+
+    def test_the_list_goes_into_the_draft_and_the_archive(self) -> None:
+        draft = _draft(self.root)
+        res, session = self._bundle(draft)
+        self.assertEqual(('bundled', 'fq_tags.json', len(EXPECTED)), (res['status'], res['file'], res['count']), res)
+        self.assertEqual(EXPECTED, {k: int(v.split()[0]) for k, v in _read_list(draft / 'fq_tags.json').items()})
+        self.assertEqual([], [p.name for p in draft.iterdir() if p.name.startswith('.taglist-')])
+        self.assertEqual(f'{SITE}robots.txt', session.calls[0][0])
+        z = pack(draft, self.root / 'fakebooru.zip')
+        with zipfile.ZipFile(z['path']) as zf:
+            self.assertIn('fakebooru/fq_tags.json', zf.namelist())
+
+    def test_what_does_not_fit_is_left_to_the_app_or_learned(self) -> None:
+        cases = {
+            'requests': ({'budget': 2}, FakeTagSite(), 'later'),
+            'size': ({'max_bytes': 10}, FakeTagSite(), 'later'),
+            'robots': ({}, FakeTagSite(robots='User-agent: *\nDisallow: /index.php\n'), 'learned'),
+            'no answer': ({}, FakeTagSite(robots='User-agent: *\nAllow: /\n'), 'failed'),
+        }
+        for name, (kw, site, status) in cases.items():
+            with self.subTest(name):
+                draft = _draft(self.root / name)
+                if name == 'no answer':
+                    site.answers.append((500, b'oops', {'content-type': 'text/html'}))
+                res, _ = self._bundle(draft, site, **kw)
+                self.assertEqual(status, res['status'], res)
+                self.assertFalse((draft / 'fq_tags.json').exists())
+        res, session = self._bundle(_draft(self.root / 'key', api_key=True))  # the site needs the user's key: no request here
+        self.assertEqual('later', res['status'])
+        self.assertEqual([], session.calls)
+        res, session = self._bundle(_draft(self.root / 'html', engine='custom'))
+        self.assertEqual('learned', res['status'])
+        self.assertEqual([], session.calls)
+
+    def test_a_ready_generator_session_ships_the_list(self) -> None:
+        from lustra.tests.test_extgen import fake_fetcher, fake_gelbooru
+        tags = FakeTagSite()
+
+        def route(url: str):
+            return tags(url, {}) if 's=tag' in url else fake_gelbooru(url)
+
+        report = GenSession(GenRequest(url=SITE, mode='template'), drafts_root=self.root / 'gen', fetcher=fake_fetcher(route)).run()
+        self.assertEqual('ready', report['status'], report['summary'])
+        self.assertEqual('bundled', report['tagList']['status'], report['tagList'])
+        self.assertIn(f'{report["abbr"]}_tags.json', report['files'])
+        off = GenSession(GenRequest(url=SITE, mode='template', tag_list=False), drafts_root=self.root / 'off', fetcher=fake_fetcher(route)).run()
+        self.assertEqual(('ready', {}), (off['status'], off['tagList']))
+
+    def test_installed_extension_list_is_used_and_a_newer_list_wins(self) -> None:
+        draft = _draft(self.root)
+        self._bundle(draft)
+        installed = self.data / 'extensions' / 'fakebooru'
+        shutil.copytree(draft, installed)
+        TagsDB.locate_default_lists()
+        self.assertEqual(installed / 'fq_tags.json', TagsDB.get_file('fq'))
+        self.assertEqual(['scenery'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sc'})])
+        newer = self.data / 'tags' / 'fq_tags.json'
+        newer.parent.mkdir(parents=True)
+        tags_updater.write_tag_list(newer, {'scenery': (999, 'general'), 'scarf': (5, 'general')})
+        later = time.time() + 60
+        os.utime(newer, (later, later))
+        TagsDB.locate_default_lists(reload=('fq',))
+        self.assertEqual(newer, TagsDB.get_file('fq'))
+        self.assertEqual(['scenery', 'scarf'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sc'})])
+
+    def test_an_extension_ships_only_its_own_list(self) -> None:
+        folder = self.data / 'extensions' / 'fakebooru'
+        folder.mkdir(parents=True)
+        m = {**make_manifest(ext_id='fakebooru', abbr='fq', name='Fakebooru', site=SITE, engine='gelbooru_dapi', media=['image']),
+             'tagList': 'rx_tags.json'}
+        (folder / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+        tags_updater.write_tag_list(folder / 'rx_tags.json', {'fake': (1, 'general')})
+        self.assertNotIn('rx', TagsDB.extension_lists())
+        self.assertNotIn('fq', TagsDB.extension_lists())
+
+
+class LearnedTagListTests(_DataDirTest):
+    """a site without a tag listing: the list is learned from the posts previewed and downloaded, no request"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ['LUSTRA_TAGS_LEARN'] = '1'  # off for the other tests (lustra/tests/__init__.py); restored by the patch
+
+    def test_preview_posts_teach_a_module_without_a_list(self) -> None:
+        self.assertTrue(tags_learned.may_learn('zq'))
+        notes: list[tuple[str, dict]] = []
+        with mock.patch.object(server, 'notify', lambda m, p: notes.append((m, p))):
+            server._learn_quietly('zq', [('1', ['Sky', 'cloud', 'blue sky']), ('2', ['sky']), ('1', ['sky', 'again'])])
+        self.assertEqual('tags.learned', notes[-1][0])
+        self.assertEqual({'module': 'zq', 'learned': True, 'posts': 2, 'tags': 3}, notes[-1][1])
+        self.assertEqual({'sky': '2 posts (unknown)', 'cloud': '1 posts (unknown)', 'blue_sky': '1 posts (unknown)'},
+                         _read_list(tags_learned.list_path('zq')))
+        self.assertEqual(['sky'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'zq', 'prefix': 'sk'})])
+        row = next(r for r in server.m_tags_status({}) if r['module'] == 'zq')
+        self.assertTrue(row['learned'])
+        self.assertEqual(0, tags_learned.learn('zq', [('2', ['sky'])]))  # seen before: counted once
+
+    def test_downloads_teach_it_from_the_index(self) -> None:
+        tags_learned.learn('zq', [('1', ['sky'])])  # seen in Preview first
+        with DownloadIndex(create=True) as index:
+            index.add_many([IndexRecord(module='zq', post_id='1', path='/x/zq_1.jpg', tags='sky'),
+                            IndexRecord(module='zq', post_id='2', path='/x/zq_2.jpg', tags='sky tree'),
+                            IndexRecord(module='other', post_id='3', path='/x/o_3.jpg', tags='ignored')])
+        res = server.m_tags_learn({'module': 'zq'})
+        self.assertEqual((1, True, 2), (res['newPosts'], res['learned'], res['posts']))
+        self.assertEqual(0, server.m_tags_learn({'module': 'zq'})['newPosts'])  # the index cursor moved on
+        with DownloadIndex(create=True) as index:
+            index.add_many([IndexRecord(module='zq', post_id='4', path='/x/zq_4.jpg', tags='tree')])
+        self.assertEqual(1, server.m_tags_learn({'module': 'zq'})['newPosts'])
+        self.assertEqual({'sky': '2 posts (unknown)', 'tree': '2 posts (unknown)'}, _read_list(tags_learned.list_path('zq')))
+        with self.assertRaises(server.RpcError):
+            server.m_tags_learn({'module': '../x'})
+
+    def test_a_list_from_a_source_stops_the_learning(self) -> None:
+        tags_learned.learn('zq', [('1', ['sky'])])
+        real = tags_learned.list_path('zq')
+        tags_updater.write_tag_list(real, {'sky': (5000, 'general'), 'skyline': (40, 'general')})  # the updater got the real list
+        TagsDB.locate_default_lists(reload=('zq',))
+        self.assertFalse(tags_learned.may_learn('zq'))
+        self.assertEqual(0, tags_learned.learn('zq', [('2', ['sky', 'new'])]))
+        self.assertEqual({'sky': '5000 posts (general)', 'skyline': '40 posts (general)'}, _read_list(real))
+        self.assertFalse(tags_learned.status('zq')['learned'])
+        self.assertFalse(tags_learned.may_learn('rp'))  # a list bundled in 2tags/
+        TagsDB.load_from_dict('zm', {'sky': (TagTypes.TAG_TYPE_GENERAL, 3)})
+        self.assertFalse(tags_learned.may_learn('zm'))  # a list registered in memory
+        with mock.patch.dict(os.environ, {'LUSTRA_TAGS_LEARN': '0'}):
+            self.assertFalse(tags_learned.may_learn('zn'))
+            self.assertEqual(0, tags_learned.learn('zn', [('1', ['sky'])]))
+        self.assertFalse(tags_learned.may_learn('../x'))
+        with mock.patch.object(server.threading, 'Thread') as thread:  # Preview: nothing to learn, no thread
+            server._learn_from_preview('rp', [{'id': '1', 'tags': ['a']}])
+            thread.assert_not_called()
 
 #
 #

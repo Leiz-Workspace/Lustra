@@ -99,7 +99,12 @@ ENGINE_TAG_SOURCES: dict[str, str] = {
 
 
 class TagSourceError(RuntimeError):
-    """A request Lustra refuses to make or to repeat: robots.txt, the request budget, a bot challenge, a disallowed address"""
+    """A request Lustra refuses to make or to repeat. kind: 'robots' (robots.txt disallows it), 'budget' (requests or time used up),
+    'challenge' (bot challenge), 'policy' (address, host, size...)"""
+
+    def __init__(self, message: str, kind: str = 'policy') -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -225,12 +230,17 @@ class PoliteClient:
     allow_local: tests only (fake sites), skips the public address check; never set by the app or the command line"""
 
     def __init__(self, source: TagSource, *, delay=0.5, budget=REQUEST_BUDGET, allow_local=False, session=None,
-                 sleep: Callable[[float], None] | None = None, clock: Callable[[], float] | None = None) -> None:
+                 sleep: Callable[[float], None] | None = None, clock: Callable[[], float] | None = None,
+                 min_interval: float | None = None, deadline: float | None = None) -> None:
+        """min_interval: floor of the delay (default: none for reviewed modules, ENGINE_MIN_INTERVAL for extension sites).
+        deadline: clock() value after which no request is made (TagSourceError 'budget')"""
         self.source = source
         self.site = source.site
         host = _host(source.site)
         self.hosts = {host, _base_domain(host)}
-        self.interval = max(0.0, float(delay), 0.0 if source.curated else ENGINE_MIN_INTERVAL)
+        floor = (0.0 if source.curated else ENGINE_MIN_INTERVAL) if min_interval is None else float(min_interval)
+        self.interval = max(0.0, float(delay), floor)
+        self.deadline = deadline
         self.budget = max(1, int(budget))
         self.used = 0
         self.allow_local = allow_local
@@ -264,11 +274,14 @@ class PoliteClient:
 
     def _spend(self) -> None:
         if self.used >= self.budget:
-            raise TagSourceError(f'request budget of this list ({self.budget:d}) used up before the list was complete: not written')
+            raise TagSourceError(f'request budget of this list ({self.budget:d}) used up before the list was complete: not written',
+                                 'budget')
         self.used += 1
 
     def _pace(self) -> None:
         wait = self._last + self.interval - self._clock()
+        if self.deadline is not None and self._clock() + max(0.0, wait) > self.deadline:
+            raise TagSourceError('time budget of this list used up before the list was complete: not written', 'budget')
         if wait > 0:
             self._sleep(wait)
         self._last = self._clock()
@@ -284,7 +297,8 @@ class PoliteClient:
                     current = url_parse.urljoin(current, r.headers['location'])
                     continue
                 if is_cloudflare_challenge(r):
-                    raise TagSourceError(f'{_host(current)} answered with a bot challenge: Lustra does not bypass it, try again later')
+                    raise TagSourceError(f'{_host(current)} answered with a bot challenge: Lustra does not bypass it, try again later',
+                                         'challenge')
                 body = bytearray()
                 for chunk in r.iter_content(65536):
                     body += chunk
@@ -320,7 +334,8 @@ class PoliteClient:
         rules = self._robots_rules()
         if self.source.robots and not rules.allows(url):
             path = url_parse.urlsplit(url).path
-            raise TagSourceError(f'robots.txt of {_host(url)} does not allow {path} ({rules.status}): the tag list is not updated')
+            raise TagSourceError(f'robots.txt of {_host(url)} does not allow {path} ({rules.status}): the tag list is not updated',
+                                 'robots')
         for attempt in range(TRIES):
             self._pace()
             try:
@@ -589,10 +604,12 @@ def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None
 
 def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.5, max_pages=0, api_key='', force=False,
                     progress: ProgressCb | None = None, reference: pathlib.Path | None = None, source: TagSource | None = None,
-                    budget=REQUEST_BUDGET, allow_local=False, session=None) -> UpdateResult:
+                    budget=REQUEST_BUDGET, allow_local=False, session=None, min_interval: float | None = None,
+                    deadline: float | None = None) -> UpdateResult:
     """reference: the list currently in use (may live in another folder). The sanity check compares against the bigger one,
     otherwise a failed first update into an empty folder would shadow the bundled list with an almost empty newer file.
-    source: default tag_source(module); allow_local / session: tests (fake sites)"""
+    source: default tag_source(module); allow_local / session: tests (fake sites), session: also the generator's own transport;
+    min_interval / deadline: see PoliteClient (the generator bounds the time a draft waits for its list)"""
     src = source or tag_source(module)
     if src is None:
         raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions made from the engines '
@@ -600,7 +617,8 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     out_dir.mkdir(parents=True, exist_ok=True)
     res = UpdateResult(module, out_dir / f'{module}_tags.json')
     res.previous = max(_count_lines(res.path), _count_lines(reference) if reference else 0)
-    client = PoliteClient(src, delay=delay, budget=budget, allow_local=allow_local, session=session)
+    client = PoliteClient(src, delay=delay, budget=budget, allow_local=allow_local, session=session, min_interval=min_interval,
+                          deadline=deadline)
     tags: dict[str, tuple[int, str]] = {}
     try:
         for i, (name, count, ttype) in enumerate(_iter_source(src, client, api_key, min_posts, max_pages)):

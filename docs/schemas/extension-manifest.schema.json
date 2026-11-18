@@ -71,7 +71,7 @@
     },
     "tagList": {
       "type": "string",
-      "description": "tag list file name used for autocompletion, '<abbr>_tags.json' (looked up by that name in <data dir>/tags and 2tags/). The extension generator sets it when the engine has a tag listing: lustra/tags_updater.py then reads the list from the site given by 'site' and '$generator.engine'"
+      "description": "tag list file name used for autocompletion, '<abbr>_tags.json' (looked up by that name in <data dir>/tags and 2tags/). A file of that name next to manifest.json is the extension's own list (used when it is installed; the generator puts the site's list there). The extension generator sets it when the engine has a tag listing: lustra/tags_updater.py then reads the list from the site given by 'site' and '$generator.engine'"
     },
     "description": {
       "type": "string"

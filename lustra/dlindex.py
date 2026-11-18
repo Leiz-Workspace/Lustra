@@ -507,6 +507,15 @@ class DownloadIndex:
                 out[r[3]] = self._row(r)
         return out
 
+    def posts_after(self, module: str, after: int = 0, limit: int = 5000) -> list[tuple[int, str, str]]:
+        """(row id, post id, tags) of this module's files with a row id above 'after', oldest first: tag lists learned from the
+        downloads read the index in steps (lustra/tags_learned.py)"""
+        conn = self._connection()
+        if conn is None:
+            return []
+        rows = conn.execute('SELECT id, post_id, tags FROM files WHERE module = ? AND id > ? ORDER BY id LIMIT ?', (module, int(after), int(limit)))
+        return [(int(r[0]), str(r[1]), str(r[2] or '')) for r in rows]
+
     def rows_for_posts(self, module: str, post_ids: Iterable[str]) -> dict[str, dict]:
         """{post id: row} of this module's posts (the most recent download of each), any path"""
         conn = self._connection()

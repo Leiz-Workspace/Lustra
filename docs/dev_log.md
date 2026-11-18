@@ -760,7 +760,31 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Moebooru đọc theo trang: giả định site nhận `limit=1000`.
   - Bản checkout repo: `2tags/bb_tags.json` là bản sao của `rx_tags.json`, nên nút Cập nhật bb trong app bị sanity check từ chối (danh sách thật của Bbooru ít hơn một nửa). Lịch hệ thống và bản đóng gói không bị.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7al)
+### 7am. Extension mới có danh sách tag ngay — 2026-11-18
+- **Yêu cầu của chủ repo:** mỗi extension mới phải có danh sách tag ngay, không đợi người dùng bấm cập nhật. Đã chốt hai đường.
+- **Engine có API danh sách tag, robots.txt cho phép:**
+  - `lustra/extgen/taglist.py` (`bundle_tag_list`) đọc danh sách bằng chính updater (robots.txt nghiêm ngặt, `Crawl-delay`, `Retry-After`) và lưu `<abbr>_tags.json` cạnh `manifest.json`.
+  - Chạy khi phiên tạo extension đạt (chế độ AI và template), qua transport của phiên (không cookie); `python -m lustra.extgen new` cũng tải (tắt bằng `--no-tags`); lệnh mới `python -m lustra.extgen tags DIR`.
+  - Giới hạn cho bản nháp: 30 request, 90 giây, 8 MB. Kết quả ghi ở `report.json` → `tagList`: `bundled`, `later` (quá lớn, cần khoá), `learned` (không có API, robots.txt cấm), `failed`.
+  - `pack` đóng danh sách vào file .zip. `TagsDB.extension_lists` đọc danh sách trong thư mục extension đã cài (builtin, user), chỉ cho module của chính extension; danh sách mới hơn (updater) vẫn thắng.
+  - Sidecar tìm lại danh sách sau mỗi lần cài / gỡ extension.
+  - App: sau khi cài (bản nháp, catalog, catalog từ xa, file zip), nếu chưa có danh sách đi kèm mà extension có nguồn thì `tags.update` chạy ngay, bằng khoá đã lưu nếu site cần.
+  - Eval harness của trình tạo tắt bước này (`GenRequest.tag_list=False`): không tạo traffic ngoài fixture.
+- **Site không có API danh sách tag, hoặc robots.txt cấm:** `lustra/tags_learned.py` học dần, không gửi request nào.
+  - Nguồn: tag của post hiện trong Preview (sidecar học trong nền, gửi notification `tags.learned`) và của file đã tải (`tags.learn`, app gọi sau mỗi lượt tải xong; nút "Học từ file đã tải" ở Tags A–Z). Index có thêm `DownloadIndex.posts_after` để đọc dần theo con trỏ.
+  - Mỗi post đếm một lần; file `"tag": "N posts (unknown)"` với N là số post đã thấy ở đây. Trạng thái ở `<data dir>/tags/learned/<abbr>.sqlite`.
+  - Chỉ học khi module chưa có danh sách từ nguồn. File học được mang dấu (kích thước + mtime); khi updater, extension hoặc `2tags/` cho danh sách thật thì việc học dừng, không ghi đè.
+  - `tags.status` có thêm `learned`; Tags A–Z ghi "học từ post đã xem / đã tải" và "(đã học)".
+  - `LUSTRA_TAGS_LEARN=0` tắt việc học; `lustra/tests/__init__.py` đặt sẵn cho mọi test (các test Preview cũ đã từng học trong nền rồi nạp lại TagsDB giữa chừng), `test_tag_sources` tự bật lại. Module có danh sách trong bộ nhớ (`TagsDB.load_from_dict`) cũng không học.
+- **Test** (`lustra.tests.test_tag_sources`, thêm 9 test):
+  - bản nháp: danh sách vào bản nháp và file .zip; vượt số request / kích thước → `later`; robots.txt cấm → `learned`; site lỗi → `failed`; site cần khoá hoặc engine `custom` → không gửi request;
+  - phiên template đạt kèm danh sách (`tagList: bundled`), tắt được bằng `tag_list=False`;
+  - extension đã cài: danh sách đi kèm được dùng, danh sách mới hơn thắng, extension không cấp được danh sách của module khác;
+  - học: từ post Preview (notification, autocomplete, `tags.status.learned`, mỗi post một lần), từ index (con trỏ, chỉ module đó), danh sách từ nguồn dừng việc học, module có danh sách `2tags/` không học.
+- **Đã kiểm:** 362 test offline qua; ruff; `npm run check`; Tags A–Z trên renderer mock (module học được: nguồn "học từ post đã xem / đã tải", "29 KB (đã học)", nút "Học từ file đã tải").
+- **Chưa kiểm:** chưa thử với site thật; chưa chạy app Electron thật (cài extension rồi xem danh sách tự tải).
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7am)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.

@@ -90,6 +90,9 @@
     { id: 'fakebooru', name: 'Fakebooru', abbr: 'fb', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://fakebooru.example/',
       description: 'Fakebooru: Gelbooru 0.2 DAPI (XML)', auth: {}, syntax: { maxTags: 0 }, tagList: 'fb_tags.json',
       generator: { tool: 'lustra.extgen', engine: 'gelbooru_dapi', createdAt: '2026-11-18T08:00:00Z' } },
+    // a site without a tag listing: its list is learned from the posts previewed and downloaded (tags.learn, learned: true)
+    { id: 'htmlsite', name: 'Htmlsite', abbr: 'hs', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image'], site: 'https://htmlsite.example/',
+      description: 'Htmlsite: custom HTML', auth: {}, syntax: { maxTags: 0 }, generator: { tool: 'lustra.aigen', engine: 'custom', createdAt: '2026-11-18T09:00:00Z' } },
   ];
   const PAGE_MAX = { db: 200, rx: 1000 };
   const TAGS = [
@@ -244,7 +247,8 @@
           { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, description: 'DAPI tag index, after_id cursor' },
         ];
       }
-      if (method === 'tags.status') return [{ module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }];
+      if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12 };
+      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;

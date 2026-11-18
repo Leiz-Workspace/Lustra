@@ -852,7 +852,7 @@ class Generator {
       + 'Extension là code Python chạy trên máy bạn với quyền của bạn. Hãy xem downloader.py trước khi cài (nút "Mở thư mục").',
       ['Huỷ', 'Cài']);
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { archivePath: zip, sha256: data.sha256 });
+    return installExtension({ archivePath: zip, sha256: data.sha256 });
   }
 
   async remove(session) {
@@ -1303,6 +1303,7 @@ class Jobs {
       this.emit(job);
       this.pump();
       notifyJob(job);
+      if (job.status === 'done' && !job.coreKind && RE_ABBR.test(String(job.module))) learnTagList(job.module);
       if (job.autoKey) autoJobFinished(job);
     };
     proc.on('error', (err) => { onLine(`ERROR: ${err.message}`); finish(null, err.message); });
@@ -1695,6 +1696,37 @@ async function maybeAutoUpdateTags() {
   }
 }
 
+// ---------- every extension has a tag list at once ----------
+// The generator puts the site's list into the draft (lustra/extgen/taglist.py), the core uses it as soon as it is installed.
+// A list too big for the draft (or one that needs the user's key) is read right after the install. A site without a tag listing,
+// or whose robots.txt forbids it, gets its list learned from the posts previewed (core, search.preview) and downloaded (below):
+// no request is made for it (lustra/tags_learned.py).
+async function installExtension(params) {
+  const m = await sidecar.call('ext.install', params);
+  if (RE_ABBR.test(String(m?.abbr || ''))) {
+    fetchNewTagList(m.abbr).catch((err) => send('log', { source: 'tags', text: `tag list of ${m.abbr} not started: ${err.message}` }));
+  }
+  return m;
+}
+
+async function fetchNewTagList(abbr) {
+  const status = await sidecar.call('tags.status', {});
+  if ((Array.isArray(status) ? status : []).some((r) => r.module === abbr && r.size > 0 && !r.learned)) return; // shipped with it
+  const src = ((await sidecar.call('tags.sources', {})) || []).find((x) => x.module === abbr);
+  if (!src) return; // no tag listing: learned from the posts previewed and downloaded
+  const apiKey = await getSecret(abbr);
+  if (src.key === 'required' && !apiKey) return; // read once the user saves a key (Tags A-Z button, auto update)
+  await sidecar.call('tags.update', { module: abbr, apiKey });
+  send('log', { source: 'tags', text: `${abbr}: đang tải danh sách tag của extension vừa cài` });
+}
+
+function learnTagList(module) {
+  // after a download job: the module's downloaded posts teach its list when it has none from a source (no request)
+  sidecar.call('tags.learn', { module }, 60000).then((r) => {
+    if (r?.newPosts && r.learned) send('sidecar:notify', { method: 'tags.learned', params: r });
+  }).catch(() => { /* sidecar not running: the next job or preview learns it */ });
+}
+
 // ---------- scheduled tag list update (system scheduler) ----------
 // The system scheduler runs 'lustra-core tags' (development: python -m lustra.tags_updater) even while the app is closed, for the
 // modules that need no key; the lists go to <userData>/tags, where the app looks for the newest list of each module. A scheduled
@@ -1821,7 +1853,7 @@ function registerIpc() {
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'tags.sources', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
+      'tags.validate', 'tags.status', 'tags.sources', 'tags.learn', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};
     if (method === 'ext.uninstall' && !RE_EXT_ID.test(String(params.id || ''))) throw new Error('invalid extension id');
@@ -1834,7 +1866,7 @@ function registerIpc() {
   });
   handle('ext:installCatalog', async (_e, id) => {
     if (!RE_EXT_ID.test(String(id || ''))) throw new Error('invalid extension id');
-    return sidecar.call('ext.install', { id });
+    return installExtension({ id });
   });
   // remote catalog: only the id comes from the renderer. The entry (archive url, sha256) is taken from the catalog the core
   // verified (Ed25519 signature, lustra/trust.py); the install verifies it again and pins the sha256 the user confirmed
@@ -1853,7 +1885,7 @@ function registerIpc() {
       `Extension là code Python sẽ chạy trên máy bạn với quyền của bạn.\nNguồn: ${String(entry.url || '').slice(0, 300)}\n`
       + `sha256: ${entry.sha256}\n${trust}\nChỉ cài từ nguồn bạn tin cậy.`);
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { catalogUrl, remoteId: id, sha256: entry.sha256 });
+    return installExtension({ catalogUrl, remoteId: id, sha256: entry.sha256 });
   });
   handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
   handle('tags:scheduleStatus', async () => ({ ...tagScheduleStatus(), modules: await scheduledTagModules() }));
@@ -1989,7 +2021,7 @@ function registerIpc() {
     const ok = await confirmMain(`Cài extension từ ${path.basename(file)}?`,
       'Extension là code Python sẽ chạy trên máy bạn với quyền của bạn. Chỉ cài từ nguồn bạn tin cậy.');
     if (!ok) throw new Error('cancelled');
-    return sidecar.call('ext.install', { archivePath: file, sha256: String(sha256).trim() });
+    return installExtension({ archivePath: file, sha256: String(sha256).trim() });
   });
 
   // extension generator: drafts only; installing one is its own confirmed action (Generator.install)

@@ -2097,6 +2097,8 @@ function pruneJobGroups() {
 // sources come from the core (tags.sources, lustra/tags_updater.py): the reviewed modules (rx, db, xb, bb, en) and every installed
 // extension made from an engine with a tag listing (lustra.extgen writes '$generator.engine' and 'tagList' into its manifest)
 const TAG_KEY_NOTE = { required: 'Cần API key của bạn', optional: 'Dùng API key của bạn nếu có' };
+const LEARNED_TITLE = 'Site không có danh sách tag dùng được (không có API, hoặc robots.txt cấm): Lustra học dần từ tag của các post '
+  + 'đã xem trong Preview và đã tải, không gửi thêm request. Số post là số post đã thấy ở đây, không phải số trên site.';
 function tagSourceTitle(src) {
   const rule = src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.';
   const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
@@ -2124,8 +2126,18 @@ async function refreshTagStatus() {
       const src = srcByMod[m];
       const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
       let action;
-      if (!src) action = h('span', { class: 'muted', title: 'Extension này không có nguồn danh sách tag (engine không rõ hoặc không có API tag)' }, 'không có nguồn');
-      else if (keyMissing) action = h('span', { class: 'muted', title: `Nhập key ở Cài đặt → API key (${src.keyFormat})` }, 'cần API key');
+      if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
+      else if (!src) {
+        action = h('button', { class: 'btn sm', title: 'Đọc tag của các file đã tải (index), không gửi request tới site', onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          try {
+            const res = await L.rpc('tags.learn', { module: m });
+            toast(res.newPosts ? `Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải` : `Tag ${m}: không có post đã tải mới`);
+            refreshTagStatus();
+            loadTagLists();
+          } catch (err) { toast(errMsg(err), 'err'); }
+        } }, 'Học từ file đã tải');
+      } else if (keyMissing) action = h('span', { class: 'muted', title: `Nhập key ở Cài đặt → API key (${src.keyFormat})` }, 'cần API key');
       else {
         action = h('button', { class: 'btn sm', onclick: async (e) => {
           e.currentTarget.disabled = true;
@@ -2134,9 +2146,10 @@ async function refreshTagStatus() {
       }
       return h('tr', {},
         h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),
-        h('td', { title: src ? tagSourceTitle(src) : '' }, src ? (src.name || name || m) : '—'),
+        h('td', { title: src ? tagSourceTitle(src) : (r && !r.learned ? '' : LEARNED_TITLE) },
+          src ? (src.name || name || m) : (r && !r.learned ? '—' : 'học từ post đã xem / đã tải')),
         h('td', { class: 'mono', title: r?.path || '' }, r ? r.path.split(/[\\/]/).slice(-2).join('/') : '—'),
-        h('td', {}, r ? `${(r.size / 1048576).toFixed(1)} MB` : '—'),
+        h('td', { title: r?.learned ? 'Danh sách học từ post đã xem / đã tải' : '' }, r ? `${r.size >= 1048576 ? `${(r.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(r.size / 1024))} KB`}${r.learned ? ' (đã học)' : ''}` : '—'),
         h('td', { id: `tagupd-${m}` }, r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
         h('td', {}, action));
     }));
@@ -3086,6 +3099,11 @@ function listen() {
     } else if (method === 'app.notice') {
       // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');
+    } else if (method === 'tags.learned') {
+      // a module without a tag list learned it from previewed / downloaded posts (core, lustra/tags_learned.py)
+      resolveHasList.delete(params.module);
+      loadTagLists();
+      if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
       if (params.written) {
