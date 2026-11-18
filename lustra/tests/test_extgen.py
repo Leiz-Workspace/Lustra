@@ -270,6 +270,7 @@ class FetchPolicyTests(TestCase):
         with self.assertRaises(FetchPolicyError) as ctx:
             f.fetch('https://other.example/x')
         self.assertEqual('R10', ctx.exception.rule)
+        self.assertFalse(ctx.exception.redirect)  # the address asked for, not a redirect target
         with self.assertRaises(FetchPolicyError) as ctx:
             f.fetch(f'https://user:pw@{HOST}/x')
         self.assertEqual('R1', ctx.exception.rule)
@@ -295,6 +296,7 @@ class FetchPolicyTests(TestCase):
         with self.assertRaises(FetchPolicyError) as ctx:
             f.fetch(f'{SITE}go')
         self.assertEqual('R10', ctx.exception.rule)
+        self.assertTrue(ctx.exception.redirect)
         self.assertFalse(any('evil.example' in c[1] for c in f._session.calls))
 
         def challenge(u: str):
@@ -329,6 +331,34 @@ class FetchPolicyTests(TestCase):
         self.assertEqual('fakebooru', sv['names']['id'])
         self.assertEqual([], sv['existing'])
         self.assertTrue(sv['names']['abbr'])
+
+    def test_survey_skips_api_probes_redirected_to_http(self) -> None:
+        def site(home_redirects: bool):
+            def route(u: str):  # unknown paths answer with a redirect to plain http (seen on a real site)
+                p = url_parse.urlparse(u)
+                if p.path == '/robots.txt':
+                    return 404, b'', {}
+                if p.path == '/' and not home_redirects:
+                    return 200, b'<html><title>videos</title></html>', {'content-type': 'text/html'}
+                return 302, b'', {'location': f'http://{HOST}/?{p.query}'}
+            return route
+
+        public = [(socket.AF_INET, 1, 6, '', ('93.184.215.14', 443))]
+        for home_redirects in (False, True):
+            f = SafeFetcher(allowed_hosts={HOST}, min_interval=0.0)  # no allow_local: plain http is refused, as in the app
+            f._session = FakeSession(site(home_redirects))
+            with self.subTest(home_redirects=home_redirects), mock.patch('socket.getaddrinfo', return_value=public):
+                if home_redirects:  # the site itself is not usable over https: still a stop
+                    with self.assertRaises(FetchPolicyError) as ctx:
+                        survey(SITE, f)
+                    self.assertEqual('R10', ctx.exception.rule)
+                    self.assertTrue(ctx.exception.redirect)
+                else:
+                    eng = survey(SITE, f)['engine']
+                    self.assertEqual(('custom', 'low'), (eng['engine'], eng['confidence']))
+                    self.assertEqual(6, sum(n.startswith('redirected ') for n in eng['notes']))
+                    self.assertEqual([SITE], [e['url'] for e in eng['evidence']])
+                self.assertFalse(any(c[1].startswith('http:') for c in f._session.calls))  # a redirect to http is never followed
 
 
 class PolicyTests(TestCase):
