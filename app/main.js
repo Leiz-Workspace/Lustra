@@ -22,6 +22,7 @@ const dnsp = require('node:dns').promises;
 // so launchers must use StartupWMClass=lustra (lowercase) for docks to group the window with its launcher
 const DESKTOP_ID = 'lustra';
 const { pngsToIco } = require('./icon-utils');
+const { shq, hasTagBlock, withoutTagBlock, withTagBlock, scheduleWhen } = require('./tag-schedule');
 
 app.setName('Lustra');
 if (process.env.LUSTRA_USER_DATA) app.setPath('userData', path.resolve(process.env.LUSTRA_USER_DATA));
@@ -77,7 +78,8 @@ const DEFAULT_SETTINGS = {
   connection: {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
   },
-  tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {} },
+  // schedule: the system scheduler updates the lists even while the app is closed (crontab / Task Scheduler, see tagScheduleStatus)
+  tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {}, schedule: { enabled: false, frequency: 'weekly', modules: ['db', 'en', 'xb', 'bb'] } },
   // the official signed catalog (tools/build_catalog.py, docs/operations.md 3d); the user may point it elsewhere
   advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
   ai: { model: 'claude-opus-5-5', maxUsd: 2 }, // extension generator (the Claude API key itself is a secret, see AI_SECRET)
@@ -530,7 +532,8 @@ function coreCommand(kind, args = []) {
   const core = bundledCore();
   // 'aigen' (extension generator worker) and 'extgen' (draft tools: check / pack) are commands of the same core
   if (core) return { cmd: core, args: [kind, ...args], cwd: userData(), frozen: true };
-  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen', index: 'lustra.dlindex_tools' }[kind];
+  const mod = { server: 'lustra.server', cli: 'lustra', aigen: 'lustra.aigen.worker', extgen: 'lustra.extgen', index: 'lustra.dlindex_tools',
+    tags: 'lustra.tags_updater' }[kind];
   if (!mod) throw new Error(`unknown core command ${kind}`);
   return { cmd: resolvePython(), args: ['-m', mod, ...args], cwd: REPO_ROOT, frozen: false };
 }
@@ -1675,11 +1678,110 @@ async function maybeAutoUpdateTags() {
   for (const module of ['rx', 'db']) {
     const last = settings.tags.lastAutoUpdate[module] || 0;
     if (Date.now() - last < days) continue;
+    if (module === 'rx' && !(await getSecret('rx'))) continue; // rx needs the user's own key: nothing to try without it
     try {
       await sidecar.call('tags.update', { module, apiKey: await getSecret(module) });
     } catch (err) {
       send('log', { source: 'tags', text: `auto update ${module} failed: ${err.message}` });
     }
+  }
+}
+
+// ---------- scheduled tag list update (system scheduler) ----------
+// The system scheduler runs 'lustra-core tags' (development: python -m lustra.tags_updater) even while the app is closed, for the
+// modules that need no key; the lists go to <userData>/tags, where the app looks for the newest list of each module. A scheduled
+// run cannot read the app's keys (OS keyring): rx keeps the in-app update. Linux / macOS: a marked block of the user's crontab
+// (the rest of the crontab is left as it is); Windows: a Task Scheduler task; AppImage: unsupported (its core only exists while
+// the app runs). The entry is written again at every start, so a new install path or version is picked up.
+const TAG_SCHEDULE_MODULES = ['db', 'en', 'xb', 'bb'];
+const WIN_TASK = 'Lustra tag lists';
+const tagScheduleLog = () => path.join(userData(), 'logs', 'tags-schedule.log');
+
+function tagScheduleSupport() {
+  if (process.env.APPIMAGE) {
+    return { ok: false, reason: 'Bản AppImage không hỗ trợ lịch hệ thống: lõi của app chỉ tồn tại khi app đang chạy. Dùng bản .deb, hoặc cron trong tools/cron/.' };
+  }
+  if (process.platform === 'win32') return { ok: true, kind: 'schtasks' };
+  const r = spawnSync('crontab', ['-l'], { encoding: 'utf8' });
+  if (r.error) return { ok: false, reason: 'Máy không có lệnh crontab (cài gói cron hoặc cronie).' };
+  return { ok: true, kind: 'crontab' };
+}
+
+function tagScheduleArgs(modules) {
+  return ['--modules', modules.join(','), '--out', path.join(userData(), 'tags'), '--min-posts', '2', '--log', tagScheduleLog()];
+}
+
+function tagScheduleCommand(modules) {
+  // POSIX shell line for crontab: absolute paths only (cron has a minimal PATH), no secret in it
+  const c = coreCommand('tags', tagScheduleArgs(modules));
+  const env = `LUSTRA_DATA_DIR=${shq(userData())}${c.frozen ? '' : ` PYTHONPATH=${shq(REPO_ROOT)}`}`;
+  return `cd ${shq(c.cwd)} && ${env} ${[c.cmd, ...c.args].map(shq).join(' ')}`;
+}
+
+const tagScheduleWhen = (frequency) => scheduleWhen(userData(), frequency);
+
+function readCrontab() {
+  const r = spawnSync('crontab', ['-l'], { encoding: 'utf8' });
+  if (r.status === 0) return r.stdout;
+  if (/no crontab/i.test(r.stderr || '')) return '';
+  throw new Error(`không đọc được crontab: ${(r.stderr || r.error?.message || '').trim()}`); // never overwrite a crontab we could not read
+}
+
+function writeCrontab(text) {
+  const r = spawnSync('crontab', ['-'], { input: text.endsWith('\n') ? text : `${text}\n`, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`không ghi được crontab: ${(r.stderr || r.error?.message || '').trim()}`);
+}
+
+function tagScheduleStatus() {
+  const sup = tagScheduleSupport();
+  const sched = settings.tags.schedule || {};
+  let lastRun = 0;
+  try { lastRun = fs.statSync(tagScheduleLog()).mtimeMs; } catch { /* never ran */ }
+  let installed = false;
+  if (sup.ok && sup.kind === 'crontab') {
+    try { installed = hasTagBlock(readCrontab()); } catch { /* unreadable: not ours */ }
+  }
+  if (sup.ok && sup.kind === 'schtasks') installed = spawnSync('schtasks', ['/Query', '/TN', WIN_TASK], { windowsHide: true }).status === 0;
+  const frequency = sched.frequency === 'daily' ? 'daily' : 'weekly';
+  return {
+    ...sup, installed, enabled: sched.enabled === true, frequency, time: tagScheduleWhen(frequency).time,
+    modules: (sched.modules || TAG_SCHEDULE_MODULES).filter((m) => TAG_SCHEDULE_MODULES.includes(m)), log: tagScheduleLog(), lastRun,
+  };
+}
+
+function applyTagSchedule(enabled, frequency, modules) {
+  const sup = tagScheduleSupport();
+  if (!sup.ok) throw new Error(sup.reason);
+  const mods = (Array.isArray(modules) ? modules : settings.tags.schedule?.modules || TAG_SCHEDULE_MODULES)
+    .filter((m, i, a) => TAG_SCHEDULE_MODULES.includes(m) && a.indexOf(m) === i);
+  if (enabled && !mods.length) throw new Error('chưa chọn module nào');
+  const freq = frequency === 'daily' ? 'daily' : 'weekly';
+  fs.mkdirSync(path.dirname(tagScheduleLog()), { recursive: true });
+  const when = tagScheduleWhen(freq);
+  if (sup.kind === 'crontab') {
+    const current = readCrontab();
+    if (enabled) writeCrontab(withTagBlock(current, `${when.cron} ${tagScheduleCommand(mods)}`));
+    else if (hasTagBlock(current)) writeCrontab(withoutTagBlock(current));
+  } else if (enabled) {
+    const c = coreCommand('tags', tagScheduleArgs(mods));
+    if (!c.frozen) throw new Error('Trên Windows, lịch hệ thống chỉ dùng được với bản cài đặt (lõi đóng gói)');
+    const tr = [c.cmd, ...c.args].map((a) => (/[\s"]/.test(a) ? `"${a}"` : a)).join(' ');
+    const r = spawnSync('schtasks', ['/Create', '/F', '/TN', WIN_TASK, '/SC', freq === 'daily' ? 'DAILY' : 'WEEKLY',
+      ...(freq === 'daily' ? [] : ['/D', 'MON']), '/ST', when.time, '/TR', tr], { encoding: 'utf8', windowsHide: true });
+    if (r.status !== 0) throw new Error(`schtasks: ${(r.stderr || r.stdout || r.error?.message || '').trim()}`);
+  } else {
+    spawnSync('schtasks', ['/Delete', '/F', '/TN', WIN_TASK], { windowsHide: true });
+  }
+  settings.tags.schedule = { enabled, frequency: freq, modules: mods };
+  saveSettings();
+  return tagScheduleStatus();
+}
+
+function refreshTagSchedule() {
+  // at start: write the entry again, so it runs the core of the version installed now
+  if (settings.tags.schedule?.enabled !== true) return;
+  try { applyTagSchedule(true, settings.tags.schedule.frequency, settings.tags.schedule.modules); } catch (err) {
+    send('log', { source: 'tags', text: `scheduled tag update not refreshed: ${err.message}` });
   }
 }
 
@@ -1739,6 +1841,8 @@ function registerIpc() {
     return sidecar.call('ext.install', { catalogUrl, remoteId: id, sha256: entry.sha256 });
   });
   handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
+  handle('tags:scheduleStatus', async () => tagScheduleStatus());
+  handle('tags:schedule', async (_e, o) => applyTagSchedule(o?.enabled === true, o?.frequency, o?.modules));
   handle('search:count', async (_e, q) => sidecar.call('search.count', {
     module: asQuery(q).module, tags: q.tags, args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module)],
   }));
@@ -2307,6 +2411,16 @@ async function selfTestContract(js, quick) {
   const hasSkip = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_known');
   out.skipKnownArgs = { on: hasSkip({ skipKnown: true }), off: hasSkip({ skipKnown: false }), default: hasSkip({}) };
   out.skipKnownArgs.ok = out.skipKnownArgs.on && !out.skipKnownArgs.off && out.skipKnownArgs.default === Boolean(settings.download.skipKnown);
+  // scheduled tag update: the command line only (a self-test never writes the user's crontab / tasks)
+  {
+    const cmd = tagScheduleCommand(['db', 'en']);
+    out.tagSchedule = {
+      cmd, when: tagScheduleWhen('weekly').cron,
+      ok: (cmd.includes("'tags' '--modules' 'db,en'") || cmd.includes("'lustra.tags_updater' '--modules' 'db,en'"))
+        && cmd.includes(shq(path.join(userData(), 'tags'))) && cmd.includes(shq(tagScheduleLog())) && !/api.?key/i.test(cmd)
+        && /^\d+ 4 \* \* 1$/.test(tagScheduleWhen('weekly').cron) && /^\d+ 4 \* \* \*$/.test(tagScheduleWhen('daily').cron),
+    };
+  }
   // audio: '-skip_aud' only when the audio option is off (default on)
   const hasSkipAud = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_aud');
   out.audioArgs = { off: hasSkipAud({ audio: false }), on: hasSkipAud({ audio: true }), default: hasSkipAud({}) };
@@ -2789,6 +2903,7 @@ if (!app.requestSingleInstanceLock()) {
     pruneThumbCache();
     if (process.env.LUSTRA_SELFTEST_DIR) mainWindow.webContents.once('did-finish-load', () => runSelfTest(process.env.LUSTRA_SELFTEST_DIR));
     sidecar.ready.then(() => maybeAutoUpdateTags()).catch(() => {});
+    if (!process.env.LUSTRA_SELFTEST_DIR) refreshTagSchedule(); // a self-test never touches the user's crontab
     sidecar.ready.then(() => {
       setTimeout(() => runDueSaved().catch(() => {}), 60000); // saved queries due while the app was closed
       setInterval(() => runDueSaved().catch(() => {}), AUTO_CHECK_MS);

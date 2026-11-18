@@ -36,6 +36,7 @@ Biến môi trường:
 - `LUSTRA_GENDER_MODEL_URL`, `LUSTRA_GENDER_MODEL_TOKEN`: địa chỉ và token model server cho CLI (mục 3c; app dùng Cài đặt). Model server đọc `LUSTRA_GENDER_MODEL_TOKEN` làm token của nó;
 - `LUSTRA_GENDER_MODEL_DIR`: thư mục model (model server hoặc model trong tiến trình) thay cho `<data>/models/wd-vit-tagger-v3`. Đặt biến này khi chạy test thì có thêm test với model thật;
 - `LUSTRA_GENDER_MODEL_DEVICE`: `auto` (mặc định: GPU nếu onnxruntime có provider GPU, nếu không thì CPU), `cpu`, `gpu` (không có GPU thì báo lỗi thay vì chạy CPU); model server có `--device` tương ứng;
+- `LUSTRA_API_KEY_<MODULE>` (ví dụ `LUSTRA_API_KEY_RX=KEY,USER_ID`): khoá API cho CLI và cron khi không có `-api_key`. App luôn tự truyền `-api_key` từ khoá đã lưu. **Rule34 bắt buộc khoá riêng của người dùng**: Lustra không có khoá dùng chung (khoá của tác giả bản gốc đã bị bỏ ngày 2026-11-18), thiếu khoá thì lõi dừng với lỗi `module 'RX' needs your own API key`;
 - `LUSTRA_SECRET_ARGS`: danh sách JSON các tham số bí mật (`["-api_key", "KEY,USER"]`) do app truyền cho CLI; CLI đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SECRET_MODULE_ARGS`: object JSON `{"db": ["-api_key", "KEY,LOGIN"]}`, khoá API theo module cho job nhập thư viện (`dlindex_tools import`); đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
@@ -46,7 +47,18 @@ Chế độ AI của trình tạo extension cần gói `anthropic`: `uv pip inst
 
 Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một số file lỗi, `130` bị huỷ. Script hoặc cron có thể dựa vào mã này.
 
-## 3. Cronjob cập nhật danh sách tag
+## 3. Cập nhật danh sách tag theo lịch
+**Trong app** (Tags A–Z → Danh sách tag):
+- "Tự cập nhật mỗi N ngày khi mở app": Rule34 và Danbooru, bằng khoá đã lưu; Rule34 bị bỏ qua khi chưa có khoá.
+- "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" (mỗi tuần vào thứ Hai, hoặc mỗi ngày, lúc khoảng 4 giờ sáng):
+  - Linux và macOS: app thêm hoặc xoá một khối có đánh dấu `# BEGIN lustra-tags` … `# END lustra-tags` trong crontab của người dùng, không đụng các dòng khác.
+  - Windows: tác vụ `Lustra tag lists` của Task Scheduler.
+  - Bản AppImage không hỗ trợ, vì lõi chỉ tồn tại khi app chạy.
+- Lịch chạy `lustra-core tags --modules db,en,xb,bb --out <thư mục dữ liệu>/tags --log <thư mục dữ liệu>/logs/tags-schedule.log`; bản phát triển chạy `python -m lustra.tags_updater`.
+- Lịch không đọc được khoá đã mã hoá của app, nên Rule34 không chạy theo lịch.
+- App ghi lại mục lịch mỗi lần mở, nên đường dẫn lõi luôn đúng sau khi cập nhật app.
+
+**Không qua app** (bản checkout repo, danh sách ghi vào `2tags/` của repo):
 ```bash
 chmod +x tools/cron/lustra-update-tags.sh
 crontab -l 2>/dev/null | cat - tools/cron/crontab.example | crontab -    # thứ Hai 04:17
@@ -59,7 +71,7 @@ systemctl --user daemon-reload && systemctl --user enable --now lustra-update-ta
 Biến môi trường của script:
 - `LUSTRA_TAG_MODULES` (mặc định `rx,db`);
 - `LUSTRA_TAG_MIN_POSTS` (mặc định 2);
-- `LUSTRA_API_KEY_RX` (`KEY,USER_ID`);
+- `LUSTRA_API_KEY_RX` (`KEY,USER_ID`): bắt buộc cho Rule34, Lustra không có khoá dùng chung;
 - `LUSTRA_API_KEY_DB` (`API_KEY,LOGIN`);
 - `LUSTRA_TAGS_OUT`.
 

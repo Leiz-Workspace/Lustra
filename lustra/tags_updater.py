@@ -10,7 +10,6 @@ Used by: tools/update_tags.py (cron / systemd timer), desktop app (Settings -> T
 
 from __future__ import annotations
 
-import base64
 import csv
 import datetime
 import gzip
@@ -20,13 +19,14 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator
 
 import requests
 
-from .defines import API_KEY_DEFAULT_RX, API_USER_ID_DEFAULT_RX, UTF8
+from .defines import UTF8
 from .network import parse_retry_after
 
 __all__ = ('SUPPORTED_MODULES', 'UpdateResult', 'update_tag_list', 'write_tag_list')
@@ -160,11 +160,11 @@ def _iter_e621_export(min_posts: int, delay: float) -> Iterator[tuple[str, int, 
 
 
 def _rx_auth(api_key: str) -> str:
-    if api_key and ',' in api_key:
-        key, user = api_key.split(',', 1)
-    else:
-        key, user = base64.b64decode(API_KEY_DEFAULT_RX).decode(), base64.b64decode(API_USER_ID_DEFAULT_RX).decode()
-    return f'&api_key={key}&user_id={user}'
+    # the user's own key only: Lustra ships no shared key
+    if not (api_key and ',' in api_key):
+        raise ValueError('rx needs your own API key, KEY,USER_ID (rule34.xxx: My Account > Options > API Access Credentials)')
+    key, user = api_key.split(',', 1)
+    return f'&api_key={key.strip()}&user_id={user.strip()}'
 
 
 SUPPORTED_MODULES: dict[str, str] = {
@@ -241,6 +241,54 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     res.written = True
     res.message = f'written {res.count:d} tags (was {res.previous:d})'
     return res
+
+
+def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = None) -> int:
+    """CLI: python -m lustra.tags_updater, lustra-core tags (the app's scheduled update), tools/update_tags.py.
+    Keys: --api-key for every module, else LUSTRA_API_KEY_<MODULE> (KEY,USER_ID); rx fails with a clear message without one.
+    Exit code: 0 = every requested list updated (or kept by the sanity check), 1 = at least one module failed"""
+    import argparse
+
+    from .extensions import data_dir
+    ap = argparse.ArgumentParser(prog='lustra-core tags', description='Update Lustra tag lists used for autocompletion and the A-Z tag browser')
+    ap.add_argument('--modules', default='rx,db', help=f'comma separated, supported: {",".join(SUPPORTED_MODULES)}')
+    ap.add_argument('--out', default=str(default_out or data_dir() / 'tags'), help='output folder (default: <data dir>/tags)')
+    ap.add_argument('--min-posts', type=int, default=1, help='skip tags with fewer posts (default 1)')
+    ap.add_argument('--delay', type=float, default=0.5, help='delay between requests, seconds (be polite, default 0.5)')
+    ap.add_argument('--max-pages', type=int, default=0, help='debug: stop after N pages (partial lists are not written without --force)')
+    ap.add_argument('--api-key', default='', help='KEY,USER_ID (rx) or API_KEY,LOGIN (db), for every module')
+    ap.add_argument('--force', action='store_true', help='write even if the sanity check fails')
+    ap.add_argument('--log', default='', help='append the output to this file (scheduled runs: no shell redirection needed)')
+    args = ap.parse_args(argv)
+    log = open(args.log, 'a', encoding=UTF8) if args.log else None  # noqa: SIM115 (closed below)
+
+    def say(line: str, err: bool = False) -> None:
+        print(line, file=sys.stderr if err else sys.stdout, flush=True)
+        if log:
+            log.write(line + '\n')
+            log.flush()
+
+    failed = 0
+    try:
+        for module in [m.strip() for m in args.modules.split(',') if m.strip()]:
+            started = time.monotonic()
+            say(f'[{time.strftime("%F %T")}] {module}: updating ({SUPPORTED_MODULES.get(module, "?")})...')
+            try:
+                key = args.api_key or os.environ.get(f'LUSTRA_API_KEY_{module.upper()}', '').strip()
+                res = update_tag_list(module, pathlib.Path(args.out), min_posts=args.min_posts, delay=args.delay, max_pages=args.max_pages,
+                                      api_key=key, force=args.force, progress=lambda msg, _n: say(f'  {msg}'))
+                say(f'[{time.strftime("%F %T")}] {module}: {res.message} in {time.monotonic() - started:.0f}s -> {res.path}')
+            except Exception as err:
+                failed += 1
+                say(f'[{time.strftime("%F %T")}] {module}: FAILED: {err}', True)
+    finally:
+        if log:
+            log.close()
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
 
 #
 #

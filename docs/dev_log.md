@@ -673,7 +673,32 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   Test khoá đi kèm app giờ đòi có khoá chính thức.
 - **Phát hành:** version 2.0.4 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r4`), ghi chú `docs/releases/v2.0.4.md`; `docs/operations.md` mục 3d ghi cách cập nhật catalog.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ai)
+### 7ak. Rule34 cần khoá riêng; lịch cập nhật tag trong app — 2026-11-18
+- **Sự cố và nguyên nhân:** module rx kèm sẵn khoá API của tác giả bản gốc, dùng khi người dùng chưa nhập khoá. Một lệnh thử sai (`python -m lustra -h`: `-h` bị hiểu là tag loại trừ) đã tải khoảng 1.550 file từ Rule34 bằng khoá đó.
+  - File và 1.548 dòng index đã dọn.
+  - Sau đó app báo "unable to retreive html" khi đếm, và cập nhật tag rx "giving up". API vẫn trả lời request không khoá; trang web bắt CAPTCHA Cloudflare với IP này.
+- **Sửa:**
+  - Bỏ khoá dùng chung (`API_KEY_DEFAULT_RX`, `API_USER_ID_DEFAULT_RX`).
+  - rx thiếu khoá thì lõi dừng với `module 'RX' needs your own API key` (trước đó chỉ cảnh báo W3).
+  - Bộ cập nhật tag báo lỗi rõ thay vì dùng khoá dự phòng.
+  - CLI và cron đọc `LUSTRA_API_KEY_<MODULE>` khi không có `-api_key`; test offline đặt một khoá giả qua biến này.
+  - App hiện thanh nhắc dưới thanh tìm kiếm khi module bắt buộc khoá (`api_key_required`) mà chưa có khoá, kèm nút "Nhập khoá" mở Settings; Đếm, Preview và Tải xuống dừng sớm với thông báo tiếng Việt.
+  - Tự cập nhật khi mở app bỏ qua rx khi chưa có khoá.
+- **Lịch cập nhật tag trong app:**
+  - Ô "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" ở Tags A–Z, mỗi tuần hoặc mỗi ngày.
+  - Lõi có lệnh `lustra-core tags` (CLI chuyển từ `tools/update_tags.py` vào `lustra/tags_updater.py main`, thêm `--log`).
+  - App ghi một khối có đánh dấu vào crontab (Linux / macOS) hoặc tạo tác vụ Task Scheduler (Windows), cho db, en, xb, bb. Rule34 không chạy theo lịch vì lịch không đọc được khoá đã mã hoá.
+  - Mục lịch được ghi lại mỗi lần mở app; AppImage không hỗ trợ.
+- **Danh sách tag:** mỗi site một file `<module>_tags.json`; `bb_tags.json` giống hệt `rx_tags.json` từ bản gốc. Lịch (có Bbooru) hoặc cập nhật tay sẽ thay nó bằng danh sách thật của Bbooru.
+- **Test:**
+  - `OwnApiKeyTests`: không còn khoá trong code; rx thiếu khoá thì dừng; khoá của người dùng (tham số hoặc biến môi trường) được dùng; bộ cập nhật tag bắt buộc khoá; lệnh `tags` ghi log và trả mã 1 khi có module lỗi.
+  - `app/test/tag-schedule.test.js`: giữ nguyên các dòng khác của crontab, thay khối cũ thay vì thêm khối thứ hai, gỡ khối trả lại đúng crontab cũ, quote đường dẫn có dấu cách và dấu nháy.
+  - Self-test `tagSchedule` kiểm câu lệnh, không ghi crontab.
+- **Đã kiểm thêm:**
+  - dòng lệnh lịch chạy được qua `sh` với PATH tối thiểu như cron, đường dẫn có dấu cách và dấu nháy;
+  - giao diện (thanh nhắc, nút Nhập khoá, chặn Đếm, ô lịch) trên renderer mock.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ak)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.

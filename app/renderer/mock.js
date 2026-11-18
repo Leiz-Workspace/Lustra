@@ -12,6 +12,8 @@
     { id: 'full-mask-orange', name: 'Full mask · Orange' }, { id: 'exposed-jaw-orange', name: 'Exposed jaw · Orange' },
     { id: 'full-mask-monochrome', name: 'Full mask · Mono' }, { id: 'exposed-jaw-monochrome', name: 'Exposed jaw · Mono' },
   ];
+  const mockSchedule = { ok: true, kind: 'crontab', enabled: false, installed: false, frequency: 'weekly', time: '04:31',
+    modules: ['db', 'en', 'xb', 'bb'], log: '~/.config/Lustra/logs/tags-schedule.log', lastRun: 0 };
   const settings = {
     appearance: { theme: 'ember', icon: 'full-mask-orange', background: { mode: 'icon', image: '', blur: 4, opacity: 0.9, dim: 0.18 } },
     search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {}, filtersOpen: true },
@@ -20,7 +22,7 @@
       appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },
-    tags: { autoUpdate: false, autoUpdateDays: 7 },
+    tags: { autoUpdate: false, autoUpdateDays: 7, schedule: { enabled: false, frequency: 'weekly', modules: ['db', 'en', 'xb', 'bb'] } },
     advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
     ai: { model: 'claude-opus-5-5', maxUsd: 2 },
     genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
@@ -78,7 +80,7 @@
     { id: 'danbooru', name: 'Danbooru', abbr: 'db', version: '1.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['gender_tags', 'parent_child', 'preview'],
       site: 'https://danbooru.donmai.us/', description: 'Danbooru JSON API. Anonymous search is limited to 2 tags: extra tags are checked locally.', auth: { apiKey: true, apiKeyFormat: 'API_KEY,LOGIN' },
       syntax: { maxTags: 2 } },
-    { id: 'rule34', name: 'Rule34', abbr: 'rx', version: '2.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['gender_tags', 'parent_child', 'preview'],
+    { id: 'rule34', name: 'Rule34', abbr: 'rx', version: '2.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['api_key', 'api_key_required', 'gender_tags', 'parent_child', 'preview'],
       site: 'https://rule34.xxx/', description: 'Gelbooru-based DAPI (XML). API key + user id recommended.', auth: { apiKey: true, apiKeyFormat: 'KEY,USER_ID' }, syntax: { maxTags: 0 } },
     { id: 'e621', name: 'e621', abbr: 'en', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://e621.net/', description: 'e621 JSON API (2 requests/second).', auth: {}, syntax: { maxTags: 40 } },
     { id: 'paheal', name: 'Rule34 Paheal', abbr: 'rp', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://rule34.paheal.net/', description: 'Shimmie danbooru-compatible API. Max 3 tags.', auth: {}, syntax: { maxTags: 3 } },
@@ -253,7 +255,11 @@
       }
       throw new Error(`mock: ${method}`);
     },
-    tags: { update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; } },
+    tags: {
+      update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; },
+      scheduleStatus: async () => ({ ...mockSchedule }),
+      schedule: async (o) => { Object.assign(mockSchedule, { enabled: !!o.enabled, installed: !!o.enabled, frequency: o.frequency || 'weekly' }); return { ...mockSchedule }; },
+    },
     search: {
       count: async (q) => { await delay(300 + latency('search.count', q)); return { count: 143815, requiredTags: [] }; },
       preview: async (q, page) => {

@@ -1202,6 +1202,8 @@ class Downloader(DownloaderBase):
         self.subfolder_aud = getattr(args, 'audsub', None) or self.subfolder_aud
         self.warn_nonempty = args.warn_nonempty or self.warn_nonempty
         self.api_key = APIKey(args.api_key) or self.api_key
+        if not self.api_key:  # CLI / cron convenience: LUSTRA_API_KEY_<ABBR>=KEY,USER_ID (the app passes -api_key itself)
+            self.api_key = APIKey(os.environ.get(f'LUSTRA_API_KEY_{self._get_module_abbr().upper()}', '').strip())
         self.gender_select = frozenset(getattr(args, 'gender', None) or ()) or self.gender_select
         if excluded := getattr(args, 'gender_exclude', None):  # every label but these (of -gender if given)
             self.gender_select = (self.gender_select or frozenset(GENDER_LABELS)) - frozenset(excluded)
@@ -1238,8 +1240,9 @@ class Downloader(DownloaderBase):
             ret = True
         abbr = ProcModule.name().upper()
         if self._has_capability(ModuleCaps.API_KEY_REQUIRED) and not self.api_key:
-            trace(f'Warning (W3): NO \'{abbr}\' API KEY PROVIDED! DEFAULT API KEY MAY STOP WORKING AT ANY MOMENT!')
-            ret = True
+            # Lustra ships no shared key: the site's API needs the user's own credentials
+            thread_exit(f'Error: module \'{abbr}\' needs your own API key: -api_key KEY,USER_ID '
+                        f'(in the app: Settings > API key theo module)')
         if not self._has_capability(ModuleCaps.API_KEY) and self.api_key:
             trace(f'Warning (W1): \'-api_key\' option is not available for \'{abbr}\' module. Ignored!')
             ret = True
