@@ -19,7 +19,7 @@ import sys
 __all__ = ('main',)
 
 USAGE = ('usage: lustra-core server | lustra-core cli ARGS... | lustra-core aigen | lustra-core extgen ARGS... | lustra-core sandbox'
-         ' | lustra-core index ARGS...')
+         ' | lustra-core index ARGS... | lustra-core tags ARGS...')
 
 
 def _setup_streams() -> None:
@@ -55,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == 'index':
         from lustra.dlindex_tools import main as index_main
         return index_main(rest)
+    if command == 'tags':  # tag lists update: the app's scheduled run (cron / Task Scheduler), see lustra/tags_updater.py main
+        from lustra.tags_updater import main as tags_main
+        return tags_main(rest)
     if command == 'sandbox':
         import runpy
         runpy.run_module('lustra.extgen.sandbox_boot', run_name='__main__')

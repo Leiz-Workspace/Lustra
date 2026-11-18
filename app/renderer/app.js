@@ -203,11 +203,37 @@ const hasCap = (abbr, cap) => {
   return true;
 };
 
+// modules whose API needs the user's own key (Lustra ships no shared key): nothing runs without one
+const needsKey = (abbr) => {
+  const caps = moduleInfo(abbr)?.capabilities; // unknown until the module list is loaded: never claimed then
+  return Array.isArray(caps) && caps.includes('api_key_required') && !S.secrets?.modules?.[abbr];
+};
+function renderKeyNeeded() {
+  const m = moduleInfo(S.module);
+  const show = !!S.settings && needsKey(S.module);
+  $('#key-needed').hidden = !show;
+  if (show) {
+    $('#key-needed-text').textContent = `${m?.name || S.module} cần khoá API riêng của bạn (Lustra không dùng khoá chung). `
+      + 'Lấy khoá trên site (tài khoản → Options → API Access Credentials), rồi nhập dạng KEY,USER_ID.';
+  }
+}
+function requireKey(abbr) {
+  if (!needsKey(abbr)) return true;
+  toast(`${moduleInfo(abbr)?.name || abbr} cần khoá API riêng: Cài đặt → API key theo module`, 'err');
+  return false;
+}
+$('#key-needed-btn').addEventListener('click', () => {
+  showPage('settings');
+  const row = $('#api-keys');
+  row.scrollIntoView({ block: 'center' });
+  [...row.querySelectorAll('.key-row')].find((r) => r.querySelector('.mod-abbr')?.textContent === S.module)?.querySelector('input')?.focus();
+});
+
 // ---------------- navigation ----------------
 function showPage(name) {
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === name));
   $$('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${name}`));
-  if (name === 'tags') refreshTagStatus();
+  if (name === 'tags') { refreshTagStatus(); renderTagSchedule(); }
   if (name === 'settings') refreshIndexStats();
   if (name === 'library') openLibrary();
   if (name === 'extensions') renderExtensions();
@@ -268,6 +294,7 @@ function renderModuleButton() {
   $('#f-vformat-wrap').hidden = !hasCap(S.module, 'videoFormat');
   $('#f-audio-wrap').hidden = !(moduleInfo(S.module)?.media || []).includes('audio');
   $('#f-parchi-wrap').hidden = !hasCap(S.module, 'parchi');
+  renderKeyNeeded();
   renderGenderFilter();
   renderMultiSites();
 }
@@ -903,6 +930,7 @@ function downloadOptions() {
 $('#btn-count').addEventListener('click', async () => {
   const q = currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!requireKey(q.module)) return;
   recordHistory(q);
   const seq = ++S.countSeq;
   const btn = $('#btn-count');
@@ -933,6 +961,7 @@ function previewPageSize() {
 async function runPreview(page = 0) {
   const q = { ...currentQuery(), pageSize: previewPageSize() };
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!requireKey(q.module)) return;
   recordHistory(q);
   // every request gets a sequence number: an older answer arriving late never replaces a newer one
   const seq = ++S.preview.seq;
@@ -1208,6 +1237,7 @@ $('#lib-next').addEventListener('click', () => runLibrary(LIB.page + 1));
 async function startDownload(override = null) {
   const q = override ? { ...currentQuery(), ...override } : currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
+  if (!requireKey(q.module)) return;
   if (!override?.tags) recordHistory(q); // "download selected" builds an id: query, not something the user typed
   const path = $('#f-path').value.trim() || S.settings.download.path;
   try {
@@ -2097,6 +2127,41 @@ async function refreshTagStatus() {
 $('#tags-autoupdate').addEventListener('change', (e) => saveSettings({ tags: { autoUpdate: e.target.checked } }));
 $('#tags-autoupdate-days').addEventListener('change', (e) => saveSettings({ tags: { autoUpdateDays: Math.max(1, Number(e.target.value) || 7) } }));
 
+// ---------------- scheduled tag update (system scheduler, main.js tagScheduleStatus) ----------------
+const TAG_SCHEDULE_NAMES = { db: 'Danbooru', en: 'e621', xb: 'Xbooru', bb: 'Bbooru' };
+function showTagSchedule(st) {
+  const on = $('#tags-schedule-on');
+  on.checked = !!(st.enabled && st.installed);
+  on.disabled = !st.ok;
+  $('#tags-schedule-freq').value = st.frequency || 'weekly';
+  $('#tags-schedule-freq').disabled = !st.ok;
+  const mods = (st.modules || []).map((m) => TAG_SCHEDULE_NAMES[m] || m).join(', ');
+  const where = st.kind === 'schtasks' ? 'Task Scheduler' : 'crontab của bạn';
+  const last = st.lastRun ? new Date(st.lastRun).toLocaleString('vi-VN') : 'chưa chạy lần nào';
+  const text = !st.ok ? st.reason
+    : st.enabled && st.installed ? `Đã đặt lịch trong ${where}: ${st.frequency === 'daily' ? 'mỗi ngày' : 'thứ Hai hằng tuần'} lúc ${st.time}, cho ${mods}. `
+      + `Lần chạy gần nhất: ${last}. Log: ${st.log}.`
+      : st.enabled ? `Lịch đã bật nhưng không còn trong ${where} (bị xoá ngoài app?): tắt rồi bật lại để đặt lại.`
+        : `Chưa đặt lịch. Khi bật, app thêm một mục vào ${where} cho ${mods}.`;
+  $('#tags-schedule-status').textContent = `${text} Rule34 cần khoá của bạn nên không chạy theo lịch: được cập nhật khi mở app (ô ở trên).`;
+}
+async function renderTagSchedule() {
+  if (typeof L.tags?.scheduleStatus !== 'function') { $('#tags-schedule').hidden = true; return; }
+  try { showTagSchedule(await L.tags.scheduleStatus()); } catch (err) { $('#tags-schedule-status').textContent = `Không đọc được lịch: ${errMsg(err)}`; }
+}
+async function saveTagSchedule() {
+  try {
+    const st = await L.tags.schedule({ enabled: $('#tags-schedule-on').checked, frequency: $('#tags-schedule-freq').value });
+    showTagSchedule(st);
+    toast(st.enabled ? 'Đã đặt lịch cập nhật danh sách tag' : 'Đã bỏ lịch cập nhật danh sách tag', 'ok');
+  } catch (err) {
+    toast(`Không đặt được lịch: ${errMsg(err)}`, 'err');
+    renderTagSchedule();
+  }
+}
+$('#tags-schedule-on').addEventListener('change', saveTagSchedule);
+$('#tags-schedule-freq').addEventListener('change', () => { if ($('#tags-schedule-on').checked) saveTagSchedule(); });
+
 // ---------------- extensions ----------------
 // the official signed catalog, also the default of settings.advanced.catalogUrl (main.js): an empty field falls back to it
 const OFFICIAL_CATALOG_URL = 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json';
@@ -2904,6 +2969,7 @@ function renderApiKeys() {
         S.secrets = await L.secrets.set(m.abbr, input.value);
         input.value = '';
         renderApiKeys();
+        renderKeyNeeded();
         toast(`Đã lưu API key cho ${m.name}`, 'ok');
       } catch (err) { toast(`Không lưu được key: ${errMsg(err)}`, 'err'); }
     };
@@ -2913,6 +2979,7 @@ function renderApiKeys() {
       try {
         S.secrets = await L.secrets.clear(m.abbr);
         renderApiKeys();
+        renderKeyNeeded();
         toast(`Đã xoá API key của ${m.name}`, 'ok');
       } catch (err) { toast(`Không xoá được key: ${errMsg(err)}`, 'err'); }
     };

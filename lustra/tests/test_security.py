@@ -169,6 +169,75 @@ def _http_server(directory: pathlib.Path):
         srv.server_close()
 
 
+class OwnApiKeyTests(TestCase):
+    """Lustra ships no shared API key (the original code had the author's rx key): rx runs only with the user's own key,
+    from -api_key (the app) or LUSTRA_API_KEY_RX (CLI, cron)"""
+
+    @staticmethod
+    def _parse(argv: list[str]):
+        dwn = _make_downloader(ProcModule.RX)
+        me = current_process()
+        me.killed = False
+        dwn.reset_root_thread(me)
+        dwn.no_conflict_delay = True
+        dwn._parse_args(prepare_arglist(['-module', 'rx', *argv]), False)
+        return dwn
+
+    def test_no_shared_key_in_the_code(self) -> None:
+        from lustra import defines, download_rx, tags_updater
+        for mod in (defines, download_rx, tags_updater):
+            self.assertFalse(any(n in vars(mod) for n in ('API_KEY_DEFAULT_RX', 'API_USER_ID_DEFAULT_RX', 'API_KEY', 'USER_ID')), mod.__name__)
+
+    def test_rx_without_a_key_stops_with_a_clear_error(self) -> None:
+        from lustra.defines import ThreadInterruptException
+        with mock.patch.dict(os.environ, {'LUSTRA_API_KEY_RX': ''}), self.assertRaises(ThreadInterruptException) as cm:
+            self._parse(['x'])._solve_argument_conflicts()
+        self.assertIn("module 'RX' needs your own API key", str(cm.exception))
+
+    def test_the_users_key_is_used(self) -> None:
+        MINE, FROM_ENV = 'a1' * 64, 'b2' * 64  # rx keys: 128 alphanumeric characters
+        with mock.patch.dict(os.environ, {'LUSTRA_API_KEY_RX': ''}):
+            dwn = self._parse(['-api_key', f'{MINE},77', 'x'])
+            self.assertEqual(f'&api_key={MINE}&user_id=77', dwn._get_api_key())
+        with mock.patch.dict(os.environ, {'LUSTRA_API_KEY_RX': f'{FROM_ENV},5'}):
+            self.assertEqual(f'&api_key={FROM_ENV}&user_id=5', self._parse(['x'])._get_api_key())
+            self.assertEqual(f'&api_key={MINE}&user_id=77', self._parse(['-api_key', f'{MINE},77', 'x'])._get_api_key())  # the option wins
+
+    def test_tag_update_needs_the_users_key(self) -> None:
+        from lustra.tags_updater import _rx_auth
+        for bad in ('', 'only-a-key'):
+            with self.subTest(key=bad), self.assertRaises(ValueError):
+                _rx_auth(bad)
+        self.assertEqual('&api_key=K&user_id=9', _rx_auth('K, 9'))
+
+    def test_tags_command(self) -> None:
+        # 'lustra-core tags' / python -m lustra.tags_updater: the app's scheduled update. Keys: --api-key, else LUSTRA_API_KEY_<MODULE>
+        from lustra import tags_updater
+        seen: dict[str, str] = {}
+
+        def fake_update(module, out_dir, *, api_key='', **_kw):
+            seen[module] = api_key
+            if module == 'rx':
+                tags_updater._rx_auth(api_key)
+            res = tags_updater.UpdateResult(module, out_dir / f'{module}_tags.json')
+            res.message = 'written 3 tags (was 0)'
+            return res
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tags_updater, 'update_tag_list', fake_update), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            log = pathlib.Path(tmp) / 'logs.txt'
+            with mock.patch.dict(os.environ, {'LUSTRA_API_KEY_RX': '', 'LUSTRA_API_KEY_DB': 'DBKEY,me'}):
+                code = tags_updater.main(['--modules', 'db,rx', '--out', tmp, '--log', str(log)])
+            self.assertEqual(1, code)  # rx without a key fails, db still updated
+            self.assertEqual({'db': 'DBKEY,me', 'rx': ''}, seen)
+            text = log.read_text(encoding='utf-8')
+            self.assertIn('db: written 3 tags', text)
+            self.assertIn('rx: FAILED: rx needs your own API key', text)
+            with mock.patch.dict(os.environ, {'LUSTRA_API_KEY_RX': 'K,1'}):
+                self.assertEqual(0, tags_updater.main(['--modules', 'rx', '--out', tmp]))
+            self.assertEqual('K,1', seen['rx'])
+
+
 class PartFileTests(TestCase):  # A7
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

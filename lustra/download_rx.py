@@ -13,8 +13,6 @@ from typing import Never, final
 from requests import exceptions
 
 from .defines import (
-    API_KEY_DEFAULT_RX,
-    API_USER_ID_DEFAULT_RX,
     FILE_NAME_PREFIX_RX,
     ID_VALUE_SEPARATOR_CHAR_RX,
     ITEMS_PER_PAGE_RX,
@@ -42,8 +40,6 @@ MAX_SEARCH_DEPTH_HTML = 200000 + 42 - 1  # set by site devs
 MAX_SEARCH_DEPTH_DAPI = 200000  # in case of API abuse this limit is set and we cannot predict when this happens
 MAX_SEARCH_DEPTH = MAX_SEARCH_DEPTH_DAPI
 
-API_KEY = base64.b64decode(API_KEY_DEFAULT_RX).decode()
-USER_ID = base64.b64decode(API_USER_ID_DEFAULT_RX).decode()
 
 
 @final
@@ -120,11 +116,8 @@ class DownloaderRx(DownloaderGelbooru):
             trace(f'Warning (W3): ProcItem: unable to retreive comments for {item_id}!', True)
 
     def _get_api_key(self) -> str:
-        return f'&api_key={self.api_key.key}&user_id={self.api_key.user_id}' if self.api_key else f'&api_key={API_KEY}&user_id={USER_ID}'
-
-    @staticmethod
-    def _get_default_api_key() -> str:
-        return API_KEY
+        # the user's own key only: Lustra ships no shared key (a run without one stops in _solve_argument_conflicts)
+        return f'&api_key={self.api_key.key}&user_id={self.api_key.user_id}' if self.api_key else ''
 
 #
 #

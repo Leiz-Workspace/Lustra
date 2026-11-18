@@ -169,7 +169,7 @@ Danh sách chặn tên miền: `lustra/safety_data/denied_domains.txt`, mỗi d�
 
 | Module | Nguồn cập nhật | Ghi chú |
 |---|---|---|
-| rx | DAPI `s=tag&q=index&after_id=` | cần API key (dùng key mặc định nếu không cấu hình) |
+| rx | DAPI `s=tag&q=index&after_id=` | cần API key **của người dùng** (không có khoá mặc định; thiếu thì báo lỗi) |
 | db | `tags.json?page=a<id>&search[hide_empty]=true` | ~1,1 triệu tag; cron mặc định chỉ giữ tag có ≥ 2 post (~0,77 triệu) |
 | xb, bb | DAPI `after_id` | |
 | en | `db_export/tags-YYYY-MM-DD.csv.gz` | nhẹ tải cho server hơn so với gọi API |

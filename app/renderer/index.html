@@ -57,6 +57,8 @@
           </div>
         </div>
 
+        <p class="multi-warn key-needed" id="key-needed" hidden><span id="key-needed-text"></span> <button class="btn sm" id="key-needed-btn">Nhập khoá</button></p>
+
         <div class="chip-actions glass" id="chip-actions" hidden>
           <span id="chip-sel-count">0 tag đã chọn</span>
           <button class="btn sm" data-act="or">Gộp OR (a~b)</button>
@@ -196,9 +198,14 @@
         <div class="page-head"><h1>Tags A–Z</h1></div>
         <div class="glass panel">
           <h2>Danh sách tag (autocomplete)</h2>
-          <p class="muted">Danh sách tag là bản chụp offline. Cập nhật thủ công ở đây, bật tự cập nhật, hoặc dùng cronjob trong <code>tools/cron/</code>.</p>
+          <p class="muted">Danh sách tag là bản chụp offline, mỗi site một danh sách. Cập nhật thủ công ở đây, tự cập nhật khi mở app, hoặc theo lịch của hệ thống (kể cả khi app đóng).</p>
           <table class="table" id="tag-status"></table>
           <label class="check"><input type="checkbox" id="tags-autoupdate"> Tự cập nhật mỗi <input type="number" id="tags-autoupdate-days" min="1" max="60" class="tiny"> ngày khi mở app</label>
+          <div class="tags-schedule" id="tags-schedule">
+            <label class="check"><input type="checkbox" id="tags-schedule-on"> Cập nhật theo lịch của hệ thống, kể cả khi app đóng</label>
+            <select id="tags-schedule-freq" title="Lịch chạy (khoảng 4 giờ sáng)"><option value="weekly">mỗi tuần (thứ Hai)</option><option value="daily">mỗi ngày</option></select>
+            <p class="muted" id="tags-schedule-status"></p>
+          </div>
         </div>
         <div class="glass panel az-page"><div class="az-host" id="az-page-host"></div></div>
       </section>

@@ -529,6 +529,9 @@ body.safe .card:hover img { filter: none; }
 .multi-warn { margin: 6px 0 0; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.5; color: var(--text);
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .multi-warn b { color: var(--warn); }
+.key-needed { margin: 0 0 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tags-schedule { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tags-schedule p { flex-basis: 100%; margin: 2px 0 0; }
 .job-group { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: var(--radius);
   border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent); }
 .job-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; }
