@@ -784,7 +784,14 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Đã kiểm:** 362 test offline qua; ruff; `npm run check`; Tags A–Z trên renderer mock (module học được: nguồn "học từ post đã xem / đã tải", "29 KB (đã học)", nút "Học từ file đã tải").
 - **Chưa kiểm:** chưa thử với site thật; chưa chạy app Electron thật (cài extension rồi xem danh sách tự tải).
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7am)
+### 7an. Bản 2.0.5 — 2026-11-18
+- **Nội dung:**
+  - bộ lọc an toàn riêng (7aj, PR #14);
+  - Rule34 cần khoá riêng và lịch cập nhật tag (7ak, PR #15);
+  - danh sách tag cho mọi extension (7al, 7am, PR #16).
+- **Phát hành:** version 2.0.5 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r5`), ghi chú `docs/releases/v2.0.5.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7an)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
