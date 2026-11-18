@@ -165,6 +165,7 @@ Lustra doesn't provide a method of authentication natively on either of supporte
     - XB: `cf_clearance`, `user_id`, `pass_hash`
   - Notes:
     - RN `cf_clearance` cookie duration is **15 minutes**
+- Desktop app: Settings → Kết nối → "Headers theo site (JSON)" / "Cookies theo site (JSON)", keyed by module abbreviation, for example `{"rn": {"User-Agent": "…"}}` and `{"rn": {"cf_clearance": "…"}}`. Only that website gets them; they replace shared entries of the same name. The shared "Headers (JSON)" / "Cookies (JSON)" go to every website: a browser `User-Agent` there would also replace the one e621 requires
 
 ## API authentication
 Some modules (RX only actually) require authentication info provided in order to use their download API (dapi).  

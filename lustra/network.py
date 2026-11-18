@@ -171,8 +171,8 @@ def is_cloudflare_challenge(response: Response | None) -> bool:
 
 CF_CHALLENGE_HINT = (
     'Website responded with a bot challenge page (cf-mitigated: challenge). Lustra does not bypass bot protection. '
-    'If you have an account: log in using your browser, then copy your \'cf_clearance\' cookie and browser \'User-Agent\' '
-    'into Connection -> Headers / Cookies. Otherwise try again later.'
+    'Pass the check in your browser, then copy its \'cf_clearance\' cookie and the browser\'s \'User-Agent\' into '
+    'Connection -> per-site Headers / Cookies (desktop app; only that website gets them). Otherwise try again later.'
 )
 
 re_content_range_str = re.compile(r'bytes (\d+)-(\d+)?(?:/(\d+))?')

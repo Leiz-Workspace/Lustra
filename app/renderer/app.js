@@ -943,7 +943,7 @@ $('#btn-count').addEventListener('click', async () => {
     const parts = r.taskCounts?.length > 1 ? ` (tổng ${r.taskCounts.length} truy vấn con, có thể trùng)` : '';
     st.textContent = `${r.approximate ? '≤ ' : ''}${nf.format(r.count)} kết quả${parts}`
       + `${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}`;
-    if (r.cfChallenge) toast('Website đang chặn bằng bot challenge. Xem mục Cài đặt → Kết nối.', 'err');
+    if (r.cfChallenge) toast('Website đang chặn bằng bot challenge. Xem mục Cài đặt → Kết nối (cookies theo site).', 'err');
   } catch (err) {
     if (seq === S.countSeq) toast(`Đếm thất bại: ${errMsg(err)}`, 'err');
   } finally {
@@ -2942,6 +2942,8 @@ function renderSettings() {
   $('#c-retries').value = s.connection.retries || 0;
   $('#c-headers').value = Object.keys(s.connection.headers || {}).length ? JSON.stringify(s.connection.headers, null, 1) : '';
   $('#c-cookies').value = Object.keys(s.connection.cookies || {}).length ? JSON.stringify(s.connection.cookies, null, 1) : '';
+  $('#c-site-headers').value = Object.keys(s.connection.siteHeaders || {}).length ? JSON.stringify(s.connection.siteHeaders, null, 1) : '';
+  $('#c-site-cookies').value = Object.keys(s.connection.siteCookies || {}).length ? JSON.stringify(s.connection.siteCookies, null, 1) : '';
   $('#a-python').value = s.advanced.pythonPath || '';
   $('#a-verbose').checked = !!s.advanced.verbose;
   $('#a-catalog').value = s.advanced.catalogUrl || '';
@@ -2981,12 +2983,14 @@ $('#c-save').addEventListener('click', async () => {
   try {
     const headers = parse('#c-headers');
     const cookies = parse('#c-cookies');
+    const siteHeaders = parse('#c-site-headers');
+    const siteCookies = parse('#c-site-cookies');
     const proxy = $('#c-proxy').value.trim();
     if (proxy && !/^(https?|socks5h?):\/\/([^@/]+@)?[^/:]+:\d+\/?$/i.test(proxy)) throw new Error('proxy dạng type://[user:pass@]host:port');
     // one save: main replaces the headers / cookies maps as a whole (removed entries go away) and rejects invalid
     // entries before writing anything
     await saveSettings({ connection: { proxy, ignoreProxy: $('#c-ignore').checked, proxyNoDownload: $('#c-nodown').checked,
-      timeout: Number($('#c-timeout').value) || 0, retries: Number($('#c-retries').value) || 0, headers, cookies } });
+      timeout: Number($('#c-timeout').value) || 0, retries: Number($('#c-retries').value) || 0, headers, cookies, siteHeaders, siteCookies } });
     toast('Đã lưu cài đặt kết nối', 'ok');
   } catch (err) { toast(`Không lưu được: ${errMsg(err)}`, 'err'); }
 });
