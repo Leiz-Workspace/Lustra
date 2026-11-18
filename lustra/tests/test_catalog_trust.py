@@ -62,8 +62,8 @@ def _sig(index: bytes, seed: bytes = SEED) -> bytes:
     return json.dumps(trust.make_signature(index, seed)).encode()
 
 
-def _load_tool():
-    spec = importlib.util.spec_from_file_location('sign_catalog_tool', ROOT / 'tools' / 'sign_catalog.py')
+def _load_tool(name: str = 'sign_catalog'):
+    spec = importlib.util.spec_from_file_location(f'{name}_tool', ROOT / 'tools' / f'{name}.py')
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -151,7 +151,8 @@ class CatalogTrustTests(TestCase):
                 trust.trusted_keys()
 
     def test_shipped_keys_and_sig_url(self) -> None:
-        self.assertIsInstance(trust.load_keys(trust.KEYS_FILE), list)  # the placeholder file is valid (maybe empty)
+        keys = trust.load_keys(trust.KEYS_FILE)
+        self.assertIn('b852144452eea5dc', [k.key_id for k in keys])  # the official catalog key ships with the app
         self.assertEqual('https://h.example/c/index.json.sig?v=2', trust.sig_url('https://h.example/c/index.json?v=2#x'))
 
 
@@ -337,6 +338,42 @@ class SignToolTests(TestCase):
         r = subprocess.run(['openssl', 'pkeyutl', '-verify', '-inkey', str(key), '-rawin', '-in', str(msg), '-sigfile', str(sig)],
                            capture_output=True, text=True)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+
+
+class BuildCatalogTests(TestCase):
+    """tools/build_catalog.py: the official catalog is built from extensions/"""
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.tool = _load_tool('build_catalog')
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_archives_are_deterministic_and_the_index_signable(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, self.tool.main(['--out', str(self.root / 'a')]))
+            self.assertEqual(0, self.tool.main(['--out', str(self.root / 'b'), '--base-url', 'https://h.example/c']))
+        index = json.loads((self.root / 'a' / 'index.json').read_text(encoding='utf-8'))
+        ids = sorted(p.parent.name for p in (ROOT / 'extensions').glob('*/manifest.json'))
+        self.assertEqual(ids, [e['id'] for e in index['extensions']])
+        self.assertEqual([], _load_tool()._check_index(index))  # the signing tool would sign every entry
+        for e in index['extensions']:
+            name = f"{e['id']}-{e['version']}.zip"
+            self.assertEqual(self.tool.OFFICIAL_BASE_URL + name, e['url'])
+            data = (self.root / 'a' / name).read_bytes()
+            self.assertEqual(data, (self.root / 'b' / name).read_bytes())  # same files, same bytes
+            self.assertEqual(e['sha256'], hashlib.sha256(data).hexdigest())
+        other = json.loads((self.root / 'b' / 'index.json').read_text(encoding='utf-8'))
+        self.assertTrue(all(e['url'].startswith('https://h.example/c/') for e in other['extensions']))
+        # a catalog signed with a trusted key installs: the archive passes the checks of the core
+        raw = (self.root / 'a' / 'index.json').read_bytes()
+        self.assertTrue(trust.verify_catalog(raw, _sig(raw), keys=[_key(SEED)]).signed)
+        entry = index['extensions'][0]
+        with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': str(self.root / 'data')}):
+            m = Extensions.install_from_archive((self.root / 'a' / f"{entry['id']}-{entry['version']}.zip").read_bytes(), entry['sha256'],
+                                                expect_id=entry['id'])
+        self.assertEqual((entry['id'], entry['version']), (m.id, m.version))
 
 
 if __name__ == '__main__':

@@ -141,7 +141,7 @@ The exact test list CI runs, the Electron self-test (`LUSTRA_SELFTEST_DIR`) and 
 |---|---|
 | `lustra/` | Python core: downloaders, tag search and filters, the sidecar the app talks to (`server.py`), download index, gender filter, model server, extension generator (`extgen/`, `aigen/`), `sdk.py` for extension authors |
 | `app/` | Electron app: `main.js` (settings, secrets, jobs, IPC), `preload.js`, `renderer/` (UI), `mock.js` (UI in a plain browser) |
-| `extensions/` | Optional site extensions and the local catalog |
+| `extensions/` | Optional site extensions and the local catalog; the signed remote catalog is built from it (`tools/build_catalog.py`, the `catalog` release) |
 | `tools/` | Builds (core, model server), tag list cron, model server packaging (Docker, systemd, launchd, Windows) |
 | `docs/` | Documentation (Vietnamese), plans, reports, release notes |
 | `keys/` | Public keys of the Forgejo release signatures (minisign for the checksum file, cosign for the image) |

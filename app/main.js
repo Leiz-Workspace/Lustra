@@ -78,7 +78,8 @@ const DEFAULT_SETTINGS = {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
   },
   tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {} },
-  advanced: { pythonPath: '', verbose: false, catalogUrl: '' },
+  // the official signed catalog (tools/build_catalog.py, docs/operations.md 3d); the user may point it elsewhere
+  advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
   ai: { model: 'claude-opus-5-5', maxUsd: 2 }, // extension generator (the Claude API key itself is a secret, see AI_SECRET)
   // gender image model: runs in a model server (python -m lustra.model_server), the app only calls its API (token: MODEL_SECRET).
   // enabled: the user turned it on (the renderer checks the server's GPU / VRAM first); off: jobs filter by tags only
