@@ -2992,7 +2992,7 @@ function renderApiKeys() {
     : 'Không có keyring hệ điều hành: key sẽ được lưu dạng văn bản thường trong settings.json.';
   const canClear = typeof L.secrets?.clear === 'function';
   const mods = S.modules.filter((m) => m.installed && m.auth?.apiKey);
-  $('#api-keys').replaceChildren(...mods.map((m) => {
+  $('#api-keys').replaceChildren(...mods.flatMap((m) => {
     const st = sec.modules?.[m.abbr];
     const input = h('input', { type: 'password', placeholder: st ? 'Key mới (trống = giữ nguyên)' : (m.auth.apiKeyFormat || 'KEY,USER'),
       title: st ? 'Nhập key mới để thay key đã lưu. Để trống thì key đã lưu được giữ nguyên.' : '', autocomplete: 'off' });
@@ -3017,11 +3017,34 @@ function renderApiKeys() {
         toast(`Đã xoá API key của ${m.name}`, 'ok');
       } catch (err) { toast(`Không xoá được key: ${errMsg(err)}`, 'err'); }
     };
-    return h('div', { class: 'setting key-row' }, h('span', {}, h('span', { class: 'mod-abbr' }, m.abbr), ` ${m.name} `, st ? h('span', { class: 'tagpill ok' }, st.encrypted ? 'đã lưu (mã hoá)' : 'đã lưu') : null),
+    return [h('div', { class: 'setting key-row' }, h('span', {}, h('span', { class: 'mod-abbr' }, m.abbr), ` ${m.name} `, st ? h('span', { class: 'tagpill ok' }, st.encrypted ? 'đã lưu (mã hoá)' : 'đã lưu') : null),
       h('span', { class: 'row' }, input,
         h('button', { class: 'btn sm', onclick: save }, 'Lưu'),
-        st && canClear ? h('button', { class: 'btn sm ghost danger', onclick: clear }, 'Xoá key') : null));
+        st && canClear ? h('button', { class: 'btn sm ghost danger', onclick: clear }, 'Xoá key') : null)),
+    keyRateLimitRow(m)].filter(Boolean);
   }));
+}
+// Requests a minute the site allows the user's key (settings.connection.keyRateLimits, 0 = what the site publishes: manifest
+// auth.rateLimit). Shown for modules that declare a limit per key (Rule34: 60 a minute). Main writes it where the core reads it:
+// downloads, Preview and tag list updates of that key keep this pace together, and slow down on their own after a 429.
+function keyRateLimitRow(m) {
+  const rl = m.auth?.rateLimit;
+  if (!rl?.requests || !rl?.seconds) return null;
+  const published = Math.max(1, Math.round(rl.requests * 60 / rl.seconds));
+  const cur = Number(S.settings?.connection?.keyRateLimits?.[m.abbr]) || 0;
+  const input = h('input', { type: 'number', min: 0, max: 100000, step: 1, class: 'tiny', value: cur || '', placeholder: String(published),
+    title: `Để trống hoặc 0 = giới hạn site công bố (${published} request mỗi phút)` });
+  input.addEventListener('change', async () => {
+    const n = Math.max(0, Math.min(100000, Math.floor(Number(input.value) || 0)));
+    input.value = n || '';
+    try {
+      await saveSettings({ connection: { keyRateLimits: { [m.abbr]: n } } });
+      toast(n ? `${m.name}: tối đa ${n} request mỗi phút cho khoá của bạn` : `${m.name}: dùng giới hạn site công bố (${published} request mỗi phút)`, 'ok');
+    } catch (err) { toast(`Không lưu được: ${errMsg(err)}`, 'err'); }
+  });
+  return h('div', { class: 'setting' },
+    h('span', { class: 'muted' }, `Giới hạn của khoá ${m.name} (site công bố ${published}; admin cấp thêm thì nhập số mới)`),
+    h('span', { class: 'row' }, input, h('span', { class: 'muted' }, 'request/phút')));
 }
 // Account tag limit per module (settings.search.tagLimits, 0 = module default): main passes it to the core as -tags_limit.
 // Shown for modules whose manifest declares a tag limit (syntax.maxTags), and always for Danbooru.

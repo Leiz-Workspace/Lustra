@@ -171,12 +171,12 @@ Danh sách chặn tên miền: `lustra/safety_data/denied_domains.txt`, mỗi d�
 
 | Module | Nguồn cập nhật | Ghi chú |
 |---|---|---|
-| rx | DAPI `s=tag&q=index&after_id=` | cần API key **của người dùng** (không có khoá mặc định; thiếu thì báo lỗi) |
+| rx | DAPI `s=tag&q=index&pid=` (phân trang theo số trang) | cần API key **của người dùng** (không có khoá mặc định; thiếu thì báo lỗi) |
 | db | `tags.json?page=a<id>&search[hide_empty]=true` | ~1,1 triệu tag; cron mặc định chỉ giữ tag có ≥ 2 post (~0,77 triệu) |
-| xb, bb | DAPI `after_id` | |
+| xb, bb | DAPI `pid` | |
 | en | `db_export/tags-YYYY-MM-DD.csv.gz` | nhẹ tải cho server hơn so với gọi API |
 | rn, rs, rp | không có nguồn | giữ nguyên file đi kèm; không có file thì học từ post đã xem / đã tải |
-| extension từ trình tạo | theo `$generator.engine`: `gelbooru_dapi` (DAPI `after_id`), `danbooru_json` (`tags.json`), `moebooru_json` (`tag.json`), `e621_json` (export hằng ngày), `philomena_json` (10.000 tag dùng nhiều nhất), `szurubooru_json` (`api/tags/`), `shimmie_api` (`api/danbooru/find_tags`) | site lấy từ `site` của manifest (chỉ https); robots.txt áp dụng nghiêm ngặt; `shimmie`, `custom`: không có nguồn |
+| extension từ trình tạo | theo `$generator.engine`: `gelbooru_dapi` (DAPI `pid`), `danbooru_json` (`tags.json`), `moebooru_json` (`tag.json`), `e621_json` (export hằng ngày), `philomena_json` (10.000 tag dùng nhiều nhất), `szurubooru_json` (`api/tags/`), `shimmie_api` (`api/danbooru/find_tags`) | site lấy từ `site` của manifest (chỉ https); robots.txt áp dụng nghiêm ngặt; `shimmie`, `custom`: không có nguồn |
 
 rx, db, xb, bb, en là các module đã duyệt (`CURATED` trong `lustra/tags_updater.py`): dùng API chính thức của site, là ngoại lệ với các dòng `Disallow` của robots.txt nhưng vẫn theo `Crawl-delay`, `Retry-After` và ngân sách request (quyết định 2026-11-18, [operations.md](operations.md) mục 3). Một extension khác dùng lại abbr của module đã duyệt nhưng cho site khác thì không được coi là module đã duyệt.
 

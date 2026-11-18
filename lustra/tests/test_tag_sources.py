@@ -36,15 +36,18 @@ from lustra.logger import Logger
 
 Logger.init(True, True)
 
-from lustra import server, tags_learned, tags_updater  # noqa: E402
+from lustra import network, server, tags_learned, tags_updater  # noqa: E402
 from lustra.aigen.session import GenRequest, GenSession  # noqa: E402
+from lustra.defines import RATE_LIMIT_RX  # noqa: E402
 from lustra.dlindex import DownloadIndex, IndexRecord  # noqa: E402
+from lustra.downloaders import _make_downloader  # noqa: E402
 from lustra.extgen.fetch import SafeFetcher  # noqa: E402
 from lustra.extgen.sandbox import pack  # noqa: E402
 from lustra.extgen.scaffold import create_draft, survey  # noqa: E402
 from lustra.extgen.taglist import bundle_tag_list  # noqa: E402
 from lustra.extgen.templates import make_manifest  # noqa: E402
 from lustra.modspec import ExtensionManifest  # noqa: E402
+from lustra.module import ProcModule  # noqa: E402
 from lustra.robots import RobotsRules  # noqa: E402
 from lustra.tags import TagTypes  # noqa: E402
 from lustra.tags_updater import CURATED, PoliteClient, TagSource, TagSourceError, tag_source, tag_sources, update_tag_list  # noqa: E402
@@ -126,7 +129,12 @@ class FakeTagSite:
                 return _xml('"Missing authentication. Go to api.gelbooru.com"')
             if qs.get('s') == 'post':
                 return _xml('<?xml version="1.0" encoding="UTF-8"?><posts count="1" offset="0"><post id="1" tags=" scenery "/></posts>')
-            rows = page(sorted(TAGS), int(qs.get('after_id', 0)), int(qs.get('limit', 100)))
+            # pages by number (pid), in the site's own order: like rule34.xxx, not by id (an after_id cursor would skip tags)
+            limit = min(int(qs.get('limit', 100)), self.cap or 1000)
+            pid = int(qs.get('pid', 0))
+            rows = sorted(TAGS, key=lambda t: t[1])[pid * limit:(pid + 1) * limit]
+            if not rows:
+                return _xml('<?xml version="1.0" encoding="UTF-8"?><tag type="array"/>')  # rule34.xxx's empty page
             return _xml('<?xml version="1.0" encoding="UTF-8"?><tags type="array">' + ''.join(
                 f'<tag type="{c}" count="{n}" name="{html.escape(name, quote=True)}" ambiguous="false" id="{i}"/>' for i, name, n, c in rows)
                 + '</tags>')
@@ -289,10 +297,84 @@ class EngineSourceTests(TestCase):
                               sleep=t.sleep, clock=t.clock)
         tags = list(tags_updater._iter_danbooru(client, '', 1, 0))
         self.assertEqual(set(EXPECTED), {x[0] for x in tags})
-        self.assertEqual(7.0, client.interval)
+        self.assertEqual(10.5, client.interval)  # the Crawl-delay, 1.5 times slower after the 429 (no rate stated)
         self.assertIn(3.0, t.sleeps)  # Retry-After
         self.assertEqual(5, len(times))  # robots.txt, the 429, pages 1 to 3
         self.assertTrue(all(b - a >= 7.0 - 1e-9 for a, b in itertools.pairwise(times)), times)  # paced by the Crawl-delay
+
+    def test_rate_limit_text_sets_the_pace(self) -> None:
+        # api.rule34.xxx answers 429 'You currently have a limit of 60 requests every 60 second(s).': the rest goes at that pace
+        site = FakeTagSite()
+        site.answers.append((429, b'You currently have a limit of 60 requests every 60 second(s).', {'content-type': 'text/html'}))
+        t = FakeClock()
+        client = PoliteClient(TagSource('zq', 'gelbooru_dapi', SITE), delay=0.5, allow_local=True, session=FakeSession(site),
+                              sleep=t.sleep, clock=t.clock)
+        told: list[str] = []
+        client.notify = told.append
+        tags = list(tags_updater._iter_gelbooru(client, '', 1, 0))
+        self.assertEqual(set(EXPECTED), {x[0] for x in tags})
+        self.assertAlmostEqual(60 / 60 * tags_updater.RATE_LIMIT_MARGIN, client.interval)
+        self.assertEqual(tags_updater.RATE_LIMIT_WAITS[0], client.waited)
+        self.assertEqual([f'{HOST} asks to wait (HTTP 429): waiting 5 s, then one request every 1.05 s'], told)  # the user sees why
+        # rx: its published limit is the pace from the first request
+        rx = PoliteClient(CURATED['rx'], delay=0.5)
+        self.assertGreaterEqual(rx.interval, 1.05)
+
+    def test_waits_grow_then_the_list_stops(self) -> None:
+        site = FakeTagSite()
+        site.answers.extend([(429, b'slow down', {'content-type': 'text/plain'})] * (len(tags_updater.RATE_LIMIT_WAITS) + 1))
+        t = FakeClock()
+        client = PoliteClient(TagSource('zq', 'gelbooru_dapi', SITE), delay=0, allow_local=True, session=FakeSession(site),
+                              sleep=t.sleep, clock=t.clock)
+        with self.assertRaisesRegex(RuntimeError, 'still asks to wait'):
+            list(tags_updater._iter_gelbooru(client, '', 1, 0))
+        waits = [s for s in t.sleeps if s in tags_updater.RATE_LIMIT_WAITS]
+        self.assertEqual(list(tags_updater.RATE_LIMIT_WAITS), waits)
+        self.assertEqual(sum(tags_updater.RATE_LIMIT_WAITS), client.waited)
+        self.assertGreaterEqual(client.interval, 1.0)  # slowed down
+
+    def test_a_stopped_update_continues_where_it_stopped(self) -> None:
+        for engine in ('gelbooru_dapi', 'danbooru_json'):
+            with self.subTest(engine=engine):
+                out = self.out / f'resume-{engine}'
+                seen: list[int] = []
+
+                def failing(url: str, headers: dict, site=FakeTagSite(cap=2), calls=[0]):
+                    qs = {k: v[0] for k, v in url_parse.parse_qs(url_parse.urlsplit(url).query).items()}
+                    if 'pid' in qs or 'page' in qs:
+                        calls[0] += 1
+                        if calls[0] == 3:  # the third page fails: two pages (4 tags) are kept
+                            return 500, b'oops', {'content-type': 'text/plain'}
+                    return site(url, headers)
+                src = TagSource('zq', engine, SITE, 'Fake')
+                with self.assertRaises(RuntimeError):
+                    update_tag_list('zq', out, source=src, delay=0, allow_local=True, session=FakeSession(failing))
+                partial = out / tags_updater.PARTIAL_DIR / 'zq_tags.json'
+                self.assertTrue(partial.is_file())
+                self.assertFalse((out / 'zq_tags.json').exists())  # nothing half done is used as the list
+                kept = json.loads(partial.read_text(encoding='utf-8'))
+                self.assertEqual(tags_updater.RESUMABLE_ENGINES[engine], kept['cursorKind'])
+                if engine == 'gelbooru_dapi':  # a partial of the old after_id reader (no cursor kind) is not continued from
+                    old = dict(kept, cursorKind=None)
+                    partial.with_name('old.json').write_text(json.dumps(old), encoding='utf-8')
+                    self.assertIsNone(tags_updater._load_partial(partial.with_name('old.json'), src))
+                    partial.with_name('old.json').unlink()
+
+                def recording(url: str, headers: dict, site=FakeTagSite(cap=2)):
+                    qs = {k: v[0] for k, v in url_parse.parse_qs(url_parse.urlsplit(url).query).items()}
+                    if 'pid' in qs:
+                        seen.append(int(qs['pid']))
+                    elif 'page' in qs and str(qs['page']).startswith('a'):
+                        seen.append(int(qs['page'][1:]))
+                    return site(url, headers)
+                notes: list[str] = []
+                res = update_tag_list('zq', out, source=src, delay=0, allow_local=True, session=FakeSession(recording),
+                                      progress=lambda msg, _n: notes.append(msg))
+                self.assertTrue(res.written, res.message)
+                self.assertEqual(set(EXPECTED), set(_read_list(res.path)))
+                self.assertGreater(seen[0], 0)  # started from the saved cursor (page 2 / an id), not from the first page
+                self.assertTrue(any('continuing a stopped update' in n for n in notes), notes)
+                self.assertFalse(partial.exists())  # complete: nothing left to continue
 
     def test_budget_error_is_raised_and_nothing_is_written(self) -> None:
         with self.assertRaises(TagSourceError) as cm:
@@ -472,6 +554,70 @@ class _DataDirTest(TestCase):
         TagsDB.clear()
         self.env.stop()
         self.tmp.cleanup()
+
+
+class KeyRateLimitTests(_DataDirTest):
+    """A limit per API key (rule34.xxx: 60 requests every 60 s) that the site's admins may raise for the user's key: the app writes the
+    new limit to <data dir>/ratelimit/limits.json, every core process paces the key with it, together (shared_rate_wait)"""
+
+    def _write(self, limits: dict) -> None:
+        f = self.data / 'ratelimit' / network.RATE_LIMITS_FILE
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(limits), encoding='utf-8')
+        os.utime(f, ns=(time.time_ns(), time.time_ns() + 1))  # a new stamp even within the same clock tick
+
+    def test_published_file_and_env(self) -> None:
+        os.environ.pop('LUSTRA_RATE_LIMIT_RX', None)
+        self.assertEqual((60, 60), network.key_rate_limit('rx', RATE_LIMIT_RX))  # nothing set: what the site publishes
+        self.assertAlmostEqual(1.05, network.key_rate_interval('rx', RATE_LIMIT_RX))
+        self.assertIsNone(network.key_rate_limit('zq', None))
+        self.assertEqual(0.0, network.key_rate_interval('zq', None))
+        self._write({'rx': 120, 'xb': -1, 'bb': 'x', 'db': True})
+        self.assertEqual((120, 60), network.key_rate_limit('rx', RATE_LIMIT_RX))  # the app's setting
+        self.assertAlmostEqual(0.525, network.key_rate_interval('rx', RATE_LIMIT_RX))
+        for bad in ('xb', 'bb', 'db'):
+            self.assertIsNone(network.key_rate_limit(bad, None), bad)
+        self._write({'rx': 240})
+        self.assertEqual((240, 60), network.key_rate_limit('rx', RATE_LIMIT_RX))  # read again once the file changed
+        with mock.patch.dict(os.environ, {'LUSTRA_RATE_LIMIT_RX': '90'}):
+            self.assertEqual((90, 60), network.key_rate_limit('rx', RATE_LIMIT_RX))  # CLI / cron
+        with mock.patch.dict(os.environ, {'LUSTRA_RATE_LIMIT_RX': 'lots'}):
+            self.assertEqual((240, 60), network.key_rate_limit('rx', RATE_LIMIT_RX))
+
+    def test_downloads_and_tag_updates_pace_the_key_together(self) -> None:
+        os.environ.pop('LUSTRA_RATE_LIMIT_RX', None)
+        dwn = _make_downloader(ProcModule.RX)
+        self.assertAlmostEqual(1.05, dwn._get_min_request_interval())
+        dwn.favorites_search_user = '1'  # html pages of the main site: not the API
+        self.assertEqual(0.0, dwn._get_min_request_interval())
+        dwn.favorites_search_user = ''
+        self._write({'rx': 120})
+        self.assertAlmostEqual(0.525, dwn._get_min_request_interval())
+        client = PoliteClient(CURATED['rx'], delay=0)
+        self.assertAlmostEqual(0.525, client.interval)
+        self.assertEqual(dwn._get_sitename(), client._shared)  # the same lock file as the downloads of that key
+        calls: list[tuple[str, float]] = []
+        with mock.patch.object(tags_updater, 'shared_rate_wait', lambda site, interval: calls.append((site, interval)) or True):
+            client._pace()
+        self.assertEqual([(CURATED['rx'].site, 0.525)], calls)
+        self.assertFalse(PoliteClient(TagSource('zq', 'danbooru_json', SITE), delay=0, allow_local=True)._shared)  # no known limit
+
+    def test_shared_wait_spaces_two_clients(self) -> None:
+        with mock.patch.dict(os.environ, {'LUSTRA_RATE_LIMIT_ZQ': '600'}):  # 0.105 s
+            src = TagSource('zq', 'danbooru_json', SITE, rate_limit=(1, 1))
+            a, b = PoliteClient(src, delay=0, allow_local=True), PoliteClient(src, delay=0, allow_local=True)
+            started = time.monotonic()
+            for c in (a, b, a, b):
+                c._pace()
+            self.assertGreaterEqual(time.monotonic() - started, 3 * 0.105 * 0.9)  # 4 requests of two clients: 3 gaps
+
+    def test_extensions_declare_their_limit_in_the_manifest(self) -> None:
+        self.assertEqual((30, 60), tags_updater.manifest_rate_limit({'rateLimit': {'requests': 30, 'seconds': 60}}))
+        for bad in ({}, {'rateLimit': {'requests': 0, 'seconds': 60}}, {'rateLimit': {'requests': True, 'seconds': 60}},
+                    {'rateLimit': [60, 60]}, None):
+            self.assertIsNone(tags_updater.manifest_rate_limit(bad), bad)
+        rx = json.loads((pathlib.Path(tags_updater.__file__).parent / 'builtin_ext' / 'rule34' / 'manifest.json').read_text('utf-8'))
+        self.assertEqual(RATE_LIMIT_RX, tags_updater.manifest_rate_limit(rx['auth']))  # what the app shows = what the core uses
 
 
 class DraftTagListTests(_DataDirTest):
