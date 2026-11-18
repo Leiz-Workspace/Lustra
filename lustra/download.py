@@ -323,7 +323,7 @@ class Downloader(DownloaderBase):
             return path
         with self.item_lock:
             self.gender_verified_count += 1
-        if verdict.safety_tag:  # model safety gate on a frame (plan §4.2)
+        if verdict.safety_tag and self.safety_blacklist:  # model safety gate on a frame (plan §4.2)
             why = f'model safety gate on a frame: {verdict.safety_tag}'
         else:
             res = combine(tag_res, verdict.result, self.gender_min_conf)
@@ -946,7 +946,7 @@ class Downloader(DownloaderBase):
         task_parents: set[str] = set()
         self._extract_cur_task_infos(task_parents)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_known_items_by_md5, task_parents)
-        # safety blacklist: every task incl. parent tasks, only while the content filter is enabled (no-op otherwise)
+        # safety blacklist: every task incl. parent tasks, only with -safety_blacklist (no-op otherwise)
         self._apply_filter(DownloaderStates.FILTERING_ITEMS4, self._filter_items_safety, task_parents)
 
         if self.current_task_num <= self.orig_tasks_count:
@@ -1213,6 +1213,7 @@ class Downloader(DownloaderBase):
         self.gender_verify_media = getattr(args, 'gender_verify_media', False) or self.gender_verify_media
         self.tags_limit = getattr(args, 'tags_limit', None) or self.tags_limit
         self.skip_known = getattr(args, 'skip_known', False) or self.skip_known
+        self.safety_blacklist = getattr(args, 'safety_blacklist', False) or self.safety_blacklist
         self.tags_str_arr[:] = [] if self.get_max_id else convert_taglist(args.tags)
         self._extract_negative_and_groups()
         self._extract_custom_argument_tags()

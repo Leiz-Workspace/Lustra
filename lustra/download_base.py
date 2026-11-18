@@ -117,7 +117,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.item_info_dict_all: dict[str, ItemInfo] = {}
         self.neg_and_groups: list[list[re.Pattern[str]]] = []
         self.required_tags: list[str] = []
-        # content filter (character gender, tier 0 = tags). Enabling it also enables the safety blacklist
+        # content filter (character gender, tier 0 = tags). The safety blacklist is a separate option (-safety_blacklist)
         self.gender_select: frozenset[str] = frozenset()
         self.gender_mode: str = 'tags'
         self.gender_model_checked: int = 0
@@ -135,6 +135,8 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.gender_verified_count: int = 0
         self.gender_mismatch_count: int = 0
         '''files moved into GENDER_MISMATCH_DIR by -gender_verify_media'''
+        self.safety_blacklist: bool = False
+        '''-safety_blacklist: drop posts whose tags (or the image model's minor coded tags) suggest minors; off by default'''
         self.safety_blocked_count: int = 0
         '''positive tags which could not be sent to website (tags limit) and are checked locally'''
         self.known_parents: set[str] = set()
@@ -830,8 +832,8 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.filtered_out_ids_cache.add(idstring)
 
     def _filter_items_safety(self, parents: MutableSet[str]) -> None:
-        """Hard blacklist (lustra/safety.py). Active whenever the content filter is enabled, for every task incl. parent tasks"""
-        if not self.gender_select:
+        """Hard blacklist (lustra/safety.py), with -safety_blacklist, for every task incl. parent tasks"""
+        if not self.safety_blacklist:
             return
         trace('Filtering out items using safety blacklist...')
         total = len(self.items_raw_per_task)
@@ -845,11 +847,12 @@ class DownloaderBase(ThreadedHtmlWorker):
                 removed += 1
         if removed > 0:
             self.safety_blocked_count += removed
-            trace(f'Blocked {removed:d} / {total:d} items (safety blacklist, active while content filter is enabled)')
+            trace(f'Blocked {removed:d} / {total:d} items (safety blacklist)')
 
     def _filter_items_by_gender(self, parents: MutableSet[str]) -> None:
         """Gender filter: tier 0 labels from post tags (lustra/gender.py); with '-gender_mode model' posts whose tags are not
-        conclusive are looked at by the image model (lustra/gender_model.py), its safety gate blocks posts as well"""
+        conclusive are looked at by the image model (lustra/gender_model.py); with -safety_blacklist its safety gate blocks posts
+        as well"""
         if not self.gender_select:
             return
         trace('Filtering items by character gender...')
@@ -868,7 +871,7 @@ class DownloaderBase(ThreadedHtmlWorker):
             self.catch_cancel_or_ctrl_c()
             item_id, idstring, info, res = results[idx]
             if (v := verdicts.get(item_id)) is not None:
-                if v.safety_tag:  # model safety gate (plan §4.2): blocked like a blacklisted tag
+                if v.safety_tag and self.safety_blacklist:  # model safety gate (plan §4.2): blocked like a blacklisted tag
                     self._drop_task_item(idx, item_id, idstring, info, parents)
                     model_blocked += 1
                     continue

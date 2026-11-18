@@ -71,6 +71,9 @@ const DEFAULT_SETTINGS = {
     gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags', verifyMedia: false },
     lowRes: false, prefix: true, appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false,
     skipKnown: false, // -skip_known: skip posts found in the local download index (core lustra/dlindex.py)
+    // -safety_blacklist: drop posts whose tags suggest minors (core lustra/safety.py); its own filter, off by default,
+    // independent of the gender filter (product decision 2026-11-18). Saved with each query (q.safetyBlacklist)
+    safetyBlacklist: false,
     subfolderPerQuery: false, dumpTags: false, dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run',
     warnNonEmpty: true, maxConcurrentJobs: 1, notify: true,
   },
@@ -1005,7 +1008,7 @@ async function connectionArgs(module) {
 }
 
 function genderArgs(g) {
-  // content filter; enabling it also enables the safety blacklist in the core
+  // content filter (character gender); the safety blacklist is a separate option, see safetyArgs
   const labels = ['only_female', 'only_male', 'both', 'none', 'unknown'];
   const sel = [...new Set((g && Array.isArray(g.select) ? g.select : []).filter((x) => labels.includes(x)))];
   if (!sel.length) return [];
@@ -1019,6 +1022,11 @@ function genderArgs(g) {
   }
   if (g.strict) a.push('-gender_strict');
   return a;
+}
+
+function safetyArgs(q) {
+  // '-safety_blacklist': only when the query asks for it (the check box of the filters panel); never implied by the gender filter
+  return q && q.safetyBlacklist === true ? ['-safety_blacklist'] : [];
 }
 
 function searchArgs(q) {
@@ -1126,7 +1134,7 @@ class Jobs {
       startedAt: 0, endedAt: 0, exitCode: null, logTail: [], label: q.label || '',
       secretArgs: [...(await connectionArgs(q.module)), ...(await genderSecretArgs(q.gender))],
       // '--': tags like '-webm' or '-v' are never parsed as options
-      args: ['-module', q.module, ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender), ...args, '--',
+      args: ['-module', q.module, ...searchArgs(q), ...tagLimitArgs(q.module), ...genderArgs(q.gender), ...safetyArgs(q), ...args, '--',
         ...String(q.tags).trim().split(/\s+/)],
       query,
       autoKey: typeof q.autoKey === 'string' ? q.autoKey : '',
@@ -1747,7 +1755,8 @@ function registerIpc() {
       module: asQuery(q).module, tags: q.tags, page: page || 0,
       // the preview downloads nothing: no media check (a model server older than /v1/frames would fail it)
       args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module),
-        ...genderArgs(isPlainObject(q.gender) ? { ...q.gender, verifyMedia: false } : q.gender), ...(await genderSecretArgs(q.gender))],
+        ...genderArgs(isPlainObject(q.gender) ? { ...q.gender, verifyMedia: false } : q.gender), ...safetyArgs(q),
+        ...(await genderSecretArgs(q.gender))],
     };
     if (Number.isInteger(q.pageSize) && q.pageSize > 0) params.pageSize = q.pageSize; // the sidecar caps it to the module page size
     return sidecar.call('search.preview', params, 180000);
@@ -2336,6 +2345,13 @@ async function selfTestContract(js, quick) {
     && out.genderArgs.verify === `-gender only_female -gender_mode model -gender_model_url ${settings.genderModel.url} -gender_verify_media`
     && out.genderArgs.verifyOff === '-gender only_female' && out.genderArgs.verifyTags === '-gender only_female'
     && out.genderArgs.verifyNo === `-gender only_female -gender_mode model -gender_model_url ${settings.genderModel.url}`;
+  // safety blacklist: its own option; the gender filter never implies it
+  out.safetyArgs = {
+    on: safetyArgs({ safetyBlacklist: true }).join(' '), off: safetyArgs({ safetyBlacklist: false }).join(' '), missing: safetyArgs({}).join(' '),
+    genderOnly: [...genderArgs({ select: ['only_female'] }), ...safetyArgs({ gender: { select: ['only_female'] } })].join(' '),
+  };
+  out.safetyArgs.ok = out.safetyArgs.on === '-safety_blacklist' && out.safetyArgs.off === '' && out.safetyArgs.missing === ''
+    && out.safetyArgs.genderOnly === '-gender only_female' && settings.download.safetyBlacklist !== undefined;
   // the media check box: hidden while 'Tag + model' cannot be picked, disabled with 'Chỉ dựa vào tag', saved in download.gender
   try {
     const savedGender = structuredClone(settings.download.gender);

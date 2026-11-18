@@ -392,13 +392,14 @@ def _fetch_results_page(dwn, page: int, page_size: int, maxlim: int | None) -> t
 
 
 class _ResultsFilter:
-    """Local filters of a results page, as the download applies them: safety blacklist (gender filter on), required tags,
+    """Local filters of a results page, as the download applies them: safety blacklist (-safety_blacklist), required tags,
     negative groups, gender. Counts what it hides"""
 
     def __init__(self, dwn) -> None:
         self.dwn = dwn
         self.required = {t.lower() for t in dwn.required_tags}
         self.gender_on = bool(dwn.gender_select)
+        self.safety_on = bool(dwn.safety_blacklist)
         self.rules = rules_for_module(dwn._get_module_abbr()) if self.gender_on else None
         self.with_tags = bool(dwn._can_extract_item_info_without_fetch())
         self.gender_stats: dict[str, int] = {}
@@ -415,7 +416,7 @@ class _ResultsFilter:
         if item['mediaKind'] != 'image':  # the in-app player streams the original file
             item['file'] = _attr(h, 'file_url')
         if not self.with_tags:
-            if self.gender_on:
+            if self.safety_on:
                 # tags are unknown without fetching each post: the safety blacklist cannot be checked -> fail closed,
                 # the post (and its thumbnail url) is not returned at all
                 self.hidden_no_tags += 1
@@ -425,7 +426,7 @@ class _ResultsFilter:
         tags = info.tags.split(' ') if info.tags else []
         item.update({'tags': tags, 'score': info.score, 'width': info.width, 'height': info.height, 'ext': info.ext,
                      'date': info.date, 'rating': _attr(h, 'rating'), 'md5': getattr(info, 'md5', '') or ''})
-        if self.gender_on and blocked_tag(tags):
+        if self.safety_on and blocked_tag(tags):
             self.blocked += 1  # safety: never returned, not even a thumbnail url
             return None
         tl = {t.lower() for t in tags}
@@ -455,8 +456,8 @@ PREVIEW_MODEL_MAX = 40
 
 
 def _apply_gender_model(filt: _ResultsFilter, items: list[dict]) -> None:
-    """-gender_mode model: the image model labels the posts of the page whose tags were not conclusive, its safety gate
-    removes posts entirely (like the blacklist: never returned). Posts past PREVIEW_MODEL_MAX keep their tag label"""
+    """-gender_mode model: the image model labels the posts of the page whose tags were not conclusive; with -safety_blacklist
+    its safety gate removes posts entirely (like the blacklist: never returned). Posts past PREVIEW_MODEL_MAX keep their tag label"""
     if not filt.model_pending:
         return
     from .gender_model import ModelUnavailable, combine, verdicts_for
@@ -477,7 +478,7 @@ def _apply_gender_model(filt: _ResultsFilter, items: list[dict]) -> None:
             continue
         old = it['gender']['effective']
         stats[old] = stats.get(old, 1) - 1
-        if v.safety_tag:
+        if v.safety_tag and filt.safety_on:
             dropped.add(id(it))
             filt.blocked += 1
             continue

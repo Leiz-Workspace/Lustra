@@ -282,10 +282,16 @@ class SidecarRobustnessTests(TestCase):
         with mock.patch.object(DownloaderDb, 'fetch_html', return_value=HTMLContent(None, posts)), \
                 mock.patch.object(DownloaderDb, '_can_extract_item_info_without_fetch', return_value=False), \
                 mock.patch.object(server, 'notify'):
-            res = server.m_search_preview({'module': 'db', 'tags': 'x', 'args': ['-gender', 'only_female,unknown']})
+            res = server.m_search_preview({'module': 'db', 'tags': 'x', 'args': ['-gender', 'only_female,unknown', '-safety_blacklist']})
         self.assertEqual([], res['items'])
         self.assertEqual(1, res['hiddenNoTags'])
         self.assertNotIn('p.jpg', json.dumps(res))
+        # without -safety_blacklist (the default, even with the gender filter) nothing is hidden for safety
+        with mock.patch.object(DownloaderDb, 'fetch_html', return_value=HTMLContent(None, posts)), \
+                mock.patch.object(DownloaderDb, '_can_extract_item_info_without_fetch', return_value=False), \
+                mock.patch.object(server, 'notify'):
+            res2 = server.m_search_preview({'module': 'db', 'tags': 'x', 'args': ['-gender', 'only_female,unknown']})
+        self.assertEqual((['1'], 0), ([it['id'] for it in res2['items']], res2['hiddenNoTags']))
 
 #
 #
