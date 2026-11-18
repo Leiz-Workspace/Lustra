@@ -743,8 +743,25 @@ class TagsDB:
         return s[1:sep], s[sep + 4:-1]
 
     @staticmethod
+    def extension_lists() -> dict[str, pathlib.Path]:
+        """Lists shipped inside installed extensions (builtin and user): the manifest's tagList, '<abbr>_tags.json' next to
+        manifest.json (the extension generator puts the site's list there, lustra/extgen/taglist.py). Manifests only, no code runs;
+        an extension can only give the list of its own module"""
+        from .extensions import SOURCE_BUILTIN, SOURCE_USER, Extensions
+        result: dict[str, pathlib.Path] = {}
+        try:
+            manifests = [*Extensions._scan(Extensions.builtin_dir(), SOURCE_BUILTIN), *Extensions._scan(Extensions.user_dir(), SOURCE_USER)]
+        except OSError:
+            return result
+        for m in manifests:
+            if m.path is not None and m.abbr not in result and m.tagList == f'{m.abbr}_tags.json' and (m.path / m.tagList).is_file():
+                result[m.abbr] = m.path / m.tagList
+        return result
+
+    @staticmethod
     def locate_default_lists(reload: Iterable[str] = ()) -> int:
-        """LUSTRA_TAGS_DIR wins, otherwise the most recently updated list per module among <data dir>/tags and repo 2tags/.
+        """LUSTRA_TAGS_DIR wins, otherwise the most recently updated list per module among <data dir>/tags, the lists shipped
+        inside installed extensions (extension_lists) and repo 2tags/.
         Loaded lists stay in memory unless their file changed or they are listed in 'reload'"""
         from .extensions import data_dir
         env = os.environ.get('LUSTRA_TAGS_DIR')
@@ -753,14 +770,19 @@ class TagsDB:
         reload = set(reload)
         files: dict[str, pathlib.Path] = {}
         alias_file: pathlib.Path | None = None
+
+        def consider(module: str, f: pathlib.Path, from_env: bool) -> None:
+            cur = files.get(module)
+            if cur is None or from_env or (cur.parent != env_dir and f.stat().st_mtime > cur.stat().st_mtime):
+                files[module] = f
+
+        for module, f in TagsDB.extension_lists().items():
+            consider(module, f, False)
         for d in reversed(dirs):
             if not d.is_dir():
                 continue
             for f in d.glob('*_tags.json'):
-                module = f.name[:-len('_tags.json')]
-                cur = files.get(module)
-                if cur is None or d == env_dir or (cur.parent != env_dir and f.stat().st_mtime > cur.stat().st_mtime):
-                    files[module] = f
+                consider(f.name[:-len('_tags.json')], f, d == env_dir)
             if alias_file is None and (alias := d / FILE_NAME_ALIASES).is_file():
                 alias_file = alias
         with TagsDB._lock:

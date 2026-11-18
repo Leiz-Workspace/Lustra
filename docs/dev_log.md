@@ -716,7 +716,75 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - dòng lệnh lịch chạy được qua `sh` với PATH tối thiểu như cron, đường dẫn có dấu cách và dấu nháy;
   - giao diện (thanh nhắc, nút Nhập khoá, chặn Đếm, ô lịch) trên renderer mock.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ak)
+### 7al. Danh sách tag cho mọi extension, kể cả extension từ trình tạo — 2026-11-18
+- **Vấn đề:** chỉ 5 module cố định (rx, db, xb, bb, en) có nguồn cập nhật danh sách tag.
+  - Extension do trình tạo làm ra không có danh sách, nên autocomplete và Tags A–Z để trống với chúng.
+  - Lịch hệ thống chạy db, en, xb, bb kể cả khi module chưa được cài.
+- **Nguồn theo engine** (`lustra/tags_updater.py`):
+  - `TagSource` gồm engine, site, kiểu khoá (`none` / `optional` / `required`) và việc có áp robots.txt hay không.
+  - `tag_source(module)` / `tag_sources()` chỉ đọc manifest, không chạy code extension. Nguồn là module đã duyệt (`CURATED`) hoặc `$generator.engine` + `site` của extension.
+  - 7 engine có nguồn: thêm Moebooru (`tag.json`), Philomena (`api/v1/json/search/tags`, 10.000 tag dùng nhiều nhất), Szurubooru (`api/tags/`), Shimmie (`api/danbooru/find_tags`); e621 / Danbooru / Gelbooru dùng lại cách đọc cũ với site của extension.
+  - Extension Gelbooru có `auth.apiKey` bắt buộc khoá của người dùng; thiếu khoá thì dừng trước mọi request.
+  - Một extension dùng lại abbr của module đã duyệt cho site khác thì không được coi là module đã duyệt.
+- **Trình tạo:** `make_manifest` ghi `tagList: "<abbr>_tags.json"` khi engine có nguồn; `specs.md` của bản nháp có dòng "Tag list".
+- **Lịch sự, mọi nguồn** (`PoliteClient`):
+  - khoảng cách giữa hai request (site của extension ít nhất 1 giây), `Crawl-delay`, `Retry-After`, ngân sách request mỗi danh sách (`--max-requests`, mặc định 5000);
+  - không cookie, dừng khi gặp bot challenge, chỉ https và host của site, địa chỉ công khai, không gọi site bị chặn;
+  - khoá bị che trong log;
+  - robots.txt đọc theo RFC 9309 (`lustra/robots.py`). `urllib.robotparser` lấy luật khớp đầu tiên và không hiểu `*`: với `Allow: /` đứng trước `Disallow: /*.json`, nó cho phép `/tags.json`.
+- **Site giới hạn `limit`:** Gelbooru và Danbooru đọc theo con trỏ id. Nếu trang đầu ngắn hơn số tag đã yêu cầu, updater gửi thêm một request để biết đó là hết danh sách hay site trả ít tag hơn mỗi trang. Con trỏ tính cả id của chính nó (trả lại tag cuối) cũng kết thúc đúng.
+- **Quyết định robots.txt (2026-11-18, chủ repo, phương án a "Ngoại lệ cho 5 site cũ"):**
+  - Site mới (suy theo engine): tuân thủ robots.txt nghiêm ngặt.
+  - Rule34, Danbooru, Xbooru, Bbooru, e621: ngoại lệ có ghi rõ, vì dùng API chính thức của site; vẫn tôn trọng `Crawl-delay`, `Retry-After` và ngân sách request. Danbooru vẫn cập nhật được.
+  - Căn cứ: robots.txt thật của 5 site (đọc ngày 2026-11-18).
+    - Danbooru: `User-agent: *` có `Disallow: /`, `Allow: /tags`, `Disallow: /*.json`, nên `/tags.json` bị chặn.
+    - e621: cho phép `db_export`, có `Crawl-delay: 1`.
+    - Bbooru: chỉ chặn `/public/remove.php`.
+    - api.rule34.xxx: không có robots.txt (404).
+    - Xbooru: trả trang chặn theo vùng.
+- **App:**
+  - Sidecar thêm `tags.sources`; `tags.update` nhận mọi module có nguồn.
+  - Tags A–Z liệt kê mọi extension đã cài, có cột "Nguồn" và nút "Cập nhật"; module cần khoá mà chưa có khoá ghi "cần API key".
+  - Lịch hệ thống chạy `--modules auto` thay cho `db,en,xb,bb`: lõi tự chọn module đã cài có nguồn và không bắt buộc khoá lúc chạy, nên extension cài sau cũng được cập nhật mà không cần ghi lại crontab / Task Scheduler. Bỏ `settings.tags.schedule.modules`.
+- **Test:**
+  - `lustra.tests.test_tag_sources` (offline, CI chạy thêm): site giả cho cả 7 engine; robots.txt (luật dài nhất, `*`, `$`, nhóm theo agent, ngoại lệ cho module đã duyệt); `Crawl-delay`, `Retry-After`; ngân sách request; bot challenge; redirect sang host khác; site http; khoá bắt buộc và khoá của người dùng; site giới hạn `limit`, con trỏ tính cả id của nó; lệnh `--modules auto`.
+  - Luồng đầu-cuối: trình tạo khảo sát site Gelbooru giả, tạo bản nháp có `tagList`, cài, `tags.update` ghi `fq_tags.json`, `tags.autocomplete` gợi ý `scenery`.
+  - Sửa test cũ theo API mới (`_iter_source`, `tag_source`).
+- **Đã kiểm:**
+  - 354 test offline qua (sau khi rebase lên develop có PR #14, #15);
+  - ruff;
+  - `npm run check`;
+  - trang Tags A–Z trên renderer mock: extension `fb` có nút Cập nhật, rx ghi "cần API key", dòng lịch liệt kê các module không cần khoá.
+- **Chưa kiểm / ghi chú:**
+  - Các engine mới chưa chạy với site thật. Endpoint và trường dữ liệu theo tài liệu / mã nguồn của engine, đã kiểm bằng site giả.
+  - Moebooru đọc theo trang: giả định site nhận `limit=1000`.
+  - Bản checkout repo: `2tags/bb_tags.json` là bản sao của `rx_tags.json`, nên nút Cập nhật bb trong app bị sanity check từ chối (danh sách thật của Bbooru ít hơn một nửa). Lịch hệ thống và bản đóng gói không bị.
+
+### 7am. Extension mới có danh sách tag ngay — 2026-11-18
+- **Yêu cầu của chủ repo:** mỗi extension mới phải có danh sách tag ngay, không đợi người dùng bấm cập nhật. Đã chốt hai đường.
+- **Engine có API danh sách tag, robots.txt cho phép:**
+  - `lustra/extgen/taglist.py` (`bundle_tag_list`) đọc danh sách bằng chính updater (robots.txt nghiêm ngặt, `Crawl-delay`, `Retry-After`) và lưu `<abbr>_tags.json` cạnh `manifest.json`.
+  - Chạy khi phiên tạo extension đạt (chế độ AI và template), qua transport của phiên (không cookie); `python -m lustra.extgen new` cũng tải (tắt bằng `--no-tags`); lệnh mới `python -m lustra.extgen tags DIR`.
+  - Giới hạn cho bản nháp: 30 request, 90 giây, 8 MB. Kết quả ghi ở `report.json` → `tagList`: `bundled`, `later` (quá lớn, cần khoá), `learned` (không có API, robots.txt cấm), `failed`.
+  - `pack` đóng danh sách vào file .zip. `TagsDB.extension_lists` đọc danh sách trong thư mục extension đã cài (builtin, user), chỉ cho module của chính extension; danh sách mới hơn (updater) vẫn thắng.
+  - Sidecar tìm lại danh sách sau mỗi lần cài / gỡ extension.
+  - App: sau khi cài (bản nháp, catalog, catalog từ xa, file zip), nếu chưa có danh sách đi kèm mà extension có nguồn thì `tags.update` chạy ngay, bằng khoá đã lưu nếu site cần.
+  - Eval harness của trình tạo tắt bước này (`GenRequest.tag_list=False`): không tạo traffic ngoài fixture.
+- **Site không có API danh sách tag, hoặc robots.txt cấm:** `lustra/tags_learned.py` học dần, không gửi request nào.
+  - Nguồn: tag của post hiện trong Preview (sidecar học trong nền, gửi notification `tags.learned`) và của file đã tải (`tags.learn`, app gọi sau mỗi lượt tải xong; nút "Học từ file đã tải" ở Tags A–Z). Index có thêm `DownloadIndex.posts_after` để đọc dần theo con trỏ.
+  - Mỗi post đếm một lần; file `"tag": "N posts (unknown)"` với N là số post đã thấy ở đây. Trạng thái ở `<data dir>/tags/learned/<abbr>.sqlite`.
+  - Chỉ học khi module chưa có danh sách từ nguồn. File học được mang dấu (kích thước + mtime); khi updater, extension hoặc `2tags/` cho danh sách thật thì việc học dừng, không ghi đè.
+  - `tags.status` có thêm `learned`; Tags A–Z ghi "học từ post đã xem / đã tải" và "(đã học)".
+  - `LUSTRA_TAGS_LEARN=0` tắt việc học; `lustra/tests/__init__.py` đặt sẵn cho mọi test (các test Preview cũ đã từng học trong nền rồi nạp lại TagsDB giữa chừng), `test_tag_sources` tự bật lại. Module có danh sách trong bộ nhớ (`TagsDB.load_from_dict`) cũng không học.
+- **Test** (`lustra.tests.test_tag_sources`, thêm 9 test):
+  - bản nháp: danh sách vào bản nháp và file .zip; vượt số request / kích thước → `later`; robots.txt cấm → `learned`; site lỗi → `failed`; site cần khoá hoặc engine `custom` → không gửi request;
+  - phiên template đạt kèm danh sách (`tagList: bundled`), tắt được bằng `tag_list=False`;
+  - extension đã cài: danh sách đi kèm được dùng, danh sách mới hơn thắng, extension không cấp được danh sách của module khác;
+  - học: từ post Preview (notification, autocomplete, `tags.status.learned`, mỗi post một lần), từ index (con trỏ, chỉ module đó), danh sách từ nguồn dừng việc học, module có danh sách `2tags/` không học.
+- **Đã kiểm:** 362 test offline qua; ruff; `npm run check`; Tags A–Z trên renderer mock (module học được: nguồn "học từ post đã xem / đã tải", "29 KB (đã học)", nút "Học từ file đã tải").
+- **Chưa kiểm:** chưa thử với site thật; chưa chạy app Electron thật (cài extension rồi xem danh sách tự tải).
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7am)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
@@ -730,3 +798,4 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
+  - danh sách tag: trình tạo (`lustra/extgen/fetch.py`) vẫn đọc robots.txt bằng `urllib.robotparser`, nên chuyển sang `lustra/robots.py` để trình tạo và updater đọc cùng một cách; chạy thử updater với một site thật cho mỗi engine mới; quyết định giữ hay bỏ `2tags/bb_tags.json` (bản sao của `rx_tags.json`).
