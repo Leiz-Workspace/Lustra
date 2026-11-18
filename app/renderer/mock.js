@@ -19,6 +19,7 @@
     search: { module: 'db', autocomplete: true, safePreview: false, history: [], saved: [], tagLimits: {}, filtersOpen: true },
     download: { path: '/home/user/Downloads/Lustra', threads: 4, images: true, videos: true, videoFormat: '', lowRes: false, prefix: true,
       gender: { select: [], conf: 'medium', strict: false, op: 'keep', mode: 'tags', verifyMedia: false },
+      safetyBlacklist: false,
       appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
     connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {} },

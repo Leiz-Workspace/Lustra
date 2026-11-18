@@ -248,6 +248,19 @@ Công cụ đo độ chính xác của tầng 0 (tag) và tầng 1 (model) theo 
    - Ra `report.json` và `report.md`: precision theo lớp, độ phủ, macro-F1 4 lớp, ma trận nhầm lẫn 4×4 + cột unknown, ECE (15 bin) trên xác suất mà nhãn dựa vào, các điểm risk–coverage, mọi slice kèm n, thumbnail so với sample, cờ thiên lệch (slice n ≥ 150 có precision thấp hơn toàn cục > 5 điểm), số post trap bị gán only_female.
    - Post mà safety gate của model chặn (tag cấm ≥ 0,15 trên ảnh sample hoặc thumbnail) bị loại khỏi mọi số đo và bị xoá khỏi file manifest như ở `label`: `dropped` của manifest chỉ ghi khoá và tag của gate; các tag mà danh sách chặn chưa bắt được in ra và ghi trong `posts.modelGateDropped` của `report.json` để xem lại `lustra/safety.py`.
 
+## 3h. Chặn nội dung gợi ý trẻ vị thành niên (`-safety_blacklist`)
+- **Bộ lọc riêng, mặc định tắt**, độc lập với bộ lọc giới tính (quyết định 2026-11-18, thay quyết định 2026-11-16 khi nó tự chạy cùng `-gender`).
+  - CLI: `-safety_blacklist`.
+  - App: ô "Chặn nội dung gợi ý trẻ vị thành niên" trong Bộ lọc & tuỳ chọn tải. Lựa chọn được nhớ (`settings.download.safetyBlacklist`) và lưu theo từng truy vấn, nên "chạy lại" và tải theo lịch giữ nguyên.
+- **Khi bật:**
+  - bỏ mọi post có tag trong danh sách cố định của `lustra/safety.py`, cho mọi task kể cả post cha;
+  - ở Preview, post bị chặn không hiện (kể cả thumbnail), chỉ được đếm; post không có tag để kiểm bị ẩn;
+  - với `-gender_mode model`, chốt an toàn của model (tag gợi ý trẻ vị thành niên mà model nhận ra) cũng chặn post, và với `-gender_verify_media` thì chặn cả file đã tải.
+- Extension chỉ thêm được tag (`safetyTags`); không đường nào bớt được tag của danh sách.
+```bash
+.venv/bin/python -m lustra -module db -safety_blacklist -gender only_female -path ~/Downloads/Lustra -- scenery
+```
+
 ## 4. Test
 ```bash
 .venv/bin/python -m unittest lustra.tests.test_lustra

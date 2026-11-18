@@ -53,6 +53,7 @@ from .gui_defines import (
     OPTION_CMD_PROXY_CMD,
     OPTION_CMD_PROXY_NO_DOWNLOAD,
     OPTION_CMD_RETRIES_CMD,
+    OPTION_CMD_SAFETY_BLACKLIST,
     OPTION_CMD_SAVE_COMMENTS,
     OPTION_CMD_SAVE_HASHES,
     OPTION_CMD_SAVE_SOURCES,
@@ -107,6 +108,7 @@ from .help import (
     HELP_ARG_PROXY,
     HELP_ARG_PROXYNODOWN,
     HELP_ARG_REVERSE_DOWNLOAD_ORDER,
+    HELP_ARG_SAFETY_BLACKLIST,
     HELP_ARG_SKIP_AUDIO,
     HELP_ARG_SKIP_IMAGES,
     HELP_ARG_SKIP_KNOWN,
@@ -236,6 +238,7 @@ def _add_common_args(par: ArgumentParser) -> None:
     dofi.add_argument(OPTION_CMD_GENDER_STRICT[True], action=ACTION_STORE_TRUE, help=HELP_ARG_GENDER_STRICT)
     dofi.add_argument(OPTION_CMD_GENDER_VERIFY_MEDIA[True], action=ACTION_STORE_TRUE, help=HELP_ARG_GENDER_VERIFY_MEDIA)
     dofi.add_argument(OPTION_CMD_SKIP_KNOWN[True], action=ACTION_STORE_TRUE, help=HELP_ARG_SKIP_KNOWN)
+    dofi.add_argument(OPTION_CMD_SAFETY_BLACKLIST[True], action=ACTION_STORE_TRUE, help=HELP_ARG_SAFETY_BLACKLIST)
     dona = par.add_argument_group(title='naming options')
     dona.add_argument(OPTION_CMD_FNAMEPREFIX[True], action=ACTION_STORE_TRUE, help=HELP_ARG_PREFIX)
     dona.add_argument(OPTION_CMD_APPEND_SOURCE_AND_TAGS[True], action=ACTION_STORE_TRUE, help=HELP_ARG_APPEND_SOURCE_AND_TAGS)

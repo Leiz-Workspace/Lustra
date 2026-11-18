@@ -673,6 +673,24 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   Test khoá đi kèm app giờ đòi có khoá chính thức.
 - **Phát hành:** version 2.0.4 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r4`), ghi chú `docs/releases/v2.0.4.md`; `docs/operations.md` mục 3d ghi cách cập nhật catalog.
 
+### 7aj. Danh sách chặn an toàn thành bộ lọc riêng — 2026-11-18
+- **Quyết định của chủ sản phẩm** (thay quyết định 7d, 2026-11-16): danh sách chặn tag gợi ý trẻ vị thành niên (`lustra/safety.py`) không còn tự chạy khi bật bộ lọc giới tính. Nó là bộ lọc riêng, **mặc định tắt**, người dùng tự bật, và dùng được cả khi không lọc giới tính.
+- **Lõi:**
+  - Tuỳ chọn mới `-safety_blacklist`, thuộc tính `safety_blacklist` của downloader.
+  - `_filter_items_safety`, phần Preview (`_ResultsFilter`: chặn, ẩn post không có tag để kiểm) và chốt an toàn của model (khi lọc ở tải, ở Preview và với `-gender_verify_media`) chỉ chạy khi có tuỳ chọn này.
+  - Danh sách vẫn cố định; extension chỉ thêm được tag.
+  - Help của `-gender` / `-gender_exclude` bỏ câu "Enables safety blacklist".
+- **App:**
+  - Ô "Chặn nội dung gợi ý trẻ vị thành niên" trong bộ lọc, nhớ ở `settings.download.safetyBlacklist`, gửi theo từng truy vấn (`q.safetyBlacklist`) cho Preview và job.
+  - Câu gợi ý "danh sách chặn an toàn cũng được áp dụng" của bộ lọc giới tính bỏ đi; dòng tóm tắt bộ lọc ghi khi ô được bật.
+  - Self-test `safetyArgs`: chỉ có `-safety_blacklist` khi được bật, bộ lọc giới tính không kéo theo.
+- **Test:**
+  - `test_safety_blacklist_is_its_own_option`: lọc giới tính một mình không chặn, danh sách chặn một mình thì chặn.
+  - Preview theo ba trường hợp: cả hai, chỉ giới tính, chỉ danh sách chặn.
+  - Chốt an toàn của model theo tuỳ chọn.
+  - Đối số CLI.
+- **Tài liệu:** README, specs F-17, use case UC-12, AC-23, plan gender-filter-model (D5, §4.1, §8.1), plan site-extension (QĐ5, R9, AC-EXT-04), `operations.md` mục 3h.
+
 ### 7ak. Rule34 cần khoá riêng; lịch cập nhật tag trong app — 2026-11-18
 - **Sự cố và nguyên nhân:** module rx kèm sẵn khoá API của tác giả bản gốc, dùng khi người dùng chưa nhập khoá. Một lệnh thử sai (`python -m lustra -h`: `-h` bị hiểu là tag loại trừ) đã tải khoảng 1.550 file từ Rule34 bằng khoá đó.
   - File và 1.548 dòng index đã dọn.
