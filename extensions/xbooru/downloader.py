@@ -23,6 +23,7 @@ from lustra.defines import (
 )
 from lustra.download_gelbooru import DownloaderGelbooru
 from lustra.logger import trace
+from lustra.network import thread_exit
 from lustra.rex import (
     re_post_page_xb,
     re_tags_exclude_xb,
@@ -36,6 +37,8 @@ ITEMS_PER_PAGE = ITEMS_PER_PAGE_XB
 ITEMS_PER_PAGE_F = 50
 ITEMS_PER_PAGE_P = 20000  # unknown, all posts are on a single page always
 MAX_SEARCH_DEPTH = 200000 + ITEMS_PER_PAGE - 1  # set by site devs
+HTML_SEARCH_REFUSED = ('{} searches are not supported: they read html pages of the site, and its terms allow automated '
+                       'access through the API only')
 
 
 @final
@@ -64,7 +67,17 @@ class DownloaderXb(DownloaderGelbooru):
         return SITENAME
 
     def _get_min_request_interval(self) -> float:
-        return 1.0  # same engine and site rules as bbooru; favorites / pools are html pages (>= 1 s for html)
+        return 1.0  # same engine and site rules as bbooru: the API only, "without hammering"
+
+    def _extract_favorite_user(self, fav_user_tags: list[re.Match | None]) -> None:
+        if fav_user_tags:  # favorites are html pages, not the API
+            thread_exit(HTML_SEARCH_REFUSED.format('favorited_by:'), code=-460)
+        super()._extract_favorite_user(fav_user_tags)
+
+    def _extract_pool_id(self, pool_tags: list[re.Match]) -> None:
+        if pool_tags:  # pools are html pages, not the API
+            thread_exit(HTML_SEARCH_REFUSED.format('pool:'), code=-461)
+        super()._extract_pool_id(pool_tags)
 
     def _get_module_abbr(self) -> str:
         return MODULE_ABBR_XB
