@@ -110,6 +110,9 @@ class DownloaderRp(Downloader):
     def _get_sitename(self) -> str:
         return SITENAME
 
+    def _get_min_request_interval(self) -> float:
+        return 3.0  # robots.txt: Crawl-delay 3
+
     def _get_module_abbr(self) -> str:
         return MODULE_ABBR_RP
 

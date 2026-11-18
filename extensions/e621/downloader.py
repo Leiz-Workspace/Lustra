@@ -71,11 +71,11 @@ class DownloaderEn(Downloader):
         return 1.0
 
     def _get_min_request_interval(self) -> float:
-        return 0.5  # api limit: 2 requests per second
+        return 1.0  # api: hard limit 2 requests per second, at most 1 per second sustained; robots.txt: Crawl-delay 1
 
     def _solve_module_specific_conflicts(self) -> bool:
         if self.dump_comments and self.maxthreads_items > 2 and not self.check_tags and not self.get_max_id:
-            trace('Warning (W1): EN module can\'t fetch comments faster than 2/sec due to API limitation. Forcing 2 download threads!')
+            trace('Warning (W1): EN module can\'t fetch comments faster than 1/sec due to API limitation. Forcing 2 download threads!')
             self.maxthreads_items = 2
             return True
         return False
