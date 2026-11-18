@@ -2094,32 +2094,51 @@ function pruneJobGroups() {
 }
 
 // ---------------- tag lists status / update ----------------
-const UPDATABLE = ['rx', 'db', 'xb', 'bb', 'en'];
+// sources come from the core (tags.sources, lustra/tags_updater.py): the reviewed modules (rx, db, xb, bb, en) and every installed
+// extension made from an engine with a tag listing (lustra.extgen writes '$generator.engine' and 'tagList' into its manifest)
+const TAG_KEY_NOTE = { required: 'Cần API key của bạn', optional: 'Dùng API key của bạn nếu có' };
+function tagSourceTitle(src) {
+  const rule = src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.';
+  const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
+  return `${src.site} — ${src.description}. ${rule}${key}`;
+}
 async function refreshTagStatus() {
   if (!azPage.loaded) { azPage.loaded = true; azPage.reload(); }
   let rows = [];
+  let sources = [];
   try {
     rows = await L.rpc('tags.status');
     S.tagLists = new Set(rows.filter((r) => r.size > 0).map((r) => r.module));
   } catch { /* ignore */ }
+  try { sources = await L.rpc('tags.sources'); } catch { /* core without tags.sources: no update buttons */ }
   const byMod = Object.fromEntries(rows.map((r) => [r.module, r]));
-  const mods = S.modules.filter((m) => m.installed).map((m) => m.abbr);
+  const srcByMod = Object.fromEntries((Array.isArray(sources) ? sources : []).map((src) => [src.module, src]));
+  const installed = S.modules.filter((m) => m.installed);
+  const mods = [...installed.filter((m) => srcByMod[m.abbr]), ...installed.filter((m) => !srcByMod[m.abbr])]; // updatable first
   const table = $('#tag-status');
   table.replaceChildren(
-    h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Cập nhật'), h('th', {}, '')),
-    ...mods.map((m) => {
+    h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'Nguồn'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Cập nhật'),
+      h('th', {}, '')),
+    ...mods.map(({ abbr: m, name }) => {
       const r = byMod[m];
+      const src = srcByMod[m];
+      const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
+      let action;
+      if (!src) action = h('span', { class: 'muted', title: 'Extension này không có nguồn danh sách tag (engine không rõ hoặc không có API tag)' }, 'không có nguồn');
+      else if (keyMissing) action = h('span', { class: 'muted', title: `Nhập key ở Cài đặt → API key (${src.keyFormat})` }, 'cần API key');
+      else {
+        action = h('button', { class: 'btn sm', onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          try { await L.tags.update(m); toast(`Đang cập nhật danh sách tag ${m}…`); } catch (err) { toast(errMsg(err), 'err'); }
+        } }, 'Cập nhật');
+      }
       return h('tr', {},
-        h('td', {}, h('span', { class: 'mod-abbr' }, m)),
+        h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),
+        h('td', { title: src ? tagSourceTitle(src) : '' }, src ? (src.name || name || m) : '—'),
         h('td', { class: 'mono', title: r?.path || '' }, r ? r.path.split(/[\\/]/).slice(-2).join('/') : '—'),
         h('td', {}, r ? `${(r.size / 1048576).toFixed(1)} MB` : '—'),
         h('td', { id: `tagupd-${m}` }, r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
-        h('td', {}, UPDATABLE.includes(m)
-          ? h('button', { class: 'btn sm', onclick: async (e) => {
-            e.currentTarget.disabled = true;
-            try { await L.tags.update(m); toast(`Đang cập nhật danh sách tag ${m}…`); } catch (err) { toast(errMsg(err), 'err'); }
-          } }, 'Cập nhật')
-          : h('span', { class: 'muted' }, 'không có nguồn')));
+        h('td', {}, action));
     }));
   $('#tags-autoupdate').checked = !!S.settings.tags.autoUpdate;
   $('#tags-autoupdate-days').value = S.settings.tags.autoUpdateDays;
@@ -2128,14 +2147,15 @@ $('#tags-autoupdate').addEventListener('change', (e) => saveSettings({ tags: { a
 $('#tags-autoupdate-days').addEventListener('change', (e) => saveSettings({ tags: { autoUpdateDays: Math.max(1, Number(e.target.value) || 7) } }));
 
 // ---------------- scheduled tag update (system scheduler, main.js tagScheduleStatus) ----------------
-const TAG_SCHEDULE_NAMES = { db: 'Danbooru', en: 'e621', xb: 'Xbooru', bb: 'Bbooru' };
 function showTagSchedule(st) {
   const on = $('#tags-schedule-on');
   on.checked = !!(st.enabled && st.installed);
   on.disabled = !st.ok;
   $('#tags-schedule-freq').value = st.frequency || 'weekly';
   $('#tags-schedule-freq').disabled = !st.ok;
-  const mods = (st.modules || []).map((m) => TAG_SCHEDULE_NAMES[m] || m).join(', ');
+  // 'auto' (main.js TAG_SCHEDULE_MODULES): the core picks the installed modules with a tag source that need no key when it runs
+  const names = (st.modules || []).map((m) => m.name || m.module).filter(Boolean);
+  const mods = names.length ? `các module không cần khoá: ${names.join(', ')}` : 'các module đã cài có nguồn tag và không cần khoá';
   const where = st.kind === 'schtasks' ? 'Task Scheduler' : 'crontab của bạn';
   const last = st.lastRun ? new Date(st.lastRun).toLocaleString('vi-VN') : 'chưa chạy lần nào';
   const text = !st.ok ? st.reason
@@ -2143,7 +2163,8 @@ function showTagSchedule(st) {
       + `Lần chạy gần nhất: ${last}. Log: ${st.log}.`
       : st.enabled ? `Lịch đã bật nhưng không còn trong ${where} (bị xoá ngoài app?): tắt rồi bật lại để đặt lại.`
         : `Chưa đặt lịch. Khi bật, app thêm một mục vào ${where} cho ${mods}.`;
-  $('#tags-schedule-status').textContent = `${text} Rule34 cần khoá của bạn nên không chạy theo lịch: được cập nhật khi mở app (ô ở trên).`;
+  $('#tags-schedule-status').textContent = `${text} Extension cài sau cũng được cập nhật theo lịch. Module cần khoá (Rule34) không chạy theo lịch: `
+    + 'được cập nhật khi mở app (ô ở trên) hoặc bằng nút Cập nhật.';
 }
 async function renderTagSchedule() {
   if (typeof L.tags?.scheduleStatus !== 'function') { $('#tags-schedule').hidden = true; return; }

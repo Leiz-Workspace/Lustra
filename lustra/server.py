@@ -296,10 +296,18 @@ _tags_updates_lock = threading.Lock()
 _tags_updates: set[str] = set()
 
 
+def m_tags_sources(_: dict) -> list[dict]:
+    """Installed modules with a tag list source (the five reviewed ones, extensions made from a known engine): the Tags A-Z page
+    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'"""
+    from .tags_updater import tag_sources
+    return [s.as_dict() for s in tag_sources()]
+
+
 def m_tags_update(p: dict) -> dict:
-    from .tags_updater import SUPPORTED_MODULES, update_tag_list
-    module = p.get('module', '')
-    if module not in SUPPORTED_MODULES:
+    from .tags_updater import tag_source, update_tag_list
+    module = str(p.get('module', ''))
+    source = tag_source(module) if module else None
+    if source is None:
         raise RpcError(-32602, f'tag list update is not supported for \'{module}\'')
     out_dir = pathlib.Path(p['outDir']) if p.get('outDir') else tags_dirs()[0] if os.environ.get(ENV_TAGS_DIR) else data_dir() / 'tags'
     job = f'tags-{module}'
@@ -312,6 +320,7 @@ def m_tags_update(p: dict) -> dict:
     def run() -> None:
         try:
             res = update_tag_list(module, out_dir, api_key=p.get('apiKey', ''), delay=float(p.get('delay', 0.5)), reference=reference,
+                                  source=source,
                                   progress=lambda msg, n: notify('tags.updateProgress', {'job': job, 'module': module, 'count': n, 'message': msg}))
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
@@ -707,6 +716,7 @@ METHODS: dict[str, Callable[[dict], Any]] = {
     'tags.resolve': m_tags_resolve,
     'tags.fuzzy': m_tags_fuzzy,
     'tags.status': m_tags_status,
+    'tags.sources': m_tags_sources,
     'tags.update': m_tags_update,
     'search.count': m_search_count,
     'search.preview': m_search_preview,

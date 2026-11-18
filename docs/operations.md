@@ -47,16 +47,57 @@ Chế độ AI của trình tạo extension cần gói `anthropic`: `uv pip inst
 
 Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một số file lỗi, `130` bị huỷ. Script hoặc cron có thể dựa vào mã này.
 
-## 3. Cập nhật danh sách tag theo lịch
+## 3. Cập nhật danh sách tag (autocomplete, Tags A–Z)
+**Nguồn danh sách** (`lustra/tags_updater.py`, lệnh `lustra-core tags` / `python -m lustra.tags_updater`):
+- 5 module đã duyệt: Rule34 (`rx`, cần khoá của bạn), Danbooru (`db`, dùng khoá nếu có), Xbooru (`xb`), Bbooru (`bb`), e621 (`en`).
+- Mọi extension tạo từ một engine có danh sách tag. Updater đọc `$generator.engine` và `site` trong manifest; trình tạo extension (`lustra.extgen`) ghi sẵn hai trường này, kèm `tagList: "<abbr>_tags.json"`.
+
+| Engine | Cách đọc danh sách | Khoá |
+|---|---|---|
+| `gelbooru_dapi` | `index.php?page=dapi&s=tag&q=index`, con trỏ `after_id` | bắt buộc nếu manifest có `auth.apiKey` (site trả "Missing authentication"), nếu không thì dùng khi có (`API_KEY,USER_ID`) |
+| `danbooru_json` | `tags.json`, con trỏ id `page=a<id>` | dùng khi có (`API_KEY,LOGIN`) |
+| `moebooru_json` | `tag.json?order=name`, theo trang | không |
+| `e621_json` | bản export `db_export/tags-<ngày>.csv.gz` (thử 4 ngày gần nhất) | không |
+| `philomena_json` | `api/v1/json/search/tags`: 10.000 tag dùng nhiều nhất (giới hạn cửa sổ tìm kiếm của site); dấu cách trong tên tag thành `_` | không |
+| `szurubooru_json` | `api/tags/`, theo offset | không |
+| `shimmie_api` | `api/danbooru/find_tags`: cả danh sách trong một câu trả lời | không |
+
+- Engine `shimmie` (không có API) và `custom` không có nguồn. Trang Tags A–Z ghi "không có nguồn".
+- Danh sách được ghi vào `<thư mục dữ liệu>/tags/<abbr>_tags.json`. App tìm danh sách theo tên file (file mới nhất của mỗi module), nên autocomplete và Tags A–Z dùng được ngay sau khi cập nhật.
+
+**Lịch sự** (mọi nguồn):
+- Khoảng cách giữa hai request là `--delay` (mặc định 0,5 giây; site của extension ít nhất 1 giây). `Crawl-delay` trong robots.txt được dùng nếu lớn hơn (tối đa 60 giây).
+- Gặp 429 / 503 thì chờ theo `Retry-After` rồi thử lại, tối đa 5 lần.
+- Mỗi danh sách có ngân sách request `--max-requests` (mặc định 5000, tính cả robots.txt và các lần thử lại). Hết ngân sách thì dừng và không ghi danh sách dở.
+- Không gửi cookie. Gặp bot challenge (`cf-mitigated: challenge`) thì dừng.
+- Chỉ dùng https, chỉ gọi host của site (và tên miền cha), chỉ địa chỉ công khai, không gọi site trong danh sách chặn tên miền.
+- Chỉ dùng khoá của chính bạn: `--api-key`, biến `LUSTRA_API_KEY_<MODULE>`, hoặc khoá đã lưu trong app. Lustra không có khoá dùng chung. Khoá được che (`<REDACTED>`) trong log và thông báo lỗi.
+- robots.txt được đọc theo RFC 9309 (`lustra/robots.py`): luật dài nhất thắng, hiểu `*` và `$`, nhóm của `Lustra` được ưu tiên hơn nhóm `*`.
+  - Site của extension: **tuân thủ nghiêm ngặt.** Nếu robots.txt chặn endpoint danh sách tag thì không cập nhật và báo lỗi rõ. Nếu không đọc được robots.txt (5xx, lỗi mạng) thì coi như bị chặn hết.
+  - **Quyết định 2026-11-18 (chủ repo, phương án a — ngoại lệ cho 5 site cũ):** Rule34, Danbooru, Xbooru, Bbooru, e621 là ngoại lệ có ghi rõ. Chúng dùng API chính thức của site, nên các dòng `Disallow` không được áp dụng; `Crawl-delay`, `Retry-After` và ngân sách request vẫn được tôn trọng. Lý do: robots.txt của Danbooru có `Disallow: /` và `Disallow: /*.json` cho mọi user-agent, nếu tuân thủ nghiêm thì `db` không cập nhật được nữa.
+- Sanity check giữ nguyên: nếu danh sách mới ít hơn một nửa danh sách đang dùng thì không ghi (dùng `--force` để ghi).
+
 **Trong app** (Tags A–Z → Danh sách tag):
+- Bảng liệt kê mọi extension đã cài, có cột "Nguồn" (rê chuột để xem site, cách đọc, có tuân thủ robots.txt không).
+  - Module có nguồn: có nút "Cập nhật".
+  - Module bắt buộc khoá mà chưa có khoá: ghi "cần API key" (nhập ở Cài đặt → API key).
+  - Module không có nguồn: ghi "không có nguồn".
 - "Tự cập nhật mỗi N ngày khi mở app": Rule34 và Danbooru, bằng khoá đã lưu; Rule34 bị bỏ qua khi chưa có khoá.
 - "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" (mỗi tuần vào thứ Hai, hoặc mỗi ngày, lúc khoảng 4 giờ sáng):
   - Linux và macOS: app thêm hoặc xoá một khối có đánh dấu `# BEGIN lustra-tags` … `# END lustra-tags` trong crontab của người dùng, không đụng các dòng khác.
   - Windows: tác vụ `Lustra tag lists` của Task Scheduler.
   - Bản AppImage không hỗ trợ, vì lõi chỉ tồn tại khi app chạy.
-- Lịch chạy `lustra-core tags --modules db,en,xb,bb --out <thư mục dữ liệu>/tags --log <thư mục dữ liệu>/logs/tags-schedule.log`; bản phát triển chạy `python -m lustra.tags_updater`.
-- Lịch không đọc được khoá đã mã hoá của app, nên Rule34 không chạy theo lịch.
+- Lịch chạy `lustra-core tags --modules auto --out <thư mục dữ liệu>/tags --min-posts 2 --log <thư mục dữ liệu>/logs/tags-schedule.log`; bản phát triển chạy `python -m lustra.tags_updater`.
+  - `auto` là mọi module đã cài có nguồn tag và không bắt buộc khoá: db, xb, bb, en (nếu đã cài) và các extension tạo từ engine.
+  - Danh sách module được tính lúc lịch chạy, nên extension cài sau cũng được cập nhật mà không cần ghi lại mục lịch.
+- Lịch không đọc được khoá đã mã hoá của app, nên module bắt buộc khoá (Rule34, extension Gelbooru cần khoá) không chạy theo lịch.
 - App ghi lại mục lịch mỗi lần mở, nên đường dẫn lõi luôn đúng sau khi cập nhật app.
+
+**Dòng lệnh** (bản checkout repo):
+```bash
+.venv/bin/python -m lustra.tags_updater --modules auto            # như lịch của app
+.venv/bin/python -m lustra.tags_updater --modules fq --delay 1    # một extension, theo abbr
+```
 
 **Không qua app** (bản checkout repo, danh sách ghi vào `2tags/` của repo):
 ```bash
@@ -269,11 +310,11 @@ Công cụ đo độ chính xác của tầng 0 (tag) và tầng 1 (model) theo 
 cd app && npm run check
 LUSTRA_USER_DATA=/tmp/lustra-ud LUSTRA_SELFTEST_DIR=/tmp/lustra-shots xvfb-run -a ./node_modules/.bin/electron . --no-sandbox --ozone-platform=x11
 ```
-`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline (gồm `DenylistTests`: các cách lách danh sách chặn tên miền; `SdkTests`: `lustra.sdk` và `minSdkVersion`); test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói. `lustra.tests.test_dlindex_tools` chạy offline (site giả, thư mục tạm). `lustra.tests.test_catalog_trust`: test vector RFC 8032, chữ ký catalog (sửa 1 byte, khoá lạ, chưa ký, khoá giữ chỗ, hết hạn, biến môi trường cho nhà phát triển), cài từ catalog từ xa qua transport giả, `tools/sign_catalog.py` (và đối chiếu với `openssl` nếu máy có). `lustra.tests.test_aigen_eval`: harness eval ghi / phát lại fixture (cả qua server HTTP cục bộ với `requests` thật), chế độ template, model giả lập, chế độ AI với client theo kịch bản, trần chi phí, kiểm khoá bị lộ; không gọi API trả phí. `test_gender_eval` chạy offline (trang tìm kiếm giả, ảnh giả, model giả, trang gán nhãn thật trên cổng ngẫu nhiên).
+`ConnTests` và `RealDownloadTests` gọi mạng thật. `test_gender.test_real_model_on_the_app_icon` chỉ chạy khi có `LUSTRA_GENDER_MODEL_DIR` (thư mục đã tải model, mục 3c). `test_model_server` chạy server thật trên cổng ngẫu nhiên với model giả (và onnxruntime giả cho phần chọn GPU / CPU), không cần numpy / onnxruntime hay GPU. `test_media_verify` (`-gender_verify_media`, `/v1/frames`) cũng dùng model giả; phần đọc khung thật chỉ chạy khi có Pillow (ảnh động) và `ffmpeg` trên PATH (video), thiếu thì tự bỏ qua. `lustra.tests.test_extgen` chạy offline (gồm `DenylistTests`: các cách lách danh sách chặn tên miền; `SdkTests`: `lustra.sdk` và `minSdkVersion`); test nối SDK `anthropic` tự bỏ qua nếu chưa cài gói. `lustra.tests.test_dlindex_tools` chạy offline (site giả, thư mục tạm). `lustra.tests.test_catalog_trust`: test vector RFC 8032, chữ ký catalog (sửa 1 byte, khoá lạ, chưa ký, khoá giữ chỗ, hết hạn, biến môi trường cho nhà phát triển), cài từ catalog từ xa qua transport giả, `tools/sign_catalog.py` (và đối chiếu với `openssl` nếu máy có). `lustra.tests.test_aigen_eval`: harness eval ghi / phát lại fixture (cả qua server HTTP cục bộ với `requests` thật), chế độ template, model giả lập, chế độ AI với client theo kịch bản, trần chi phí, kiểm khoá bị lộ; không gọi API trả phí. `test_gender_eval` chạy offline (trang tìm kiếm giả, ảnh giả, model giả, trang gán nhãn thật trên cổng ngẫu nhiên). `lustra.tests.test_tag_sources` chạy offline: site giả trả danh sách tag của cả 7 engine qua transport giả; kiểm robots.txt (RFC 9309, ngoại lệ cho module đã duyệt), `Crawl-delay`, `Retry-After`, ngân sách request, bot challenge, redirect sang host khác, khoá bắt buộc; và luồng đầu-cuối: trình tạo làm extension Gelbooru → cài → `tags.update` → `tags.autocomplete` có tag của site.
 
 Toàn bộ test offline như CI (`.github/workflows/run-tests.yml`), với thư mục dữ liệu tạm:
 ```bash
-LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify lustra.tests.test_catalog_trust lustra.tests.test_aigen_eval lustra.tests.test_gender_eval
+LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests.test_lustra lustra.tests.test_gender lustra.tests.test_security lustra.tests.test_batch_b lustra.tests.test_batch_c lustra.tests.test_batch_c_tags lustra.tests.test_batch_d_core lustra.tests.test_batch_d_search lustra.tests.test_batch_d_app lustra.tests.test_extgen lustra.tests.test_dlindex lustra.tests.test_dlindex_tools lustra.tests.test_model_server lustra.tests.test_media_verify lustra.tests.test_catalog_trust lustra.tests.test_aigen_eval lustra.tests.test_gender_eval lustra.tests.test_tag_sources
 ```
 
 ## 5. Build

@@ -82,7 +82,7 @@ const DEFAULT_SETTINGS = {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
   },
   // schedule: the system scheduler updates the lists even while the app is closed (crontab / Task Scheduler, see tagScheduleStatus)
-  tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {}, schedule: { enabled: false, frequency: 'weekly', modules: ['db', 'en', 'xb', 'bb'] } },
+  tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {}, schedule: { enabled: false, frequency: 'weekly' } },
   // the official signed catalog (tools/build_catalog.py, docs/operations.md 3d); the user may point it elsewhere
   advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
   ai: { model: 'claude-opus-5-5', maxUsd: 2 }, // extension generator (the Claude API key itself is a secret, see AI_SECRET)
@@ -1701,7 +1701,10 @@ async function maybeAutoUpdateTags() {
 // run cannot read the app's keys (OS keyring): rx keeps the in-app update. Linux / macOS: a marked block of the user's crontab
 // (the rest of the crontab is left as it is); Windows: a Task Scheduler task; AppImage: unsupported (its core only exists while
 // the app runs). The entry is written again at every start, so a new install path or version is picked up.
-const TAG_SCHEDULE_MODULES = ['db', 'en', 'xb', 'bb'];
+// 'auto': the core picks the modules when it runs (lustra/tags_updater.py tag_sources): every installed module with a tag source
+// that needs no key of the user, the reviewed ones (db, xb, bb, en) and extensions made from a known engine. An extension
+// installed later is covered without writing the entry again.
+const TAG_SCHEDULE_MODULES = 'auto';
 const WIN_TASK = 'Lustra tag lists';
 const tagScheduleLog = () => path.join(userData(), 'logs', 'tags-schedule.log');
 
@@ -1715,13 +1718,13 @@ function tagScheduleSupport() {
   return { ok: true, kind: 'crontab' };
 }
 
-function tagScheduleArgs(modules) {
-  return ['--modules', modules.join(','), '--out', path.join(userData(), 'tags'), '--min-posts', '2', '--log', tagScheduleLog()];
+function tagScheduleArgs() {
+  return ['--modules', TAG_SCHEDULE_MODULES, '--out', path.join(userData(), 'tags'), '--min-posts', '2', '--log', tagScheduleLog()];
 }
 
-function tagScheduleCommand(modules) {
+function tagScheduleCommand() {
   // POSIX shell line for crontab: absolute paths only (cron has a minimal PATH), no secret in it
-  const c = coreCommand('tags', tagScheduleArgs(modules));
+  const c = coreCommand('tags', tagScheduleArgs());
   const env = `LUSTRA_DATA_DIR=${shq(userData())}${c.frozen ? '' : ` PYTHONPATH=${shq(REPO_ROOT)}`}`;
   return `cd ${shq(c.cwd)} && ${env} ${[c.cmd, ...c.args].map(shq).join(' ')}`;
 }
@@ -1752,26 +1755,22 @@ function tagScheduleStatus() {
   if (sup.ok && sup.kind === 'schtasks') installed = spawnSync('schtasks', ['/Query', '/TN', WIN_TASK], { windowsHide: true }).status === 0;
   const frequency = sched.frequency === 'daily' ? 'daily' : 'weekly';
   return {
-    ...sup, installed, enabled: sched.enabled === true, frequency, time: tagScheduleWhen(frequency).time,
-    modules: (sched.modules || TAG_SCHEDULE_MODULES).filter((m) => TAG_SCHEDULE_MODULES.includes(m)), log: tagScheduleLog(), lastRun,
+    ...sup, installed, enabled: sched.enabled === true, frequency, time: tagScheduleWhen(frequency).time, log: tagScheduleLog(), lastRun,
   };
 }
 
-function applyTagSchedule(enabled, frequency, modules) {
+function applyTagSchedule(enabled, frequency) {
   const sup = tagScheduleSupport();
   if (!sup.ok) throw new Error(sup.reason);
-  const mods = (Array.isArray(modules) ? modules : settings.tags.schedule?.modules || TAG_SCHEDULE_MODULES)
-    .filter((m, i, a) => TAG_SCHEDULE_MODULES.includes(m) && a.indexOf(m) === i);
-  if (enabled && !mods.length) throw new Error('chưa chọn module nào');
   const freq = frequency === 'daily' ? 'daily' : 'weekly';
   fs.mkdirSync(path.dirname(tagScheduleLog()), { recursive: true });
   const when = tagScheduleWhen(freq);
   if (sup.kind === 'crontab') {
     const current = readCrontab();
-    if (enabled) writeCrontab(withTagBlock(current, `${when.cron} ${tagScheduleCommand(mods)}`));
+    if (enabled) writeCrontab(withTagBlock(current, `${when.cron} ${tagScheduleCommand()}`));
     else if (hasTagBlock(current)) writeCrontab(withoutTagBlock(current));
   } else if (enabled) {
-    const c = coreCommand('tags', tagScheduleArgs(mods));
+    const c = coreCommand('tags', tagScheduleArgs());
     if (!c.frozen) throw new Error('Trên Windows, lịch hệ thống chỉ dùng được với bản cài đặt (lõi đóng gói)');
     const tr = [c.cmd, ...c.args].map((a) => (/[\s"]/.test(a) ? `"${a}"` : a)).join(' ');
     const r = spawnSync('schtasks', ['/Create', '/F', '/TN', WIN_TASK, '/SC', freq === 'daily' ? 'DAILY' : 'WEEKLY',
@@ -1780,15 +1779,23 @@ function applyTagSchedule(enabled, frequency, modules) {
   } else {
     spawnSync('schtasks', ['/Delete', '/F', '/TN', WIN_TASK], { windowsHide: true });
   }
-  settings.tags.schedule = { enabled, frequency: freq, modules: mods };
+  settings.tags.schedule = { enabled, frequency: freq };
   saveSettings();
   return tagScheduleStatus();
+}
+
+async function scheduledTagModules() {
+  // what 'auto' covers now (shown in Tags A-Z): installed modules with a tag source that needs no key; [] while the core is not up
+  try {
+    const rows = await sidecar.call('tags.sources', {}, 5000);
+    return (Array.isArray(rows) ? rows : []).filter((s) => s.key !== 'required').map((s) => ({ module: s.module, name: s.name }));
+  } catch { return []; }
 }
 
 function refreshTagSchedule() {
   // at start: write the entry again, so it runs the core of the version installed now
   if (settings.tags.schedule?.enabled !== true) return;
-  try { applyTagSchedule(true, settings.tags.schedule.frequency, settings.tags.schedule.modules); } catch (err) {
+  try { applyTagSchedule(true, settings.tags.schedule.frequency); } catch (err) {
     send('log', { source: 'tags', text: `scheduled tag update not refreshed: ${err.message}` });
   }
 }
@@ -1814,7 +1821,7 @@ function registerIpc() {
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
+      'tags.validate', 'tags.status', 'tags.sources', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};
     if (method === 'ext.uninstall' && !RE_EXT_ID.test(String(params.id || ''))) throw new Error('invalid extension id');
@@ -1849,8 +1856,8 @@ function registerIpc() {
     return sidecar.call('ext.install', { catalogUrl, remoteId: id, sha256: entry.sha256 });
   });
   handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
-  handle('tags:scheduleStatus', async () => tagScheduleStatus());
-  handle('tags:schedule', async (_e, o) => applyTagSchedule(o?.enabled === true, o?.frequency, o?.modules));
+  handle('tags:scheduleStatus', async () => ({ ...tagScheduleStatus(), modules: await scheduledTagModules() }));
+  handle('tags:schedule', async (_e, o) => ({ ...applyTagSchedule(o?.enabled === true, o?.frequency), modules: await scheduledTagModules() }));
   handle('search:count', async (_e, q) => sidecar.call('search.count', {
     module: asQuery(q).module, tags: q.tags, args: [...(await connectionArgs(q.module)), ...searchArgs(q), ...tagLimitArgs(q.module)],
   }));
@@ -2422,10 +2429,10 @@ async function selfTestContract(js, quick) {
   out.skipKnownArgs.ok = out.skipKnownArgs.on && !out.skipKnownArgs.off && out.skipKnownArgs.default === Boolean(settings.download.skipKnown);
   // scheduled tag update: the command line only (a self-test never writes the user's crontab / tasks)
   {
-    const cmd = tagScheduleCommand(['db', 'en']);
+    const cmd = tagScheduleCommand();
     out.tagSchedule = {
       cmd, when: tagScheduleWhen('weekly').cron,
-      ok: (cmd.includes("'tags' '--modules' 'db,en'") || cmd.includes("'lustra.tags_updater' '--modules' 'db,en'"))
+      ok: (cmd.includes("'tags' '--modules' 'auto'") || cmd.includes("'lustra.tags_updater' '--modules' 'auto'"))
         && cmd.includes(shq(path.join(userData(), 'tags'))) && cmd.includes(shq(tagScheduleLog())) && !/api.?key/i.test(cmd)
         && /^\d+ 4 \* \* 1$/.test(tagScheduleWhen('weekly').cron) && /^\d+ 4 \* \* \*$/.test(tagScheduleWhen('daily').cron),
     };

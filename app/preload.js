@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld('lustra', {
   tags: {
     update: (module) => invoke('tags:update', module),
     scheduleStatus: () => invoke('tags:scheduleStatus'),
-    schedule: (options) => invoke('tags:schedule', options), // {enabled, frequency: 'daily' | 'weekly', modules}
+    schedule: (options) => invoke('tags:schedule', options), // {enabled, frequency: 'daily' | 'weekly'}: modules 'auto' (main.js)
   },
   search: {
     count: (query) => invoke('search:count', query),
