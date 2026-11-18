@@ -2139,10 +2139,19 @@ async function refreshTagStatus() {
         } }, 'Học từ file đã tải');
       } else if (keyMissing) action = h('span', { class: 'muted', title: `Nhập key ở Cài đặt → API key (${src.keyFormat})` }, 'cần API key');
       else {
-        action = h('button', { class: 'btn sm', onclick: async (e) => {
+        const update = (full) => async (e) => {
           e.currentTarget.disabled = true;
-          try { await L.tags.update(m); toast(`Đang cập nhật danh sách tag ${m}…`); } catch (err) { toast(errMsg(err), 'err'); }
-        } }, 'Cập nhật');
+          try {
+            await L.tags.update(m, full ? { full: true } : undefined);
+            toast(`Đang ${full ? 'đọc lại toàn bộ' : 'cập nhật'} danh sách tag ${m}…`);
+          } catch (err) { toast(errMsg(err), 'err'); }
+        };
+        // tail sources (Rule34): 'Cập nhật' reads the last pages only (a full read every 30 days on its own)
+        action = src.tailUpdates
+          ? h('span', { class: 'row' },
+            h('button', { class: 'btn sm', title: 'Chỉ đọc các trang cuối, nơi có tag mới và tag vừa đổi số post (vài phút). Cứ 30 ngày tự đọc lại toàn bộ một lần', onclick: update(false) }, 'Cập nhật'),
+            h('button', { class: 'btn sm ghost', title: 'Đọc lại cả danh sách (Rule34: khoảng 1,5–2 giờ; đóng app giữa chừng thì lần sau đọc tiếp)', onclick: update(true) }, 'Đọc lại toàn bộ'))
+          : h('button', { class: 'btn sm', onclick: update(false) }, 'Cập nhật');
       }
       return h('tr', {},
         h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),

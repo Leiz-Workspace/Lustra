@@ -350,7 +350,7 @@ def m_tags_update(p: dict) -> dict:
     def run() -> None:
         try:
             res = update_tag_list(module, out_dir, api_key=p.get('apiKey', ''), delay=float(p.get('delay', 0.5)), reference=reference,
-                                  source=source,
+                                  source=source, full=p.get('full') is True,
                                   progress=lambda msg, n: notify('tags.updateProgress', {'job': job, 'module': module, 'count': n, 'message': msg}))
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
