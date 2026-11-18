@@ -18,6 +18,10 @@
   "auth": {
     "apiKey": true,
     "apiKeyFormat": "KEY,USER_ID",
+    "rateLimit": {
+      "requests": 60,
+      "seconds": 60
+    },
     "cookies": [
       "cf_clearance",
       "user_id",

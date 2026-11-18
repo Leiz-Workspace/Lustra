@@ -379,8 +379,25 @@ class TagListTests(TestCase):
             gen = tags_updater._iter_gelbooru(client, '', 1, 0)
             self.assertEqual(('tom_&_jerry', 5, 'general'), next(gen))
             self.assertEqual(("it's", 3, 'general'), next(gen))
-            with self.assertRaises(RuntimeError):  # same page again: cursor did not move
+            with self.assertRaisesRegex(RuntimeError, 'ignores pid'):  # same page again: the site ignores pid (never an endless list)
                 list(gen)
+
+    def test_gelbooru_pages_end_at_an_empty_page_only(self) -> None:
+        # rule34.xxx page 1583: 999 tags and one with an empty name. Taken for the last page, the list stopped 33 pages early,
+        # before every popular tag (they are on the last pages)
+        def tag(i: int, name: str) -> str:
+            return f'<tag type="0" count="{i}" name="{name}" id="{i}"/>'
+        pages = {0: [tag(1, 'a'), tag(2, 'b'), tag(3, 'c')], 1: [tag(4, 'd'), tag(5, ''), tag(6, 'f')], 2: [tag(7, 'g'), tag(8, 'h')]}
+        for past_end in ('<tag type="array"/>', None):  # rule34's empty page, or a site that answers its last page again
+            with self.subTest(past_end=past_end):
+                def get(url: str, *_a, **_k) -> SimpleNamespace:
+                    pid = int(url.split('&pid=', 1)[1].split('&', 1)[0])
+                    rows = pages.get(pid) or ([past_end] if past_end else pages[2])
+                    return SimpleNamespace(text='<tags>' + ''.join(rows) + '</tags>')
+                client = SimpleNamespace(site='https://x/', get=get)
+                with mock.patch.object(tags_updater, 'PAGE_LIMIT', 3):
+                    got = [name for name, _n, _t in tags_updater._iter_gelbooru(client, '', 1, 0)]
+                self.assertEqual(['a', 'b', 'c', 'd', 'f', 'g', 'h'], got)
 
     def test_sanity_against_active_list_and_empty(self) -> None:
         active = self.dir / 'bundled' / 'zz_tags.json'

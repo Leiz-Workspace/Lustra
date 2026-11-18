@@ -94,6 +94,27 @@
           "type": "string",
           "description": "hint for UI, ex. 'KEY,USER_ID' or 'API_KEY,LOGIN'"
         },
+        "rateLimit": {
+          "type": "object",
+          "description": "the limit the site publishes for one API key, ex. {\"requests\": 60, \"seconds\": 60}. The app offers a field for a higher limit the site gave the user's key",
+          "additionalProperties": false,
+          "required": [
+            "requests",
+            "seconds"
+          ],
+          "properties": {
+            "requests": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            }
+          }
+        },
         "cookies": {
           "type": "array",
           "items": {

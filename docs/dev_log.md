@@ -802,7 +802,43 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Còn lại:** `npm audit` vẫn báo 9 mục high, cùng gốc ở `picomatch` (cảnh báo #2, GitHub đã tự đóng). Chưa có bản vá; thư viện này chỉ dùng lúc build.
 - Cảnh báo được tính trên nhánh mặc định (`production`), nên chỉ đóng khi thay đổi này lên `production` cùng bản phát hành tới. Đổi `app/package.json` và lock file được tính là thay đổi phát hành, nên cần nâng phiên bản.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ao)
+### 7ap. Cập nhật danh sách tag tôn trọng giới hạn của site, tải tiếp khi dừng — 2026-11-18
+- **Lỗi:** cập nhật danh sách rx bằng khoá riêng báo `api.rule34.xxx still asks to wait (HTTP 429 / 503) after 5 tries`.
+  - Rule34 giới hạn **60 request mỗi 60 giây cho mỗi khoá** ("You currently have a limit of 60 requests every 60 second(s)."). Bộ cập nhật gửi 2 request mỗi giây (`--delay 0,5`), nên chắc chắn bị chặn khi tải hơn 600 trang.
+  - Mỗi request chỉ chờ tổng khoảng 30 giây (2, 4, 6, 8, 10 giây) rồi bỏ cuộc, và vứt cả phần đã tải.
+  - Thử tay bằng khoá của chủ repo: request lẻ có khoá trả 200 ngay (trang 1.000 tag trong 0,56 giây), request không khoá cũng 200, tức không có chặn theo IP.
+- **Sửa (`lustra/tags_updater.py`):**
+  - `TagSource.interval` là nhịp site công bố; rx 1,05 giây.
+  - Khi gặp 429 / 503: đọc "limit of N requests every M second(s)" trong phản hồi để đặt nhịp cho phần còn lại (không có thì chậm 1,5 lần); chờ `Retry-After`, không có thì chờ 5, 15, 30, 60, 120, 180 giây rồi mới dừng.
+  - Gelbooru và Danbooru (con trỏ id) lưu tiến độ ở `.partial/` sau mỗi 20 trang và khi dừng, lần sau (trong 3 ngày) tải tiếp từ con trỏ; xong thì xoá.
+  - Báo cáo ghi thời gian đã phải chờ.
+- **Chạy thật lần đầu (khoá của chủ repo, nhịp mới):** không còn 429 (723 request, 1.287 giây), nhưng danh sách **sai**: 695.921 tag và thiếu hầu hết tag phổ biến (`female`, `breasts`, `1girls`). File đã bị xoá để app dùng lại danh sách kèm theo (613.506 tag).
+  - Nguyên nhân: tag index DAPI của rule34 **không trả theo thứ tự id** và bỏ qua `order` / `orderby`. Con trỏ `after_id` (id lớn nhất của trang trước) nên nhảy qua mọi tag có id nhỏ hơn xuất hiện sau, ví dụ `female` (id 945, hơn 10 triệu post) không bao giờ được thấy.
+  - Thử tay: `after_id=0`, `order=ASC&orderby=id`, `pid=0`, `orderby=count` trả cùng một trang đầu; `pid` thì phân trang đúng (1.000 tag mỗi trang, trang rỗng là `<tag type="array"/>`).
+- **Sửa tiếp:**
+  - `gelbooru_dapi` (rx, xb, bb, extension Gelbooru) phân trang theo `pid` tới trang rỗng, hoặc tới trang ngắn hơn cỡ trang (trang đầu ngắn thì lấy làm cỡ trang: site giới hạn `limit`).
+  - File tiến độ ghi loại con trỏ (`cursorKind`: `pid` / `id`), nên file của bản đọc `after_id` cũ không được dùng để tải tiếp.
+  - Lệnh CLI (`lustra-core tags`, lịch hệ thống) so sanity với danh sách app đang dùng (bản kèm app khi thư mục tags còn trống), như app đã làm, thay vì so với 0.
+- **Chạy thật lần hai (`pid`):** lần chạy bị dừng ở trang 200 (phiên làm việc kết thúc), file tiến độ còn đó; chạy lại thì tiếp từ trang 200, đúng như thiết kế.
+  - Sau 200 trang vẫn chưa có `female` / `breasts` / `1girls`. Dò tay: trang cuối là 1.616 (474 tag), và chính trang này chứa `female` (10,6 triệu post), `breasts`, `male`, `1girls`… Tag index đi theo thứ tự lưu vật lý: dòng vừa cập nhật số post bị dời xuống cuối. `pid` vẫn đúng, nhưng phải đọc tới trang cuối.
+  - Trang sâu chậm dần (0,5 giây ở trang 5, 4,2 giây ở trang 1.200, 6–7 giây ở trang 1.600); `limit` lớn hơn 1.000 bị site cắt về 1.000. Cập nhật đầy đủ khoảng 1,5–2 giờ.
+  - Lần chạy đầu trung bình 10 giây mỗi trang mà log không nói vì sao: thêm `PoliteClient.notify`, mỗi lần chờ 429 / 503 hoặc thử lại vì lỗi mạng đều hiện trong tiến độ.
+- **Giới hạn chỉnh được, dùng chung theo khoá** (chủ repo đang xin admin Rule34 tăng giới hạn cho khoá):
+  - Đo: trang 200–380 mất 1,8 giây/trang, không có 429; giới hạn 60/phút chỉ chặn ở ~100 trang đầu. Tăng giới hạn giúp tải ảnh nhiều hơn cập nhật tag.
+  - `lustra/network.py`: `key_rate_limit` / `key_rate_interval`: `LUSTRA_RATE_LIMIT_<MODULE>` (request mỗi phút) > `<thư mục dữ liệu>/ratelimit/limits.json` > giới hạn site công bố (`RATE_LIMIT_RX`; extension: `auth.rateLimit` của manifest, có trong schema).
+  - Tải ảnh rx trước đây không giữ nhịp (chỉ chờ khi đã bị 429): `DownloaderRx._get_min_request_interval` giờ dùng nhịp của khoá cho API (không cho trang yêu thích / pool, là HTML của site chính). Bộ cập nhật tag dùng chung file khoá `shared_rate_wait` với các job tải, nên chạy song song vẫn trong giới hạn.
+  - App: `settings.connection.keyRateLimits`, ô "Giới hạn của khoá" dưới khoá của module có `auth.rateLimit`; main ghi `limits.json` khi đổi và khi mở app (file, không qua argv: sidecar đang chạy thấy số mới ngay). Self-test `keyRateLimits` / `keyRateLimitsFile`.
+  - Test: thứ tự env > file > công bố, giá trị hỏng bị bỏ qua, đọc lại khi file đổi; nhịp tải rx 1,05 → 0,525 giây khi file ghi 120; updater và job tải cùng một file khoá; hai client cách nhau đúng nhịp; manifest `auth.rateLimit`.
+- **Chạy thật lần ba (tới hết):** ghi 1.555.632 tag nhưng vẫn thiếu `female`, `breasts`, `1girls`; dừng ở trang 1583 thay vì 1616. Trang 1583 có 999 tag và một tag tên rỗng (`name=""`): bộ đọc bỏ dòng đó, trang còn 999 < 1.000 nên bị coi là trang cuối. File đã được cất ra khỏi thư mục tags (app dùng lại danh sách kèm theo).
+  - Sửa: phân trang `pid` chỉ dừng ở trang rỗng thật (`<tag type="array"/>`: không `id`, không `name`); trang ngắn không còn là dấu hết. Site trả lại trang cuối (ngắn) cho `pid` vượt quá cuối thì coi là hết; trang đầy lặp lại vẫn là lỗi "ignores pid". Test: trang giữa có tag tên rỗng, hai kiểu hết trang.
+- **Sự cố: chạy test làm máy hết RAM (2 lần, lần sau máy treo và khởi động lại).**
+  - Nguyên nhân: `test_batch_b.TagListTests.test_gelbooru_unescape_and_cursor_guard` dùng client giả trả mãi một trang. Bộ đọc `after_id` cũ có chốt "con trỏ không tiến thì dừng"; bộ đọc `pid` mới không có, nên `list(gen)` gom mãi (22 GB khi bị kernel kill lúc 18:08). Site thật không bị vì ngân sách 5.000 request, nhưng test gọi thẳng bộ đọc.
+  - Sửa: `_pid_pages` dừng với lỗi khi một trang giống hệt trang trước ("the site ignores pid").
+  - Kiểm: các module test của CI chạy trong `systemd-run --user --scope -p MemoryMax=4G`: 369 test, 69 giây, RAM tối đa 233 MB; `unittest discover` 423 test, 278 MB. Từ giờ chạy test và việc dài trong giới hạn bộ nhớ như vậy.
+  - Danh sách kèm app (`2tags/rx_tags.json`, 613.506 tag) chỉ gồm tag từ 5 post trở lên; danh sách mới giữ tag từ 1 post (mặc định `--min-posts 1`, như danh sách Danbooru 1,1 triệu tag app đang dùng).
+- **Test:** nhịp đọc từ câu của rule34; chờ tăng dần rồi dừng; nhịp mặc định của rx; dừng ở trang 3 rồi tải tiếp từ con trỏ (Gelbooru và Danbooru); test Crawl-delay cũ sửa theo việc tự chậm lại sau 429. Ba test mới hỏng trên code cũ. Site giả của Gelbooru trả tag theo tên (không theo id), phân trang `pid` và trang rỗng như rule34: bản `after_id` hỏng trên site này; file tiến độ cũ không có loại con trỏ thì không được dùng; CLI truyền danh sách đang dùng làm mốc.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ap)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
