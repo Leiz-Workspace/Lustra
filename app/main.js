@@ -80,6 +80,9 @@ const DEFAULT_SETTINGS = {
   },
   connection: {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
+    // abbr -> requests a minute the site gave the user's API key (0 / missing: the limit the site publishes, manifest auth.rateLimit);
+    // written to <data dir>/ratelimit/limits.json, read by every core process (see syncKeyRateLimits)
+    keyRateLimits: {},
   },
   // schedule: the system scheduler updates the lists even while the app is closed (crontab / Task Scheduler, see tagScheduleStatus)
   tags: { autoUpdate: false, autoUpdateDays: 7, lastAutoUpdate: {}, schedule: { enabled: false, frequency: 'weekly' } },
@@ -379,6 +382,36 @@ function autoJobFinished(job) {
   saveSettings();
 }
 
+function sanitizeKeyRateLimits(obj) {
+  if (!isPlainObject(obj)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const n = typeof v === 'string' && v.trim() ? Number(v) : v;
+    if (RE_ABBR.test(k) && Number.isInteger(n) && n >= 0 && n <= 100000) out[k] = n;
+  }
+  return out;
+}
+
+// The core reads the key limits from a file, not from argv: download jobs, Preview, the sidecar's tag updates and scheduled runs
+// all pace one key together (lustra.network.key_rate_limit / shared_rate_wait), and a long-running sidecar sees a new value at once
+function keyRateLimitsFile() {
+  return path.join(userData(), 'ratelimit', 'limits.json');
+}
+
+function syncKeyRateLimits() {
+  const data = Object.fromEntries(Object.entries(settings.connection.keyRateLimits || {}).filter(([, n]) => n > 0));
+  const file = keyRateLimitsFile();
+  try {
+    let current = null;
+    try { current = fs.readFileSync(file, 'utf8'); } catch { /* none yet */ }
+    if (current !== null && JSON.stringify(JSON.parse(current)) === JSON.stringify(data)) return;
+    if (current === null && !Object.keys(data).length) return;
+    writeJsonAtomic(file, data);
+  } catch (err) {
+    console.warn(`key rate limits: ${err.message}`);
+  }
+}
+
 function sanitizeTagLimits(obj) {
   if (!isPlainObject(obj)) return null;
   const out = {};
@@ -426,6 +459,7 @@ function sanitizeSettings() {
   s.history = sanitizeQueryList(s.history, HISTORY_MAX, false) || [];
   s.saved = sanitizeQueryList(s.saved, SAVED_MAX, true) || [];
   s.tagLimits = sanitizeTagLimits(s.tagLimits) || {};
+  settings.connection.keyRateLimits = sanitizeKeyRateLimits(settings.connection.keyRateLimits) || {};
   settings.connection.headers = normalizeHttpMap(settings.connection.headers, 'Header', false);
   settings.connection.cookies = normalizeHttpMap(settings.connection.cookies, 'Cookie', false);
   if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
@@ -467,6 +501,7 @@ function loadSettings() {
   settings = deepMerge(DEFAULT_SETTINGS, raw || {});
   sanitizeSettings();
   migrateSettings(fileVersion);
+  syncKeyRateLimits();
   settingsLoadInfo = { fileVersion: raw ? fileVersion : null, corrupt: Boolean(error), migrated: Boolean(raw && fileVersion < SETTINGS_VERSION) };
   if (error) {
     // a corrupt file must not cost the user their API keys: keep a copy, salvage the secrets block, tell the user
@@ -1948,6 +1983,11 @@ function registerIpc() {
         replaceMaps[key] = normalizeHttpMap(patch.connection[key], kind, true);
         delete patch.connection[key];
       }
+      if (patch.connection.keyRateLimits !== undefined) {
+        const v = sanitizeKeyRateLimits(patch.connection.keyRateLimits);
+        if (v === null) delete patch.connection.keyRateLimits;
+        else patch.connection.keyRateLimits = v;
+      }
     }
     if (isPlainObject(patch.genderModel) && patch.genderModel.url !== undefined) {
       const u = sanitizeModelUrl(patch.genderModel.url);
@@ -1960,6 +2000,7 @@ function registerIpc() {
     if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
     settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
     saveSettings();
+    if (patch?.connection?.keyRateLimits) syncKeyRateLimits();
     if (patch?.connection) await applyProxyToSession();
     let iconSync;
     if (patch?.appearance) {
@@ -2442,6 +2483,10 @@ async function selfTestContract(js, quick) {
     r.headersSave = await window.lustra.settings.set({ connection: { headers: ${JSON.stringify({ 'X-Test': 'a"b\\c' })}, cookies: ${JSON.stringify({ sid: '"q\\z"' })} } })
       .then(() => 'saved', (e) => e.message);
     r.badHeaderName = await window.lustra.settings.set({ connection: { headers: { 'bad name': 'v' } } }).then(() => 'ACCEPTED', () => 'rejected');
+    // a higher limit the site gave the user's key (Settings > API keys): main restores the previous value after checking the file
+    const prevKeyLimits = (await window.lustra.settings.get()).settings.connection.keyRateLimits || {};
+    const kv = (await window.lustra.settings.set({ connection: { keyRateLimits: { rx: 120, 'bad key': 3, xb: -1, bb: 'x' } } })).settings.connection.keyRateLimits;
+    r.keyRateLimits = { saved: kv, prev: prevKeyLimits, ok: kv.rx === 120 && !('bad key' in kv) && kv.xb !== -1 && kv.bb !== 'x' };
     r.lang = { navigator: navigator.language, dateInput: (() => { const d = document.createElement('input'); d.type = 'date'; return d.type; })() };
     return r;
   })()`);
@@ -2455,6 +2500,15 @@ async function selfTestContract(js, quick) {
   settings.search.tagLimits = { db: 6 };
   out.tagLimitArgs = tagLimitArgs('db');
   settings.search.tagLimits = limits;
+  {
+    // key limits: written where every core process reads them (lustra.network.key_rate_limit), then the user's value is back
+    let written = null;
+    try { written = JSON.parse(fs.readFileSync(keyRateLimitsFile(), 'utf8')); } catch { /* checked below */ }
+    settings.connection.keyRateLimits = sanitizeKeyRateLimits(out.keyRateLimits?.prev) || {};
+    saveSettings();
+    syncKeyRateLimits();
+    out.keyRateLimitsFile = { written, ok: written?.rx === 120 };
+  }
   // download index: '-skip_known' only when the option is on (off by default, old behavior unchanged)
   const hasSkip = (options) => downloadArgs({ module: 'db', tags: 'x', options }).args.includes('-skip_known');
   out.skipKnownArgs = { on: hasSkip({ skipKnown: true }), off: hasSkip({ skipKnown: false }), default: hasSkip({}) };

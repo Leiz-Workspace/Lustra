@@ -12,6 +12,7 @@ import contextlib
 import datetime
 import email.utils
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -34,6 +35,7 @@ from .defines import (
     KNOWN_EXTENSIONS_AUD,
     KNOWN_EXTENSIONS_VID,
     RETRY_AFTER_MAX_SECONDS,
+    UTF8,
     DownloadModes,
     ThreadInterruptException,
 )
@@ -88,6 +90,49 @@ def shared_rate_wait(site: str, interval: float) -> bool:
         return True
     except Exception:
         return False
+
+
+RATE_LIMIT_MARGIN = 1.05
+'''pace a rate limit with this margin: 60 requests / 60 s -> one request every 1.05 s'''
+RATE_LIMITS_FILE = 'limits.json'
+'''<data dir>/ratelimit/limits.json: {"rx": 120}, requests a minute the site gave the user's API key (the app writes it)'''
+ENV_RATE_LIMIT = 'LUSTRA_RATE_LIMIT_'
+_limits_cache: list = [None, {}]
+'''[(path, mtime_ns, size) of the file read, its limits]'''
+
+
+def _rate_limits_file() -> dict[str, int]:
+    try:
+        from .extensions import data_dir  # local import: extensions imports this module indirectly
+        path = data_dir() / 'ratelimit' / RATE_LIMITS_FILE
+        st = path.stat()
+    except Exception:
+        return {}
+    stamp = (path, st.st_mtime_ns, st.st_size)
+    if _limits_cache[0] != stamp:
+        try:
+            raw = json.loads(path.read_text(encoding=UTF8))
+        except (OSError, ValueError):
+            raw = {}
+        _limits_cache[:] = [stamp, {str(k): v for k, v in (raw.items() if isinstance(raw, dict) else ())
+                                    if isinstance(v, int) and not isinstance(v, bool) and 0 < v <= 100000}]
+    return _limits_cache[1]
+
+
+def key_rate_limit(module: str, published: tuple[int, int] | None) -> tuple[int, int] | None:
+    """(requests, seconds) the site allows the user's API key of 'module', None when no limit is known.
+    Asking the site's admins may get a key more than the published limit: LUSTRA_RATE_LIMIT_<MODULE> (requests a minute, CLI / cron)
+    wins, then <data dir>/ratelimit/limits.json (the app: Settings > API keys), then the limit the site publishes"""
+    raw = os.environ.get(f'{ENV_RATE_LIMIT}{module.upper()}', '').strip()
+    n = int(raw) if raw.isdecimal() and 0 < int(raw) <= 100000 else _rate_limits_file().get(module, 0)
+    return (n, 60) if n else published
+
+
+def key_rate_interval(module: str, published: tuple[int, int] | None) -> float:
+    """Seconds between two requests that keep the key under its limit (0: no known limit). Every process using the key keeps
+    this pace together through shared_rate_wait (download jobs, Preview, the tag list updater)"""
+    limit = key_rate_limit(module, published)
+    return limit[1] / limit[0] * RATE_LIMIT_MARGIN if limit else 0.0
 
 
 def _lock_file(f, lock: bool) -> None:
