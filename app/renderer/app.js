@@ -297,7 +297,6 @@ function renderGenderFilter() {
     : 'Chỉ dùng được với cách xác định "Tag + model (ảnh)"';
   const hint = [];
   if (g.select.length) hint.push(`${ex ? 'loại' : 'giữ'}: ${genderPicked(g)}`);
-  if (g.select.length) hint.push('danh sách chặn an toàn cũng được áp dụng');
   if (g.select.length && !hasCap(S.module, 'gender')) hint.push(`${S.module.toUpperCase()} ít tag giới tính, phần lớn post sẽ là "Không rõ"`);
   $('#f-gender-hint').textContent = hint.join(' · ');
 }
@@ -859,6 +858,7 @@ function currentQuery() {
     module: S.module, tags: queryString(),
     dateMin: $('#f-datemin').value, dateMax: $('#f-datemax').value,
     gender: genderState(),
+    safetyBlacklist: $('#f-safety').checked, // -safety_blacklist: its own filter, never implied by the gender filter
   };
 }
 // closed filters panel: one line summary of what differs from "everything" (media, dates, limit, gender...)
@@ -876,6 +876,7 @@ function filtersSummary() {
     g.select.length ? `giới tính ${g.op === 'exclude' ? 'bỏ' : 'giữ'}: ${genderPicked(g)}` : '',
     g.select.length && g.mode === 'model' && g.verifyMedia && gmOn() ? 'xem lại video sau khi tải' : '',
     o.skipKnown ? 'bỏ file đã tải' : '',
+    $('#f-safety').checked ? 'chặn nội dung gợi ý trẻ vị thành niên' : '',
     o.lowRes ? 'ảnh nhẹ' : '',
     multi.size ? `+${multi.size} site` : '',
   ].filter(Boolean);
@@ -886,6 +887,8 @@ $('#filters').addEventListener('toggle', () => {
   if (S.settings && S.settings.search.filtersOpen !== $('#filters').open) saveSettings({ search: { filtersOpen: $('#filters').open } });
 });
 $('#filters').addEventListener('change', filtersSummary);
+// the safety blacklist check box is remembered (download.safetyBlacklist) and sent with each query
+$('#f-safety').addEventListener('change', (e) => saveSettings({ download: { safetyBlacklist: e.target.checked } }));
 $('#filters').addEventListener('click', () => requestAnimationFrame(filtersSummary)); // gender pills are buttons
 
 function downloadOptions() {
@@ -2849,6 +2852,7 @@ function renderSettings() {
   $('#f-limit').value = s.download.limit;
   $('#f-parchi').checked = s.download.parchi;
   $('#f-skip-known').checked = !!s.download.skipKnown;
+  $('#f-safety').checked = s.download.safetyBlacklist === true;
   renderApiKeys();
   renderTagLimits();
 }

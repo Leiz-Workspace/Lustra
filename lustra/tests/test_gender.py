@@ -1,6 +1,7 @@
 # coding=UTF-8
 """
-Lustra: gender filter tier 0 + safety blacklist tests (offline)
+Lustra: gender filter tier 0 + safety blacklist tests (offline). The blacklist is its own option (-safety_blacklist,
+off by default), independent of the gender filter (product decision 2026-11-18)
 docs/plans/gender-filter-model.md: AC-G01..AC-G05, AC-S01..AC-S03
 Run: python -m unittest lustra.tests.test_gender
 """
@@ -165,6 +166,7 @@ class GenderPipelineTests(TestCase):
     def test_filters_only_female(self) -> None:  # AC-G04, AC-S01
         dwn = self._downloader_with_items()
         dwn.gender_select = frozenset({'only_female'})
+        dwn.safety_blacklist = True
         parents: set[str] = {'5'}
         dwn._filter_items_safety(parents)
         self.assertEqual(2, dwn.safety_blocked_count)
@@ -176,7 +178,23 @@ class GenderPipelineTests(TestCase):
         self.assertEqual(4, dwn.gender_filtered_count)
         self.assertEqual({'only_female': 1, 'only_male': 1, 'both': 1, 'none': 1, 'unknown': 1}, dwn.gender_stats)
 
-    def test_no_filter_no_change(self) -> None:  # AC-G05: without -gender behavior is unchanged (safety too)
+    def test_safety_blacklist_is_its_own_option(self) -> None:  # AC-S01
+        # the gender filter alone blocks nothing: posts 5 and 6 (minor coded tags) are judged by gender like any other
+        dwn = self._downloader_with_items()
+        dwn.gender_select = frozenset({'only_female'})
+        dwn._filter_items_safety(set())
+        self.assertEqual((0, 7), (dwn.safety_blocked_count, len(dwn.items_raw_per_task)))
+        dwn._filter_items_by_gender(set())
+        self.assertEqual({'1', '5', '6'}, {dwn._extract_id(h) for h in dwn.items_raw_per_task})
+        # the blacklist alone, without any gender filter, blocks them
+        dwn = self._downloader_with_items()
+        dwn.safety_blacklist = True
+        dwn._filter_items_safety(set())
+        dwn._filter_items_by_gender(set())
+        self.assertEqual(2, dwn.safety_blocked_count)
+        self.assertEqual({'1', '2', '3', '4', '7'}, {dwn._extract_id(h) for h in dwn.items_raw_per_task})
+
+    def test_no_filter_no_change(self) -> None:  # AC-G05: without -gender and -safety_blacklist behavior is unchanged
         dwn = self._downloader_with_items()
         before = list(dwn.items_raw_per_task)
         dwn._filter_items_safety(set())
@@ -193,6 +211,13 @@ class GenderPipelineTests(TestCase):
             dwn._parse_args(prepare_arglist(['-module', 'db', '-gender', 'only_female,both', '-gender_conf', 'high', '-gender_strict', 'x']), False)
             self.assertEqual(frozenset({'only_female', 'both'}), dwn.gender_select)
             self.assertEqual((H, True), (dwn.gender_min_conf, dwn.gender_strict))
+            self.assertFalse(dwn.safety_blacklist)  # off by default, the gender filter does not turn it on
+        with _make_downloader(ProcModule.DB) as dwn:
+            dwn.reset_root_thread(me)
+            dwn.no_conflict_delay = True
+            dwn._parse_args(prepare_arglist(['-module', 'db', '-safety_blacklist', 'x']), False)
+            self.assertTrue(dwn.safety_blacklist)
+            self.assertEqual(frozenset(), dwn.gender_select)
         with self.assertRaises(SystemExit):
             prepare_arglist(['-module', 'db', '-gender', 'girls_only', 'x'])
 
@@ -232,34 +257,35 @@ class GenderPipelineTests(TestCase):
         from lustra.gender import GenderLabel as GL
         from lustra.gender import GenderResult as GR
         from lustra.gender_model import ModelVerdict
-        with _make_downloader(ProcModule.DB) as dwn:
-            me = current_process()
-            me.killed = False
-            dwn.reset_root_thread(me)
-            dwn.no_conflict_delay = True
-            dwn._parse_args(prepare_arglist(['-module', 'db', '-gender', 'only_female', 'x']), False)
-            dwn.gender_mode = 'model'
-            posts = _db_posts_json()
-            dwn.items_raw_per_task = dwn._get_all_post_tags(posts)
-            dwn._extract_cur_task_infos(set())
-            ids = [dwn._extract_id(h) for h in dwn.items_raw_per_task]
-            unknown_ids = [i for i in ids if str(infer_from_tags(dwn.item_info_dict_per_task[i].tags.split(), rules_for_module('db')).label) == 'unknown']
-            self.assertTrue(unknown_ids, 'the fixture needs posts without gender tags')
-            seen: list[list[str]] = []
+        for safety_on in (True, False):  # the model's safety gate blocks only with -safety_blacklist
+            with self.subTest(safety_blacklist=safety_on), _make_downloader(ProcModule.DB) as dwn:
+                me = current_process()
+                me.killed = False
+                dwn.reset_root_thread(me)
+                dwn.no_conflict_delay = True
+                dwn._parse_args(prepare_arglist(['-module', 'db', '-gender', 'only_female', *(['-safety_blacklist'] if safety_on else []), 'x']), False)
+                dwn.gender_mode = 'model'
+                posts = _db_posts_json()
+                dwn.items_raw_per_task = dwn._get_all_post_tags(posts)
+                dwn._extract_cur_task_infos(set())
+                ids = [dwn._extract_id(h) for h in dwn.items_raw_per_task]
+                unknown_ids = [i for i in ids if str(infer_from_tags(dwn.item_info_dict_per_task[i].tags.split(), rules_for_module('db')).label) == 'unknown']
+                self.assertTrue(unknown_ids, 'the fixture needs posts without gender tags')
+                seen: list[list[str]] = []
 
-            def fake_verdicts(_dwn, items):
-                seen.append([i for i, _ in items])
-                return {unknown_ids[0]: ModelVerdict(GR(GL.ONLY_FEMALE, H, source='model')),
-                        **({unknown_ids[1]: ModelVerdict(GR(GL.ONLY_FEMALE, H, source='model'), safety_tag='loli')} if len(unknown_ids) > 1 else {})}
-            with mock.patch('lustra.gender_model.verdicts_for', fake_verdicts):
-                dwn._filter_items_by_gender(set())
-            self.assertEqual(set(unknown_ids), set(seen[0]))  # only posts without conclusive tags go to the model
-            kept = {dwn._extract_id(h) for h in dwn.items_raw_per_task}
-            self.assertIn(unknown_ids[0], kept)
-            self.assertEqual('model', dwn.gender_results[unknown_ids[0]].source)
-            if len(unknown_ids) > 1:
-                self.assertNotIn(unknown_ids[1], kept)
-                self.assertEqual(1, dwn.safety_blocked_count)
+                def fake_verdicts(_dwn, items, unknown_ids=unknown_ids, seen=seen):
+                    seen.append([i for i, _ in items])
+                    return {unknown_ids[0]: ModelVerdict(GR(GL.ONLY_FEMALE, H, source='model')),
+                            **({unknown_ids[1]: ModelVerdict(GR(GL.ONLY_FEMALE, H, source='model'), safety_tag='loli')} if len(unknown_ids) > 1 else {})}
+                with mock.patch('lustra.gender_model.verdicts_for', fake_verdicts):
+                    dwn._filter_items_by_gender(set())
+                self.assertEqual(set(unknown_ids), set(seen[0]))  # only posts without conclusive tags go to the model
+                kept = {dwn._extract_id(h) for h in dwn.items_raw_per_task}
+                self.assertIn(unknown_ids[0], kept)
+                self.assertEqual('model', dwn.gender_results[unknown_ids[0]].source)
+                if len(unknown_ids) > 1:
+                    self.assertEqual(not safety_on, unknown_ids[1] in kept)
+                    self.assertEqual(1 if safety_on else 0, dwn.safety_blocked_count)
 
     @unittest.skipUnless(os.environ.get('LUSTRA_GENDER_MODEL_DIR'), 'real model: set LUSTRA_GENDER_MODEL_DIR to a folder with model.onnx')
     def test_real_model_on_the_app_icon(self) -> None:
@@ -290,7 +316,7 @@ class GenderPipelineTests(TestCase):
         from lustra import server
         page = HTMLContent(None, _db_posts_json())  # type: ignore[arg-type]
         with mock.patch('lustra.download_db.DownloaderDb.fetch_html', return_value=page), mock.patch.object(server, 'notify'):
-            res = server.m_search_preview({'module': 'db', 'tags': 'scenery', 'args': ['-gender', 'only_female']})
+            res = server.m_search_preview({'module': 'db', 'tags': 'scenery', 'args': ['-gender', 'only_female', '-safety_blacklist']})
         ids = [it['id'] for it in res['items']]
         self.assertEqual(2, res['blockedCount'])
         self.assertNotIn('5', ids)
@@ -304,6 +330,15 @@ class GenderPipelineTests(TestCase):
             res2 = server.m_search_preview({'module': 'db', 'tags': 'scenery', 'args': []})
         self.assertEqual(7, len(res2['items']))  # no filter -> no blacklist, unchanged behavior (product decision)
         self.assertFalse(res2['genderEnabled'])
+        # the gender filter alone hides nothing for safety; the blacklist alone does, without any gender label
+        with mock.patch('lustra.download_db.DownloaderDb.fetch_html', return_value=page), mock.patch.object(server, 'notify'):
+            res3 = server.m_search_preview({'module': 'db', 'tags': 'scenery', 'args': ['-gender', 'only_female']})
+        self.assertEqual((0, 7), (res3['blockedCount'], len(res3['items'])))
+        with mock.patch('lustra.download_db.DownloaderDb.fetch_html', return_value=page), mock.patch.object(server, 'notify'):
+            res4 = server.m_search_preview({'module': 'db', 'tags': 'scenery', 'args': ['-safety_blacklist']})
+        self.assertEqual((2, 5), (res4['blockedCount'], len(res4['items'])))
+        self.assertFalse(res4['genderEnabled'])
+        self.assertNotIn('/6.jpg', json.dumps(res4))
 
 
 class ExtensionGenderManifestTests(TestCase):

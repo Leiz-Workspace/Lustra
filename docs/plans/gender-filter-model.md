@@ -6,7 +6,7 @@
 > - **Tầng 0** suy nhãn từ tag sẵn có. Không cần ML, không tải ảnh, ra mắt được ngay.
 > - **Tầng 1** là model thị giác chạy cục bộ, chỉ dùng cho post thiếu tag hoặc tag nhiễu.
 >
-> Cả hai tầng đứng sau một **blacklist an toàn cứng** (§4). Khi bộ lọc đang bật, blacklist không tắt được. Khi không lọc, app giữ hành vi như bản gốc (**Quyết định 2026-11-16:** blacklist chỉ chạy khi bộ lọc được bật, không áp toàn app).
+> Bên cạnh hai tầng có một **blacklist an toàn cứng** (§4). **Quyết định 2026-11-18** (thay quyết định 2026-11-16, khi blacklist tự chạy cùng bộ lọc giới tính): blacklist là **bộ lọc riêng, mặc định tắt** (`-safety_blacklist`, ô riêng trong app), độc lập với bộ lọc giới tính; người dùng tự bật. Khi tắt, app giữ hành vi như bản gốc.
 
 ## Mục lục
 
@@ -59,7 +59,7 @@
 | D2 | Theo **quy ước đếm của booru**: futanari tính là nữ, otoko_no_ko/trap tính là nam, nhân vật mơ hồ không tính. Có cờ `-gender_strict` để loại các ca biên này. | Nhất quán với dữ liệu site, nên nhãn yếu ít mâu thuẫn. |
 | D3 | **Ưu tiên precision**: `unknown` bị loại theo mặc định. Ngưỡng tin cậy mặc định là `medium`. | Người bật bộ lọc muốn ít lọt sai, chấp nhận thiếu vài post. |
 | D4 | Tầng 0 là **filter cục bộ ở cuối chuỗi** trong `Downloader._process_tags`, không viết lại truy vấn gửi lên site. Ruleset theo site ở dạng JSON; extension tự mang ruleset của mình. | Không tốn lượt tag (Danbooru giới hạn 2 tag), ngữ nghĩa giống nhau trên mọi site, model chỉ chạy trên số post ít nhất. |
-| D5 | **Blacklist an toàn cứng** nằm trong code (`lustra/safety.py`). Khi bộ lọc giới tính được bật, nó chạy cho **mọi task, kể cả task parent**, trước mọi suy luận. Không áp toàn app (quyết định 2026-11-16). Preview không trả URL thumbnail của post bị chặn. Extension chỉ được thêm tag vào blacklist, không được bớt. | Yêu cầu bắt buộc. Không có đường nào để bật lại. |
+| D5 | **Blacklist an toàn cứng** nằm trong code (`lustra/safety.py`). Là **bộ lọc riêng, mặc định tắt** (`-safety_blacklist`) (quyết định 2026-11-18, thay quyết định 2026-11-16); khi bật, nó chạy cho **mọi task, kể cả task parent**, trước mọi suy luận, và bật cả chốt an toàn của model. Preview không trả URL thumbnail của post bị chặn. Extension chỉ được thêm tag vào blacklist, không được bớt. | Danh sách cố định, không có đường nào để bớt tag. |
 | D6 | Tầng 1 dùng **backbone đóng băng + head 2-sigmoid**. Baseline là zero-shot từ WD tagger v3. Ưu tiên WD v3 (đúng miền booru, có sẵn đầu ra làm safety gate) trừ khi SigLIP thắng rõ. Chỉ fine-tune toàn phần khi slice 3D/furry không đạt. | Rẻ, nhanh, dễ calibrate. Không phải giữ ảnh lâu. |
 | D7 | Dataset **chỉ lưu embedding + metadata**; ảnh bị xoá ngay sau khi tính embedding. Split theo artist. Tập vàng gồm 3.000 post do 2 người gán độc lập. | Giảm lưu trữ nội dung nhạy cảm và tránh rò rỉ giữa train/test. |
 | D8 | Model là gói **tải về tuỳ chọn** (≤ 120 MB int8), chạy bằng ONNX Runtime CPU trong sidecar/CLI. Ảnh lấy từ cache thumbnail sẵn có của Electron. **Không gửi gì ra ngoài.** | Riêng tư, không đội dung lượng bộ cài. |
@@ -447,7 +447,7 @@ Model chỉ chạy khi **tất cả** điều kiện sau đúng:
 - (d) Model **không bao giờ** chạy trên post bị chặn.
 - (e) Bỏ mọi entry tương ứng khỏi cache.
 
-Mở rộng ra toàn app: **đã chốt là không** (2026-11-16). Blacklist chỉ chạy khi bật bộ lọc, xem §8.1.
+Mở rộng ra toàn app: **đã chốt là không** (2026-11-16). Từ 2026-11-18 blacklist là bộ lọc riêng, mặc định tắt, không đi kèm bộ lọc giới tính, xem §8.1.
 
 **Cách so khớp**: tag được chuyển về chữ thường và chuẩn hoá alias, rồi so khớp đúng (exact) **hoặc** khớp regex token:
 
@@ -636,7 +636,7 @@ P0 phát hành được độc lập. P1 bắt đầu được ngay khi `safety.
 
 ## 8. Câu hỏi mở
 
-1. ~~**Blacklist an toàn toàn cục**~~: **đã chốt 2026-11-16, chỉ khi lọc.** `_filter_items_safety` chạy mỗi khi bật `-gender` (CLI, RPC, UI), cho mọi task kể cả parent; khi đang lọc thì không tắt được. Không bật `-gender` thì giữ hành vi như bản gốc.
+1. ~~**Blacklist an toàn toàn cục**~~: **đã chốt 2026-11-16, chỉ khi lọc; đổi 2026-11-18 thành bộ lọc riêng.** `_filter_items_safety` chạy khi có `-safety_blacklist` (CLI, RPC, ô riêng trong app), cho mọi task kể cả parent, độc lập với `-gender`; mặc định tắt, tức là giữ hành vi như bản gốc.
 2. **Đẩy luật tag lên server** cho site không giới hạn tag (rx): có làm ở P3+ như một tuỳ chọn để giảm số trang phải tải?
 3. **Host catalog model** và quy trình ký gói (SHA-256 trong catalog có đủ, hay cần chữ ký)?
 4. **Phân phối trọng số** train trên tranh có bản quyền: chỉ phát hành head và để người dùng tự tải backbone từ nguồn gốc, hay đóng gói cả hai?

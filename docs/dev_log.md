@@ -673,7 +673,25 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   Test khoá đi kèm app giờ đòi có khoá chính thức.
 - **Phát hành:** version 2.0.4 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r4`), ghi chú `docs/releases/v2.0.4.md`; `docs/operations.md` mục 3d ghi cách cập nhật catalog.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ai)
+### 7aj. Danh sách chặn an toàn thành bộ lọc riêng — 2026-11-18
+- **Quyết định của chủ sản phẩm** (thay quyết định 7d, 2026-11-16): danh sách chặn tag gợi ý trẻ vị thành niên (`lustra/safety.py`) không còn tự chạy khi bật bộ lọc giới tính. Nó là bộ lọc riêng, **mặc định tắt**, người dùng tự bật, và dùng được cả khi không lọc giới tính.
+- **Lõi:**
+  - Tuỳ chọn mới `-safety_blacklist`, thuộc tính `safety_blacklist` của downloader.
+  - `_filter_items_safety`, phần Preview (`_ResultsFilter`: chặn, ẩn post không có tag để kiểm) và chốt an toàn của model (khi lọc ở tải, ở Preview và với `-gender_verify_media`) chỉ chạy khi có tuỳ chọn này.
+  - Danh sách vẫn cố định; extension chỉ thêm được tag.
+  - Help của `-gender` / `-gender_exclude` bỏ câu "Enables safety blacklist".
+- **App:**
+  - Ô "Chặn nội dung gợi ý trẻ vị thành niên" trong bộ lọc, nhớ ở `settings.download.safetyBlacklist`, gửi theo từng truy vấn (`q.safetyBlacklist`) cho Preview và job.
+  - Câu gợi ý "danh sách chặn an toàn cũng được áp dụng" của bộ lọc giới tính bỏ đi; dòng tóm tắt bộ lọc ghi khi ô được bật.
+  - Self-test `safetyArgs`: chỉ có `-safety_blacklist` khi được bật, bộ lọc giới tính không kéo theo.
+- **Test:**
+  - `test_safety_blacklist_is_its_own_option`: lọc giới tính một mình không chặn, danh sách chặn một mình thì chặn.
+  - Preview theo ba trường hợp: cả hai, chỉ giới tính, chỉ danh sách chặn.
+  - Chốt an toàn của model theo tuỳ chọn.
+  - Đối số CLI.
+- **Tài liệu:** README, specs F-17, use case UC-12, AC-23, plan gender-filter-model (D5, §4.1, §8.1), plan site-extension (QĐ5, R9, AC-EXT-04), `operations.md` mục 3h.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7aj)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.

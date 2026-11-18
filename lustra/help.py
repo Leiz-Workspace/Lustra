@@ -36,10 +36,10 @@ HELP_ARG_PREFER_MP4 = 'Prefer mp4 over webm when possible'
 HELP_ARG_PREFER_LOWRES = 'Prefer low resolution images over the originals'
 HELP_ARG_PRESERVE_DATE = 'Preserve original modification date for saved files'
 HELP_ARG_GENDER = ('Keep only posts with these character gender labels (comma separated): '
-                   'only_female,only_male,both,none,unknown. Labels come from post tags. Enables safety blacklist')
+                   'only_female,only_male,both,none,unknown. Labels come from post tags')
 HELP_ARG_GENDER_EXCLUDE = ('Drop posts with these character gender labels and keep all the others (comma separated, same labels '
                            'as -gender, not all of them). Ex. robot -gender_exclude only_male: robots shown female only, both, '
-                           'with no character or unknown. With -gender: the labels of -gender minus these. Enables safety blacklist')
+                           'with no character or unknown. With -gender: the labels of -gender minus these')
 HELP_ARG_GENDER_MODE = ('Gender labeling mode: \'tags\' (default) or \'model\': posts whose tags are not conclusive are looked at '
                         'by an image model, through a model server (-gender_model_url) or in this process '
                         '(pip install "lustra[model]", python -m lustra.gender_model install, ~380 MB)')
@@ -54,6 +54,9 @@ HELP_ARG_GENDER_VERIFY_MEDIA = ('With -gender_mode model: each downloaded video 
                                 'subfolder of the destination, never deleted')
 HELP_ARG_SKIP_KNOWN = ('Skip posts already in the local download index (same md5, or same module and id) whose file is still on disk. '
                        'Default is \'off\'')
+HELP_ARG_SAFETY_BLACKLIST = ('Drop posts whose tags suggest minors (fixed list of lustra/safety.py, extensions may only add tags), '
+                             'in previews and downloads; with -gender_mode model the model\'s minor coded tags block posts too. '
+                             'Independent of -gender. Default is \'off\'')
 HELP_ARG_MINDATE = 'Skip everything posted before this date, default is \'01-01-1970\''
 HELP_ARG_MAXDATE = 'Skip everything posted after this date, default is \'<today>\''
 HELP_ARG_THREADS = 'Maximum simultaneous downloads (affects pages scan too), default is \'1\''
