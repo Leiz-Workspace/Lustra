@@ -838,7 +838,13 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Danh sách kèm app (`2tags/rx_tags.json`, 613.506 tag) chỉ gồm tag từ 5 post trở lên; danh sách mới giữ tag từ 1 post (mặc định `--min-posts 1`, như danh sách Danbooru 1,1 triệu tag app đang dùng).
 - **Test:** nhịp đọc từ câu của rule34; chờ tăng dần rồi dừng; nhịp mặc định của rx; dừng ở trang 3 rồi tải tiếp từ con trỏ (Gelbooru và Danbooru); test Crawl-delay cũ sửa theo việc tự chậm lại sau 429. Ba test mới hỏng trên code cũ. Site giả của Gelbooru trả tag theo tên (không theo id), phân trang `pid` và trang rỗng như rule34: bản `after_id` hỏng trên site này; file tiến độ cũ không có loại con trỏ thì không được dùng; CLI truyền danh sách đang dùng làm mốc.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ap)
+### 7aq. Bản 2.0.6 — 2026-11-18
+- **Nội dung:**
+  - cập nhật danh sách tag theo giới hạn của khoá, tải tiếp khi dừng, Rule34 đọc theo trang `pid`, giới hạn khoá chỉnh được và dùng chung giữa tải ảnh và cập nhật tag (7ap, PR #21);
+  - minimatch 11 cho công cụ build (7ao, PR #20; cảnh báo Dependabot #1 đóng khi bản này lên `production`).
+- **Phát hành:** version 2.0.6 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r6`), ghi chú `docs/releases/v2.0.6.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7aq)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
