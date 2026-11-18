@@ -791,7 +791,18 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - danh sách tag cho mọi extension (7al, 7am, PR #16).
 - **Phát hành:** version 2.0.5 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r5`), ghi chú `docs/releases/v2.0.5.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7an)
+### 7ao. Dependabot: minimatch (GHSA-g3hv-75wg-m249) — 2026-11-18
+- **Cảnh báo #1** (mức vừa, từ chối dịch vụ khi mở rộng glob): `minimatch` từ 7.0.0 tới trước 11.0.1, bản vá là 11.0.1.
+  - Trong `app/package-lock.json` có hai bản dính: 10.2.6 (của `app-builder-lib`) và 9.0.9 (của `@electron/universal`). Cả hai chỉ dùng lúc build.
+  - `electron-builder` 26.18.0 (bản mới nhất) vẫn đòi `minimatch ^10.2.5`.
+- **Sửa:** `overrides` trong `app/package.json`: `"minimatch@>=7.0.0 <11.0.1": "^11.0.1"`.
+  - Chỉ các bản nằm trong khoảng lỗi lên 11.0.9; các bản 3.1.5 và 5.1.9 (API cũ, của `glob@7`, `asar`, `filelist`) giữ nguyên.
+  - `app-builder-lib` nạp được `minimatch` 11 (`Minimatch`, `minimatch()`).
+  - Build thử `electron-builder --linux dir` ra đủ file, và `app.asar` không chứa `node_modules` nào: `minimatch` chưa bao giờ nằm trong app.
+- **Còn lại:** `npm audit` vẫn báo 9 mục high, cùng gốc ở `picomatch` (cảnh báo #2, GitHub đã tự đóng). Chưa có bản vá; thư viện này chỉ dùng lúc build.
+- Cảnh báo được tính trên nhánh mặc định (`production`), nên chỉ đóng khi thay đổi này lên `production` cùng bản phát hành tới. Đổi `app/package.json` và lock file được tính là thay đổi phát hành, nên cần nâng phiên bản.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7ao)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
