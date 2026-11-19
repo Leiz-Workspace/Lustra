@@ -279,6 +279,22 @@ class FetchPolicyTests(TestCase):
             g.fetch(f'http://{HOST}/')
         self.assertEqual('R10', ctx.exception.rule)
 
+    def test_robots_rfc9309_groups_merged(self) -> None:
+        # Cloudflare's managed block ('User-agent: *' + 'Allow: /') comes before the site's own '*' group (manebooru.art,
+        # furbooru.org 2026-11-19): RFC 9309 merges both groups, so '/api' stays disallowed; urllib.robotparser used only the first
+        robots = ('User-agent: *\nContent-Signal: search=yes,ai-train=no\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /\n\n'
+                  'User-agent: *\nCrawl-delay: 2\nAllow: /images/*\nDisallow: /api\nDisallow: /search\n')
+        f = fake_fetcher(lambda u: fake_gelbooru(u, robots=robots))
+        with self.assertRaises(FetchPolicyError) as ctx:
+            f.fetch(f'{SITE}api/v1/json/search/images?q=*')
+        self.assertEqual('R2', ctx.exception.rule)
+        self.assertEqual(2.0, f.robots_info(SITE)['crawlDelay'])
+        self.assertTrue(f.robots_info(f'{SITE}images/1')['allowed'])
+        self.assertFalse(f.robots_info(f'{SITE}search?q=a')['allowed'])
+        # the longest rule wins, not the first one: 'Allow: /' then 'Disallow: /*.json'
+        g = fake_fetcher(lambda u: fake_gelbooru(u, robots='User-agent: *\nAllow: /\nDisallow: /*.json\n'))
+        self.assertFalse(g.robots_info(f'{SITE}tags.json')['allowed'])
+
     def test_budget_redirect_challenge_and_no_cookies(self) -> None:
         f = fake_fetcher(budget=3)
         f.fetch(f'{SITE}a')  # robots.txt + a

@@ -20,12 +20,12 @@ from dataclasses import dataclass, field
 from http.cookiejar import DefaultCookiePolicy
 from threading import Lock
 from urllib import parse as url_parse
-from urllib import robotparser
 
 import requests
 
 from lustra.denylist import ascii_host, denied, denied_message
 from lustra.network import LUSTRA_USER_AGENT, is_cloudflare_challenge, parse_retry_after
+from lustra.robots import RobotsRules
 
 __all__ = ('FetchPolicyError', 'FetchResult', 'SafeFetcher', 'host_of', 'normalize_site')
 
@@ -118,7 +118,7 @@ def _is_public(addr: str) -> bool:
 
 @dataclass
 class _HostState:
-    robots: robotparser.RobotFileParser | None = None
+    robots: RobotsRules | None = None
     robots_status: str = ''
     crawl_delay: float = 0.0
     last: float = 0.0
@@ -184,33 +184,34 @@ class SafeFetcher:
             return st
         st = _HostState()
         self._hosts[key] = st
-        rp = robotparser.RobotFileParser()
         robots_url = f'{key}/robots.txt'
+        # RFC 9309 (lustra/robots.py, as the tag list updater): groups of the same agent are merged and the longest rule wins.
+        # urllib.robotparser kept only the first 'User-agent: *' group: with Cloudflare's managed 'Allow: /' block first, a later
+        # 'Disallow: /api' of the site (manebooru.art, furbooru.org) was ignored
         try:
             r = self._raw_get(robots_url, count=True)
             if 200 <= r.status < 300:
-                rp.parse(r.text().splitlines())
+                rp = RobotsRules.parse(r.text(), ROBOTS_AGENT)
                 st.robots_status = 'found'
             elif 400 <= r.status < 500:
-                rp.allow_all = True  # RFC 9309: unavailable (4xx) -> no restrictions
                 st.robots_status = f'none ({r.status})'
+                rp = RobotsRules.allow_all(st.robots_status)  # RFC 9309: unavailable (4xx) -> no restrictions
             else:
-                rp.disallow_all = True  # RFC 9309: unreachable (5xx) -> complete disallow
                 st.robots_status = f'unreachable ({r.status})'
+                rp = RobotsRules.disallow_all(st.robots_status)  # RFC 9309: unreachable (5xx) -> complete disallow
         except FetchPolicyError:
             raise
         except Exception as err:
-            rp.disallow_all = True
             st.robots_status = f'unreachable ({type(err).__name__})'
+            rp = RobotsRules.disallow_all(st.robots_status)
         st.robots = rp
-        delay = rp.crawl_delay(ROBOTS_AGENT) or rp.crawl_delay('*')
-        st.crawl_delay = min(float(delay), 30.0) if delay else 0.0
+        st.crawl_delay = min(float(rp.crawl_delay), 30.0) if rp.crawl_delay else 0.0
         return st
 
     def robots_info(self, url: str) -> dict:
         st = self._robots(url)
         return {'status': st.robots_status, 'crawlDelay': st.crawl_delay,
-                'allowed': bool(st.robots and st.robots.can_fetch(ROBOTS_AGENT, url))}
+                'allowed': bool(st.robots and st.robots.allows(url))}
 
     def _pace(self, url: str, st: _HostState) -> None:
         interval = max(self.min_interval, st.crawl_delay)
@@ -256,7 +257,7 @@ class SafeFetcher:
             raise FetchPolicyError('R10', f'method {method} is not allowed')
         self._check_address(url)
         st = self._robots(url)
-        if not (st.robots and st.robots.can_fetch(ROBOTS_AGENT, url)):
+        if not (st.robots and st.robots.allows(url)):
             raise FetchPolicyError('R2', f'robots.txt of {host_of(url)} does not allow {redact_url(url)}')
         self._pace(url, st)
         headers = {'Accept': accept} if accept else {}
