@@ -39,6 +39,7 @@ from lustra.extgen.policy import check_source, errors  # noqa: E402
 from lustra.extgen.sandbox import check_draft, pack, run_sandbox  # noqa: E402
 from lustra.extgen.scaffold import create_draft, survey  # noqa: E402
 from lustra.extgen.templates import render_downloader  # noqa: E402
+from lustra.robots import RobotsRules  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HOST = 'fakebooru.test'
@@ -278,6 +279,28 @@ class FetchPolicyTests(TestCase):
         with self.assertRaises(FetchPolicyError) as ctx:  # no allow_local: plain http refused
             g.fetch(f'http://{HOST}/')
         self.assertEqual('R10', ctx.exception.rule)
+
+    def test_robots_rfc9309_groups_merged(self) -> None:
+        # Cloudflare's managed block ('User-agent: *' + 'Allow: /') comes before the site's own '*' group (manebooru.art,
+        # furbooru.org 2026-11-19): RFC 9309 merges both groups, so '/api' stays disallowed; urllib.robotparser used only the first
+        robots = ('User-agent: *\nContent-Signal: search=yes,ai-train=no\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /\n\n'
+                  'User-agent: *\nCrawl-delay: 2\nAllow: /images/*\nDisallow: /api\nDisallow: /search\n')
+        f = fake_fetcher(lambda u: fake_gelbooru(u, robots=robots))
+        with self.assertRaises(FetchPolicyError) as ctx:
+            f.fetch(f'{SITE}api/v1/json/search/images?q=*')
+        self.assertEqual('R2', ctx.exception.rule)
+        self.assertEqual(2.0, f.robots_info(SITE)['crawlDelay'])
+        self.assertTrue(f.robots_info(f'{SITE}images/1')['allowed'])
+        self.assertFalse(f.robots_info(f'{SITE}search?q=a')['allowed'])
+        # a Crawl-delay before any user-agent line (www.zerochan.net) applies to every agent; the larger delay wins
+        z = fake_fetcher(lambda u: fake_gelbooru(u, robots='Crawl-delay: 10\nUser-agent: *\nDisallow: /forum\n'))
+        self.assertEqual(10.0, z.robots_info(SITE)['crawlDelay'])
+        self.assertFalse(z.robots_info(f'{SITE}forum')['allowed'])
+        self.assertEqual(4.0, RobotsRules.parse('Crawl-delay: 2\nUser-agent: lustra\nCrawl-delay: 4\n', 'Lustra').crawl_delay)
+        self.assertEqual(0.0, RobotsRules.parse('Disallow: /x\nUser-agent: *\nAllow: /\n', 'Lustra').crawl_delay)
+        # the longest rule wins, not the first one: 'Allow: /' then 'Disallow: /*.json'
+        g = fake_fetcher(lambda u: fake_gelbooru(u, robots='User-agent: *\nAllow: /\nDisallow: /*.json\n'))
+        self.assertFalse(g.robots_info(f'{SITE}tags.json')['allowed'])
 
     def test_budget_redirect_challenge_and_no_cookies(self) -> None:
         f = fake_fetcher(budget=3)
