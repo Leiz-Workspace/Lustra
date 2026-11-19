@@ -169,7 +169,8 @@ const S = {
   chips: [], chipSeq: 0, selected: new Set(),
   // moved: the user picked a suggestion with the arrow keys (only then Enter takes a suggestion instead of the typed text)
   ac: { items: [], index: -1, seq: 0, moved: false, fuzzy: false },
-  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', showExcluded: false, seq: 0, hasMore: true, kind: 'all' },
+  // key: previewKey() of the query the posts answer (null after a failed Preview), see previewStale
+  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', key: '', showExcluded: false, seq: 0, hasMore: true, kind: 'all', dateFilter: '' },
   countSeq: 0,
   tagLists: null, // modules that have a local tag list (tags.status), null until known
   jobs: new Map(),
@@ -190,6 +191,8 @@ const STATE_VI = {
 };
 const GENDER_VI = { only_female: 'Nữ', only_male: 'Nam', both: 'Nam+Nữ', none: 'Không có', unknown: '?' };
 const CONF_VI = { high: 'cao', medium: 'vừa', low: 'thấp' };
+// why a preview post is excluded (search.preview excludedBy); other reasons (neg, required) read 'lọc cục bộ'
+const REASON_VI = { gender: 'lọc giới tính', date: 'lọc ngày' };
 const JOB_VI = { queued: 'Chờ', running: 'Đang chạy', cancelling: 'Đang huỷ', cancelled: 'Đã huỷ', done: 'Xong', failed: 'Lỗi' };
 
 const moduleInfo = (abbr) => S.modules.find((m) => m.abbr === abbr);
@@ -338,6 +341,7 @@ function saveGender(patch) {
   S.settings.download.gender = g;
   saveSettings({ download: { gender: g } });
   renderGenderFilter();
+  markPreviewStale(); // the posts on screen were filtered with the previous choice
 }
 $('#f-gender').addEventListener('click', (e) => {
   const b = e.target.closest('.pill');
@@ -835,7 +839,7 @@ tagInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || (e.key === 'Tab' && tagInput.value.trim())) {
     e.preventDefault();
     if (commitTyped(e.key === 'Enter' && e.shiftKey)) return;
-    if (e.key === 'Enter' && e.ctrlKey) startDownload();
+    if (e.key === 'Enter' && e.ctrlKey) downloadClicked();
     else if (e.key === 'Enter') runPreview(0);
     return;
   }
@@ -884,22 +888,33 @@ function onQueryChanged() {
 
 // ----- preview of another query: emptied when the query is, marked stale when it changed (until the next Preview) -----
 const RESULTS_HINT = $('#results-info').innerHTML;
+// everything a preview answer depends on: posts fetched with other tags, site, dates or content filters are not this query's
+function previewKey(q = currentQuery()) {
+  const g = q.gender || {};
+  const gender = g.select?.length ? [g.op, [...g.select].sort(), g.conf, !!g.strict, g.mode] : []; // no group picked: filter off
+  return JSON.stringify([q.module, q.tags, q.dateMin || '', q.dateMax || '', gender, !!q.safetyBlacklist]);
+}
+// P.key null: the last Preview failed, the grid on screen is an older answer
 function previewStale() {
   const P = S.preview;
-  return P.items.length > 0 && (P.tags !== queryString() || P.module !== S.module);
+  return P.items.length > 0 && P.key !== previewKey();
 }
 function markPreviewStale() {
   if (!S.preview.items.length) return;
   $('#grid').classList.toggle('stale', previewStale());
   if (previewStale() && !$('#results-info').dataset.stale) {
     $('#results-info').dataset.stale = '1';
-    $('#results-info').append(h('span', { class: 'stale-note' }, ' · kết quả của truy vấn trước: bấm Preview để xem truy vấn mới'));
+    $('#results-info').append(h('span', { class: 'stale-note' }, S.preview.key === null ? ' · các post bên dưới là kết quả cũ'
+      : ' · kết quả của truy vấn hoặc bộ lọc trước: bấm Preview để xem lại'));
   } else if (!previewStale() && $('#results-info').dataset.stale) renderGrid();
 }
+// date fields and the safety check box change what a preview shows (the gender filter: saveGender)
+['#f-datemin', '#f-datemax'].forEach((id) => ['input', 'change'].forEach((ev) => $(id).addEventListener(ev, markPreviewStale)));
+$('#f-safety').addEventListener('change', markPreviewStale);
 function clearPreview() {
   const P = S.preview;
   P.seq++; // an answer still on its way belongs to the cleared query
-  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', required: [], tasks: [], hasMore: true });
+  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', key: '', required: [], tasks: [], hasMore: true });
   P.selected.clear();
   gridCards.clear();
   $('#grid').replaceChildren();
@@ -976,8 +991,10 @@ $('#btn-count').addEventListener('click', async () => {
     const st = $('#query-status');
     st.className = r.count > 0 ? 'ok' : 'err';
     const parts = r.taskCounts?.length > 1 ? ` (tổng ${r.taskCounts.length} truy vấn con, có thể trùng)` : '';
+    // dateFilter 'local': the site cannot search by date, its count includes every date (the download filters them)
+    const dates = { local: ' (chưa trừ post ngoài khoảng ngày: site không đếm theo ngày)', unsupported: ` (${q.module} không lọc được theo ngày)` };
     st.textContent = `${r.approximate ? '≤ ' : ''}${nf.format(r.count)} kết quả${parts}`
-      + `${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}`;
+      + `${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}${dates[r.dateFilter] || ''}`;
     if (r.cfChallenge) toast('Website đang chặn bằng bot challenge. Xem mục Cài đặt → Kết nối (cookies theo site).', 'err');
   } catch (err) {
     if (seq === S.countSeq) toast(`Đếm thất bại: ${errMsg(err)}`, 'err');
@@ -1006,14 +1023,17 @@ async function runPreview(page = 0) {
   try {
     const r = await L.search.preview(q, page);
     if (seq !== S.preview.seq) return;
-    Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, required: r.requiredTags || [], tasks: r.tasks || [],
+    Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, key: previewKey(q), required: r.requiredTags || [], tasks: r.tasks || [],
       genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled, genderModel: r.genderModel || {},
-      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean' });
+      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean', dateFilter: r.dateFilter || '' });
     S.preview.selected.clear();
     renderGrid();
   } catch (err) {
     if (seq !== S.preview.seq) return;
+    S.preview.key = null; // the grid still on screen is not the answer to this request: dimmed until a Preview works
     $('#results-info').textContent = `Lỗi: ${errMsg(err)}`;
+    delete $('#results-info').dataset.stale;
+    markPreviewStale();
     toast(`Preview thất bại: ${errMsg(err)}`, 'err');
   } finally {
     if (seq === S.preview.seq) { btn.disabled = false; btn.textContent = 'Preview'; }
@@ -1052,9 +1072,16 @@ function renderGrid() {
   // merged multi-task pages hold up to pageSize posts of every sub-query
   const size = !P.pageSize ? '' : P.merged && P.tasks?.length > 1 ? ` (${P.pageSize}/trang mỗi truy vấn con)` : ` (tối đa ${P.pageSize}/trang)`;
   const parts = [`Trang ${P.page + 1}: ${P.items.length} post${size}`];
-  const byGender = P.items.filter((it) => (it.excludedBy || []).includes('gender')).length;
-  const byOther = P.items.filter((it) => it.excluded && !(it.excludedBy || []).includes('gender')).length;
+  const by = (reason) => P.items.filter((it) => (it.excludedBy || []).includes(reason)).length;
+  const byGender = by('gender');
+  const byDate = by('date');
+  const byOther = P.items.filter((it) => it.excluded && !(it.excludedBy || []).some((x) => REASON_VI[x])).length;
   if (byOther) parts.push(`${byOther} bị lọc cục bộ`);
+  // dates the site cannot search by (rule34 and most others; Danbooru can): each page hides its posts outside them, the
+  // download finds the pages by date
+  if (byDate) parts.push(`${byDate} post ngoài khoảng ngày bị ${P.showExcluded ? 'làm mờ' : 'ẩn'}`);
+  if (P.dateFilter === 'unchecked') parts.push('site không trả ngày đăng trong danh sách: preview chưa lọc theo ngày (tải xuống vẫn lọc)');
+  if (P.dateFilter === 'unsupported') parts.push(`${P.module} không lọc được theo ngày: khoảng ngày bị bỏ qua`);
   if (P.genderEnabled) {
     parts.push(`${byGender} loại theo giới tính`);
     const unknown = P.genderStats?.unknown || 0;
@@ -1081,14 +1108,16 @@ function renderGrid() {
   $('#pg-next').disabled = !P.hasMore;
   $('#pg-next').title = P.hasMore ? 'Trang sau' : 'Không còn trang sau';
   $('#grid-empty').hidden = items.length > 0;
-  $('#grid-empty').textContent = 'Không có post nào trên trang này.';
+  $('#grid-empty').textContent = byDate && byDate === P.items.length
+    ? 'Mọi post trên trang này nằm ngoài khoảng ngày. Site này không tìm theo ngày nên Preview chỉ lọc từng trang; Tải xuống tự tìm đúng các trang.'
+    : 'Không có post nào trên trang này.';
   gridCards.clear();
   $('#grid').replaceChildren(...items.map((it) => {
     const audio = it.mediaKind === 'audio';
     const img = it.preview || !audio ? h('img', { loading: 'lazy', alt: '', src: it.preview ? L.thumbUrl(it.preview, P.site) : '' })
       : h('div', { class: 'audio-ph', 'aria-hidden': 'true' }, '♪');
     const g = it.gender;
-    const why = (it.excludedBy || []).includes('gender') ? 'lọc giới tính' : 'lọc cục bộ';
+    const why = [...new Set((it.excludedBy || []).map((x) => REASON_VI[x] || 'lọc cục bộ'))].join(', ');
     const gTitle = g ? `Giới tính: ${GENDER_VI[g.label] || g.label}${g.conf ? ` · tin cậy ${CONF_VI[g.conf]}` : ''}`
       + `${g.evidence?.length ? ` (${g.evidence.join(', ')})` : ''}${g.flags?.length ? ` · cờ: ${g.flags.join(', ')}` : ''}`
       + `${g.source === 'model' ? ' · từ ảnh (model)' : g.source === 'tags+model' ? ' · tag + ảnh (model)' : ''}${g.modelSkipped ? ' · model chưa xem' : ''}\n` : '';
@@ -1141,7 +1170,9 @@ $('#sel-invert').addEventListener('click', () => {
   S.preview.items.filter((i) => !i.excluded).forEach((i) => (S.preview.selected.has(i.id) ? S.preview.selected.delete(i.id) : S.preview.selected.add(i.id)));
   syncSelection();
 });
-$('#dl-selected').addEventListener('click', () => {
+// "Tải đã chọn" downloads exactly the picked posts: the post limit, dates and gender filter of the filters panel would drop some
+// of them (limit 1 with two picked posts downloaded one), so they are left out. Media types and file options still apply
+function downloadSelected() {
   const ids = [...S.preview.selected];
   if (!ids.length) return;
   const module = S.preview.module;
@@ -1153,8 +1184,25 @@ $('#dl-selected').addEventListener('click', () => {
     if (ids.length > 200) { toast('Tối đa 200 post mỗi lần với module này', 'err'); return; }
     tags = `(${ids.map((i) => `id:${i}`).join('~')})`;
   }
-  startDownload({ module, tags, label: `${ids.length} post đã chọn từ: ${S.preview.tags}` });
-});
+  startDownload({ module, tags, label: `${ids.length} post đã chọn từ: ${S.preview.tags}`,
+    dateMin: '', dateMax: '', gender: { ...genderState(), select: [] }, options: { limit: 0 } });
+}
+$('#dl-selected').addEventListener('click', downloadSelected);
+// "Tải xuống" (and Ctrl+Enter) with posts picked in the preview on screen: the user may mean those posts, not the whole query
+// (whose first post, in ascending order, is its oldest one): ask. A stale preview is not asked about: the query is what changed
+function downloadClicked() {
+  const n = S.preview.selected.size;
+  if (!n || !S.preview.items.length || previewStale()) { startDownload(); return; }
+  const done = (pick) => { closeModal(); if (pick === 'selected') downloadSelected(); else if (pick === 'query') startDownload(); };
+  openModal(h('div', { class: 'qchange dl-ask' },
+    h('h2', { text: 'Tải những gì?' }),
+    h('p', { class: 'muted' }, `Bạn đang chọn ${n} post trong Preview. Tải cả truy vấn sẽ tải mọi post khớp với tag và bộ lọc.`),
+    h('div', { class: 'modal-actions' },
+      h('button', { class: 'btn ghost', onclick: () => done(null) }, 'Huỷ'),
+      h('button', { class: 'btn', id: 'dl-ask-query', onclick: () => done('query') }, 'Tải cả truy vấn'),
+      h('button', { class: 'btn primary', id: 'dl-ask-selected', onclick: () => done('selected') }, `Tải ${n} post đã chọn`))));
+  $('#dl-ask-selected')?.focus();
+}
 
 function lightboxMedia(it) {
   // video / audio play in the app (streamed through main, see streamMedia); images show the sample
@@ -1286,9 +1334,10 @@ async function startDownload(override = null) {
     }
     // "download selected" builds an id: query of this site: never sent to the other sites
     const sites = !override && multi.size && multiAvailable() ? [...multi] : null;
+    const options = { ...downloadOptions(), ...(override?.options || {}) };
     const job = await addJob((allowDuplicate) => (sites
-      ? L.jobs.startMulti({ ...q, path, options: downloadOptions(), allowDuplicate }, sites)
-      : L.jobs.start({ ...q, path, options: downloadOptions(), allowDuplicate })));
+      ? L.jobs.startMulti({ ...q, path, options, allowDuplicate }, sites)
+      : L.jobs.start({ ...q, path, options, allowDuplicate })));
     if (Array.isArray(job)) toast(`Đã thêm ${job.length} job, chạy lần lượt: ${job.map((j) => j.module).join(' → ')}`, 'ok');
     else if (job) toast(`Đã thêm job: ${q.label || q.tags}`, 'ok');
   } catch (err) {
@@ -1313,7 +1362,7 @@ async function rerunJob(id) {
     if (j) toast(`Đã chạy lại: ${j.label || j.tags}`, 'ok');
   } catch (err) { toast(`Không chạy lại được: ${errMsg(err)}`, 'err'); }
 }
-$('#btn-download').addEventListener('click', () => startDownload());
+$('#btn-download').addEventListener('click', downloadClicked);
 
 // Each job owns one DOM subtree that is created once and then patched in place (at most once per frame), so buttons
 // never get swapped out from under the cursor and an open log keeps its scroll position.
