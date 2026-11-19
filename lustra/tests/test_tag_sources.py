@@ -556,6 +556,165 @@ class _DataDirTest(TestCase):
         self.tmp.cleanup()
 
 
+class StorageOrderSite:
+    """A Gelbooru tag index in storage order, like rule34.xxx: a tag whose post count changes, and every new tag, goes to the end"""
+
+    def __init__(self, n: int = 20) -> None:
+        self.rows = [[i, f'tag{i:02d}', 100 + i] for i in range(1, n + 1)]
+        self.next_id = n + 1
+        self.pids: list[int] = []
+        self.fail_at: int | None = None  # answer 500 for this pid, once
+
+    def bump(self, name: str, count: int) -> None:
+        row = next(r for r in self.rows if r[1] == name)
+        self.rows.remove(row)
+        self.rows.append([row[0], name, count])
+
+    def add(self, name: str, count: int) -> None:
+        self.rows.append([self.next_id, name, count])
+        self.next_id += 1
+
+    def __call__(self, url: str, headers: dict) -> tuple[int, bytes, dict]:
+        p = url_parse.urlsplit(url)
+        if p.path == '/robots.txt':
+            return 404, b'none', {'content-type': 'text/html'}
+        qs = {k: v[0] for k, v in url_parse.parse_qs(p.query).items()}
+        pid, limit = int(qs['pid']), tags_updater.PAGE_LIMIT
+        if pid == self.fail_at:
+            self.fail_at = None
+            return 500, b'oops', {'content-type': 'text/plain'}
+        self.pids.append(pid)
+        rows = self.rows[pid * limit:(pid + 1) * limit]
+        if not rows:
+            return _xml('<?xml version="1.0" encoding="UTF-8"?><tag type="array"/>')
+        return _xml('<?xml version="1.0" encoding="UTF-8"?><tags type="array">' + ''.join(
+            f'<tag type="0" count="{n}" name="{name}" ambiguous="false" id="{i}"/>' for i, name, n in rows) + '</tags>')
+
+
+class TailUpdateTests(TestCase):
+    """Rule34: a weekly update reads only the last pages (new tags and tags whose count changed are there) and merges them"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = pathlib.Path(self.tmp.name)
+        self.patches = [mock.patch.object(tags_updater, 'PAGE_LIMIT', 3), mock.patch.object(tags_updater, 'TAIL_QUIET_PAGES', 2),
+                        mock.patch.object(tags_updater, 'TAIL_MIN_PAGES', 1), mock.patch.object(tags_updater, 'ENGINE_MIN_INTERVAL', 0.0)]
+        for x in self.patches:
+            x.start()
+        self.src = TagSource('zq', 'gelbooru_dapi', SITE, 'Fake', tail_updates=True)
+        self.site = StorageOrderSite()
+
+    def tearDown(self) -> None:
+        for x in self.patches:
+            x.stop()
+        self.tmp.cleanup()
+
+    def _update(self, **kw):
+        self.site.pids.clear()
+        notes: list[str] = []
+        src = kw.pop('source', self.src)
+        res = update_tag_list('zq', self.out, source=src, delay=0, allow_local=True, session=FakeSession(self.site),
+                              progress=lambda msg, _n: notes.append(msg), **kw)
+        return res, notes
+
+    def _meta(self) -> dict:
+        return json.loads((self.out / tags_updater.META_DIR / 'zq_tags.json').read_text(encoding='utf-8'))
+
+    def test_first_update_reads_everything_then_the_tail_only(self) -> None:
+        res, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual(list(range(8)), self.site.pids)  # 20 tags, 3 a page: 7 pages and the empty one
+        self.assertIn('full read of 7 pages', res.message)
+        self.assertEqual(7, self._meta()['pages'])
+        full_at = self._meta()['fullAt']
+        self.site.bump('tag03', 999)  # its count changed: its row moves to the end
+        self.site.add('newtag', 5)
+        res, notes = self._update()
+        self.assertTrue(res.written, res.message)
+        # back from the last read's end while pages change (6: tag03 moved there), 2 quiet pages (5, 4), then on to the empty page
+        self.assertEqual([6, 5, 4, 7], self.site.pids)
+        got = _read_list(res.path)
+        self.assertEqual(21, len(got))  # every tag of the full read is kept
+        self.assertEqual('999 posts (general)', got['tag03'])
+        self.assertEqual('5 posts (general)', got['newtag'])
+        self.assertEqual('101 posts (general)', got['tag01'])  # not in the tail: kept as it was
+        self.assertIn('the end of the list only: pages 4-6 of 7, 1 new, 1 updated', res.message)
+        self.assertTrue(any('reading the end of the list only' in n for n in notes), notes)
+        self.assertEqual(7, self._meta()['pages'])
+        self.assertEqual(full_at, self._meta()['fullAt'])  # a tail is not a full read
+
+    def test_the_tail_reads_back_as_far_as_the_counts_changed(self) -> None:
+        self._update()
+        changed = [f'tag{i:02d}' for i in range(5, 14)]  # 9 rows: 3 pages at the end
+        for i, name in enumerate(changed):
+            self.site.bump(name, 500 + i)
+        res, _ = self._update()
+        self.assertEqual([6, 5, 4, 3, 2, 1, 7], self.site.pids)  # 4 pages with changed rows (3 holds tag05), 2 quiet, the end
+        got = _read_list(res.path)
+        self.assertEqual({f'{500 + i} posts (general)' for i in range(9)}, {got[n] for n in changed})
+        with mock.patch.object(tags_updater, 'TAIL_MAX_PAGES', 2):  # never longer than TAIL_MAX_PAGES back
+            for name in changed:
+                self.site.bump(name, 1)
+            self._update()
+        self.assertEqual([6, 5, 7], self.site.pids)
+
+    def test_full_read_when_asked_too_old_or_unknown(self) -> None:
+        self._update()
+        res, _ = self._update(full=True)
+        self.assertEqual(0, self.site.pids[0])
+        self.assertIn('full read', res.message)
+        meta_path = self.out / tags_updater.META_DIR / 'zq_tags.json'
+        meta = self._meta()
+        meta['fullAt'] -= tags_updater.FULL_EVERY + 60
+        meta_path.write_text(json.dumps(meta), encoding='utf-8')
+        self._update()
+        self.assertEqual(0, self.site.pids[0])  # the last full read is too old
+        meta_path.unlink()
+        self._update(source=TagSource('zq', 'gelbooru_dapi', SITE, 'Fake'))
+        self.assertEqual(0, self.site.pids[0])  # a source without tail updates always reads everything
+        self.assertFalse(meta_path.exists())  # and keeps no read state
+        self._update()
+        self.assertEqual(0, self.site.pids[0])  # how the list was read is unknown
+        (self.out / 'zq_tags.json').unlink()
+        self._update()
+        self.assertEqual(0, self.site.pids[0])  # nothing to merge into
+
+    def test_a_stopped_full_read_continues_before_any_tail(self) -> None:
+        self._update()
+        self.site.fail_at = 3
+        with self.assertRaises(RuntimeError):
+            self._update(full=True)
+        res, notes = self._update()  # auto: the stopped full read goes on, it is not replaced by a tail
+        self.assertTrue(res.written, res.message)
+        self.assertEqual(3, self.site.pids[0])
+        self.assertIn('full read', res.message)
+        self.assertTrue(any('continuing a stopped update' in n for n in notes), notes)
+
+    def test_a_stopped_tail_continues_as_a_tail(self) -> None:
+        self._update()
+        self.site.add('late', 7)
+        self.site.bump('tag20', 1)
+        self.site.fail_at = 5
+        with self.assertRaises(RuntimeError):
+            self._update()
+        kept = json.loads((self.out / tags_updater.PARTIAL_DIR / 'zq_tags.json').read_text(encoding='utf-8'))
+        self.assertEqual('tail', kept['mode'])
+        self.assertLess(len(kept['tags']), 10)  # only the tail's tags, not the whole list
+        res, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual(5, self.site.pids[0])  # where it stopped, not the end of the list
+        got = _read_list(res.path)
+        self.assertEqual(21, len(got))
+        self.assertEqual('7 posts (general)', got['late'])
+        self.assertEqual('1 posts (general)', got['tag20'])
+
+    def test_read_tag_list_reads_what_write_tag_list_wrote(self) -> None:
+        tags = {'plain': (5, 'general'), 'say_"hi"': (3, 'artist'), 'back\\slash': (2, 'character'), 'ünïcode': (1, 'metadata')}
+        path = self.out / 'zz_tags.json'
+        tags_updater.write_tag_list(path, tags)
+        self.assertEqual(tags, tags_updater.read_tag_list(path))
+
+
 class KeyRateLimitTests(_DataDirTest):
     """A limit per API key (rule34.xxx: 60 requests every 60 s) that the site's admins may raise for the user's key: the app writes the
     new limit to <data dir>/ratelimit/limits.json, every core process paces the key with it, together (shared_rate_wait)"""
@@ -758,6 +917,117 @@ class LearnedTagListTests(_DataDirTest):
         with mock.patch.object(server.threading, 'Thread') as thread:  # Preview: nothing to learn, no thread
             server._learn_from_preview('rp', [{'id': '1', 'tags': ['a']}])
             thread.assert_not_called()
+
+
+JOB_FILE = '''# coding=UTF-8
+import re
+from html import unescape
+
+
+def read_tags(job):
+    \"\"\"the whole list in one answer (Shimmie's find_tags), plus what the checks of the core must clean up\"\"\"
+    text = job.get_text(f'{job.site}api/danbooru/find_tags', accept='text/xml')
+    job.log(f'{len(text)} bytes')
+    for count, name in re.findall(r"counts='(\\d+)' name='([^']*)'", text):
+        yield unescape(name), int(count), 'general'
+    yield 'two  words', 5, 'Character'
+    yield '', 3
+    yield 'bad_count', '7'
+'''
+
+
+class ExtensionJobTests(_DataDirTest):
+    """an extension ships its list and its own update (manifest tagUpdate): run only when asked, its requests through the core"""
+
+    def _install(self, ext_id: str = 'jobsite', abbr: str = 'jq', job: str = JOB_FILE, engine: str = 'custom',
+                 where: pathlib.Path | None = None) -> pathlib.Path:
+        m = make_manifest(ext_id=ext_id, abbr=abbr, name=ext_id.title(), site=SITE, engine=engine, media=['image'])
+        m.update({'tagList': f'{abbr}_tags.json', 'tagUpdate': {'entry': 'tags.py:read_tags'}, 'minSdkVersion': '1.1'})
+        folder = (where or self.data / 'extensions') / ext_id
+        folder.mkdir(parents=True)
+        (folder / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+        (folder / 'downloader.py').write_text('# test\n', encoding='utf-8')
+        (folder / 'tags.py').write_text(job, encoding='utf-8')
+        return folder
+
+    def _update(self, module: str, site=None, **kw):
+        session = FakeSession(site or FakeTagSite())
+        notes: list[str] = []
+        res = update_tag_list(module, self.data / 'tags', session=session, allow_local=True, min_interval=0.0,
+                              progress=lambda msg, _n: notes.append(msg), **kw)
+        return res, session, notes
+
+    def test_the_extensions_own_update_is_its_source_and_runs_only_when_asked(self) -> None:
+        self._install()
+        _install_engine = make_manifest(ext_id='fakebooru', abbr='fq', name='Fakebooru', site=SITE, engine='gelbooru_dapi', media=['image'])
+        (self.data / 'extensions' / 'fakebooru').mkdir(parents=True)
+        (self.data / 'extensions' / 'fakebooru' / 'manifest.json').write_text(json.dumps(_install_engine), encoding='utf-8')
+        src = tag_source('jq')
+        self.assertEqual((tags_updater.EXTENSION_JOB, 'tags.py:read_tags', True, True), (src.engine, src.job, src.on_demand, src.robots))
+        self.assertTrue(src.as_dict()['onDemand'])
+        self.assertFalse(tag_source('fq').on_demand)
+        self.assertIn('jq', [s.module for s in tag_sources()])
+        # the app's system schedule ('auto') leaves it out; naming the module runs it
+        auto = tags_updater._modules_arg('auto')
+        self.assertIn('fq', auto)
+        self.assertNotIn('jq', auto)
+        self.assertEqual([*auto, 'jq'], tags_updater._modules_arg('auto,jq'))
+        res, session, notes = self._update('jq')
+        self.assertTrue(res.written, res.message)
+        self.assertEqual([f'{SITE}robots.txt', f'{SITE}api/danbooru/find_tags'], [c[0] for c in session.calls])
+        # job.log and the skipped rows: one line each in the progress, the module in front once
+        self.assertEqual(1, sum(1 for n in notes if n.startswith('[jq] ') and n.endswith(' bytes')), notes)
+        self.assertEqual(1, sum(1 for n in notes if n.startswith('[jq] 2 of ') and 'skipped' in n), notes)
+        self.assertFalse([n for n in notes if '[jq] [jq]' in n], notes)
+        got = _read_list(self.data / 'tags' / 'jq_tags.json')
+        self.assertEqual({**EXPECTED, 'two_words': 5}, {k: int(v.split()[0]) for k, v in got.items()})
+        self.assertEqual('5 posts (character)', got['two_words'])
+
+    def test_the_job_reaches_only_its_site_and_follows_robots_txt(self) -> None:
+        self._install(job="def read_tags(job):\n    job.get_text('https://other.test/tags')\n    yield 'x', 1\n")
+        with self.assertRaises(TagSourceError) as ctx:
+            self._update('jq')
+        self.assertIn('not the site of this tag list', str(ctx.exception))
+        shutil.rmtree(self.data / 'extensions' / 'jobsite')
+        self._install()
+        with self.assertRaises(TagSourceError) as ctx:
+            self._update('jq', site=FakeTagSite(robots='User-agent: *\nDisallow: /api/\n'))
+        self.assertEqual('robots', ctx.exception.kind)
+        self.assertFalse((self.data / 'tags' / 'jq_tags.json').exists())
+
+    def test_a_job_that_gives_nothing_writes_nothing(self) -> None:
+        self._install(job="def read_tags(job):\n    yield ('only', 'bad')\n")
+        with self.assertRaises(RuntimeError) as ctx:
+            self._update('jq')
+        self.assertIn('gave no tag', str(ctx.exception))
+        self.assertFalse((self.data / 'tags' / 'jq_tags.json').exists())
+
+    def test_the_manifest_entry_is_checked(self) -> None:
+        base = make_manifest(ext_id='jobsite', abbr='jq', name='Jobsite', site=SITE, engine='custom', media=['image'])
+        ExtensionManifest.from_dict({**base, 'tagUpdate': {'entry': 'tags.py:read_tags'}}, None, 'user')
+        for bad in ({'entry': 'sub/tags.py:read_tags'}, {'entry': '../tags.py:read_tags'}, {'entry': 'tags:read_tags'},
+                    {'entry': 'tags.py:read_tags', 'every': 7}, {'entry': 5}, 'tags.py:read_tags'):
+            with self.assertRaises(Exception, msg=str(bad)):
+                ExtensionManifest.from_dict({**base, 'tagUpdate': bad}, None, 'user')
+
+    def test_the_generator_never_runs_a_drafts_job_but_checks_and_packs_it(self) -> None:
+        from lustra.extgen.sandbox import _policy_checks
+        marker = self.root / 'ran'
+        draft = self._install(ext_id='fakebooru', abbr='fq', where=self.root / 'drafts',
+                              job=f"import requests\n\n\ndef read_tags(job):\n    open({str(marker)!r}, 'w').close()\n    yield 'x', 1\n")
+        res = bundle_tag_list(draft, session=FakeSession(FakeTagSite()), allow_local=True, min_interval=0.0)
+        self.assertEqual('later', res['status'], res)
+        self.assertIn('only when you ask', res['message'])
+        self.assertFalse(marker.exists())
+        (draft / 'fq_tags.json').write_text('{\n"scenery": "900 posts (general)",\n"sky": "700 posts (general)"\n}\n', encoding='utf-8')
+        res = bundle_tag_list(draft, session=FakeSession(FakeTagSite()), allow_local=True, min_interval=0.0)
+        self.assertEqual(('bundled', 2), (res['status'], res['count']), res)
+        m = ExtensionManifest.load(draft / 'manifest.json', 'user')
+        bad = [c for c in _policy_checks(draft, m) if not c['ok']]
+        self.assertTrue(any(c['detail'].startswith('tags.py line 1') for c in bad), bad)
+        with zipfile.ZipFile(pack(draft, self.root / 'fakebooru.zip')['path']) as zf:
+            self.assertTrue({'fakebooru/tags.py', 'fakebooru/fq_tags.json'} <= set(zf.namelist()))
+        self.assertFalse(marker.exists())
 
 #
 #

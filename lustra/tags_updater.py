@@ -2,8 +2,9 @@
 """
 Lustra: tag lists updater (autocompletion / A-Z browser data)
 Writes '<abbr>_tags.json' files in the same format as bundled lists: {"tag": "N posts (type)", ...}, one tag per line, sorted.
-Sources (TagSource): the five reviewed modules (CURATED) and every extension made from a known engine, read from the
-'$generator.engine' and 'site' of its manifest (lustra.extgen writes them), see ENGINE_TAG_SOURCES / tag_source.
+Sources (TagSource): the five reviewed modules (CURATED), every extension with its own tag update ('tagUpdate' in its manifest: a
+function of the extension run only when the user asks, see TagJob / EXTENSION_JOB) and every extension made from a known engine,
+read from the '$generator.engine' and 'site' of its manifest (lustra.extgen writes them), see ENGINE_TAG_SOURCES / tag_source.
 Politeness, every source (docs/operations.md §3): the delay between requests, robots.txt Crawl-delay, Retry-After, a request
 budget per list, no cookies, a stop on bot challenges, the user's own API key only (Lustra ships no shared key). robots.txt
 (RFC 9309, lustra/robots.py) is applied strictly to extension sources; the five reviewed modules use the sites' documented
@@ -22,6 +23,7 @@ import csv
 import datetime
 import gzip
 import html
+import importlib.util
 import io
 import ipaddress
 import json
@@ -33,7 +35,7 @@ import socket
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from http.cookiejar import DefaultCookiePolicy
 from typing import NamedTuple
@@ -52,9 +54,10 @@ from .network import (
     shared_rate_wait,
 )
 from .robots import ROBOTS_MAX_BYTES, RobotsRules
+from .tags import TAG_TYPES_BY_NAME
 
-__all__ = ('CURATED', 'ENGINE_TAG_SOURCES', 'TagSource', 'TagSourceError', 'UpdateResult', 'tag_source', 'tag_sources',
-           'update_tag_list', 'write_tag_list')
+__all__ = ('CURATED', 'ENGINE_TAG_SOURCES', 'EXTENSION_JOB', 'TagJob', 'TagSource', 'TagSourceError', 'UpdateResult', 'tag_source',
+           'tag_sources', 'update_tag_list', 'write_tag_list')
 
 USER_AGENT = f'{LUSTRA_USER_AGENT} (tag list updater)'
 ROBOTS_AGENT = 'Lustra'
@@ -75,6 +78,17 @@ PARTIAL_DIR = '.partial'
 PARTIAL_MAX_AGE = 3 * 86400
 '''a list stopped half way (429, network, closed app) continues from where it stopped when updated again within this time'''
 PARTIAL_SAVE_PAGES = 20
+TAIL_QUIET_PAGES = 3
+TAIL_QUIET_SHARE = 0.01
+TAIL_MIN_PAGES = 5
+TAIL_MAX_PAGES = 800
+'''an update of a source whose listing keeps its recently changed tags last (TagSource.tail_updates) reads back from the end
+until TAIL_QUIET_PAGES pages in a row have at most TAIL_QUIET_SHARE of their tags changed (TAIL_MIN_PAGES at least,
+TAIL_MAX_PAGES at most, about half of rule34.xxx), see _iter_gelbooru_tail'''
+FULL_EVERY = 30 * 86400
+'''a full read at least this often: the tail does not see tags whose rows the database moved elsewhere'''
+META_DIR = '.meta'
+'''<out>/.meta/<abbr>_tags.json: how the list was read (pages, last full read), for the next update'''
 TIMEOUT = (15, 120)
 MAX_REDIRECTS = 5
 MAX_PAGE_BYTES = 32 * 1024 * 1024
@@ -113,6 +127,11 @@ ENGINE_TAG_SOURCES: dict[str, str] = {
     'shimmie_api': 'api/danbooru/find_tags, the whole list in one answer',
 }
 '''engines (lustra.extgen.engines) with a tag listing -> how the list is read'''
+EXTENSION_JOB = 'extension_job'
+'''engine of a source that is the extension's own tag update (manifest 'tagUpdate'): run only when the user asks for it'''
+JOB_TAG_MAX_LEN = 200
+JOB_TAG_TYPES = frozenset(str(k) for k in TAG_TYPES_BY_NAME)
+'''tag types an extension's update may give (others are written as 'general')'''
 
 
 class TagSourceError(RuntimeError):
@@ -139,20 +158,36 @@ class TagSource:
     curated: bool = False
     rate_limit: tuple[int, int] | None = None
     '''(requests, seconds) the site publishes for one API key; the user's key may have more (lustra.network.key_rate_limit)'''
+    tail_updates: bool = False
+    '''the listing keeps its recently changed and new tags on the last pages (rule34.xxx: the tag index is in storage order, a row
+    whose post count changes moves to the end): an update may read only the tail (TAIL_PAGES) and merge it, see update_tag_list'''
+    job: str = ''
+    '''the extension's own tag update, 'tags.py:read_tags' (manifest 'tagUpdate.entry'), engine EXTENSION_JOB'''
+    folder: str = ''
+    '''folder of the extension the job file is in'''
+
+    @property
+    def on_demand(self) -> bool:
+        """Run only when the user asks (Tags A-Z button, the command line naming the module): never by the app's system schedule
+        ('auto'), its update when it opens, or right after the install. The extension ships its list (manifest 'tagList')"""
+        return self.engine == EXTENSION_JOB
 
     @property
     def description(self) -> str:
+        if self.engine == EXTENSION_JOB:
+            return f'the extension\'s own update ({self.job}), run only when asked'
         return ENGINE_TAG_SOURCES.get(self.engine, '')
 
     def as_dict(self) -> dict:
         return {'module': self.module, 'name': self.name or self.module, 'engine': self.engine, 'site': self.site, 'key': self.key,
-                'keyFormat': self.key_format, 'robots': self.robots, 'curated': self.curated, 'description': self.description}
+                'keyFormat': self.key_format, 'robots': self.robots, 'curated': self.curated, 'description': self.description,
+                'tailUpdates': self.tail_updates, 'onDemand': self.on_demand, 'job': self.job}
 
 
 CURATED: dict[str, TagSource] = {
     # api.rule34.xxx: 'a limit of 60 requests every 60 second(s)' per key, shared with the downloads of that key
     'rx': TagSource('rx', 'gelbooru_dapi', 'https://api.rule34.xxx/', 'Rule34', 'required', 'KEY,USER_ID', robots=False, curated=True,
-                    rate_limit=RATE_LIMIT_RX),
+                    rate_limit=RATE_LIMIT_RX, tail_updates=True),
     'db': TagSource('db', 'danbooru_json', 'https://danbooru.donmai.us/', 'Danbooru', 'optional', 'API_KEY,LOGIN', robots=False,
                     curated=True),
     'xb': TagSource('xb', 'gelbooru_dapi', 'https://xbooru.com/', 'Xbooru', robots=False, curated=True),
@@ -185,12 +220,19 @@ def _manifests(installed_only: bool) -> list:
     return found
 
 
-def source_for_manifest(m) -> TagSource | None:
-    """Tag source of an extension: a reviewed one for the same site, else from its engine ('$generator.engine') and 'site'"""
+def source_for_manifest(m, jobs: bool = True) -> TagSource | None:
+    """Tag source of an extension: a reviewed one for the same site, else its own update ('tagUpdate', when jobs), else from its
+    engine ('$generator.engine') and 'site'. jobs=False: the extension generator, whose drafts' code runs only in its sandbox"""
     site = str(m.site or '')
     cur = CURATED.get(m.abbr)
     if cur and _base_domain(_host(cur.site)) == _base_domain(_host(site)):
         return cur
+    job = str((getattr(m, 'tagUpdate', None) or {}).get('entry', ''))
+    if job and jobs and m.path is not None and re_site.fullmatch(site) and not denied(site):
+        auth = m.auth if isinstance(m.auth, dict) else {}
+        key = 'required' if auth.get('apiKey') is True else 'none'
+        return TagSource(m.abbr, EXTENSION_JOB, site, m.name, key, str(auth.get('apiKeyFormat') or '') if key != 'none' else '',
+                         rate_limit=manifest_rate_limit(auth), job=job, folder=str(m.path))
     engine = str((m.generator or {}).get('engine', ''))
     if engine not in ENGINE_TAG_SOURCES or not re_site.fullmatch(site) or denied(site):
         return None
@@ -425,6 +467,82 @@ class PoliteClient:
 
 # ----- readers: (name, posts count, type name) -----
 
+class TagJob:
+    """What the tag update of an extension gets (manifest 'tagUpdate': 'tags.py:read_tags', called as read_tags(job)): the requests
+    of the core for its own site only, with the pacing, robots.txt, Retry-After, request budget and no cookies of every list.
+    read_tags yields (name, posts, type) for each tag of the site; the core checks each one, keeps those with min_posts or more and
+    writes the list. Exported by lustra.sdk (SDK 1.1)"""
+
+    def __init__(self, client: PoliteClient, api_key: str = '', min_posts: int = 1) -> None:
+        self._client = client
+        self.site = client.site
+        '''https://host/ of the extension (manifest 'site')'''
+        self.api_key = api_key
+        '''the user's own key for this module, '' without one'''
+        self.min_posts = min_posts
+
+    def get_text(self, url: str, accept: str = '') -> str:
+        """GET a page of the site (https, the site's host or a subdomain), its text. Raises when the site refuses or fails"""
+        return self._client.get(url, accept=accept or 'text/html').text
+
+    def get_json(self, url: str):
+        """GET an API answer of the site, its json (None when the body is not json)"""
+        return self._client.get(url, accept='application/json').json()
+
+    def log(self, text: str) -> None:
+        """A line of the update's progress (shown in the app; the update puts the module in front)"""
+        self._client._tell(redact(str(text))[:300])
+
+
+def _job_function(source: TagSource) -> Callable[[TagJob], Iterable]:
+    """The function named by 'tagUpdate.entry', from a .py file at the top of the extension folder"""
+    file_name, func_name = source.job.split(':', 1)
+    folder = pathlib.Path(source.folder).resolve()
+    path = (folder / file_name).resolve()
+    if path.parent != folder or path.suffix != '.py' or not path.is_file():
+        raise TagSourceError(f'{source.module}: tag update file \'{file_name}\' not found in the extension folder')
+    spec = importlib.util.spec_from_file_location(f'lustra_ext_tags_{source.module}', path)
+    if spec is None or spec.loader is None:
+        raise TagSourceError(f'{source.module}: unable to load \'{file_name}\'')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, func_name, None)
+    if not callable(func):
+        raise TagSourceError(f'{source.module}: \'{func_name}\' is not a function of \'{file_name}\'')
+    return func
+
+
+def _job_tag(item: object) -> tuple[str, int, str] | None:
+    """One (name, posts[, type]) of an extension's update, checked: names as one word (spaces as '_'), unknown types as general"""
+    if not isinstance(item, (tuple, list)) or len(item) not in (2, 3):
+        return None
+    name, posts = item[0], item[1]
+    kind = item[2] if len(item) == 3 else 'general'
+    if not isinstance(name, str) or isinstance(posts, bool) or not isinstance(posts, int) or posts < 0:
+        return None
+    name = '_'.join(name.split())
+    if not name or len(name) > JOB_TAG_MAX_LEN or not name.isprintable():
+        return None
+    kind = kind.strip().lower() if isinstance(kind, str) else ''
+    return name, posts, kind if kind in JOB_TAG_TYPES else 'general'
+
+
+def _iter_extension_job(source: TagSource, client: PoliteClient, api_key: str, min_posts: int) -> Iterator[tuple[str, int, str]]:
+    func = _job_function(source)
+    good = bad = 0
+    for item in func(TagJob(client, api_key, min_posts)) or ():
+        if (tag := _job_tag(item)) is None:
+            bad += 1
+            continue
+        good += 1
+        if tag[1] >= min_posts:
+            yield tag
+    if bad:
+        client._tell(f'{bad:d} of {good + bad:d} tags from {source.job} skipped: not (name, posts, type)')
+    if not good:
+        raise RuntimeError(f'{source.job} gave no tag (expected (name, posts, type) for each tag of the site)')
+
+
 def _int(value) -> int:
     try:
         return int(value or 0)
@@ -521,23 +639,70 @@ def _pid_pages(fetch: Callable[[int], list[dict]], max_pages: int, resume: Resum
             return
 
 
+def _gelbooru_tag_page(client: PoliteClient, auth: str, pid: int) -> list[dict]:
+    """Rows of one page of a Gelbooru 0.2 tag index (attribute dicts, xml-escaped values)"""
+    text = client.get(f'{client.site}index.php?page=dapi&s=tag&q=index&limit={PAGE_LIMIT:d}&pid={pid:d}{auth}').text
+    if 'Missing authentication' in text:
+        raise RuntimeError('website requires API key (use --api-key KEY,USER_ID)')
+    rows = ({k: v for k, _, v in re_attr.findall(m.group(1))} for m in re_xml_tag.finditer(text))
+    # an empty page is '<tag type="array"/>' on rule34.xxx (no id, no name); a tag with an empty name has an id: it counts
+    return [r for r in rows if r.get('id') or r.get('name')]
+
+
+def _gelbooru_tags(page: list[dict], min_posts: int) -> Iterator[tuple[str, int, str]]:
+    for t in page:
+        count = _int(t.get('count'))
+        if count >= min_posts and t.get('name'):
+            # xml attribute values are escaped: '&amp;' -> '&', '&#039;' -> "'"
+            yield html.unescape(t['name']), count, GELBOORU_TYPES.get(_int(t.get('type')), 'general')
+
+
 def _iter_gelbooru(client: PoliteClient, auth: str, min_posts: int, max_pages: int, resume: Resume | None = None) -> Iterator[tuple[str, int, str]]:
     # pid paging: the tag index of Gelbooru 0.2 sites (rule34.xxx at least) is not in id order and ignores order / orderby, so an
     # after_id cursor (the highest id of a page) skips every tag of a lower id that comes later: most of the popular ones
-    def fetch(pid: int) -> list[dict]:
-        text = client.get(f'{client.site}index.php?page=dapi&s=tag&q=index&limit={PAGE_LIMIT:d}&pid={pid:d}{auth}').text
-        if 'Missing authentication' in text:
-            raise RuntimeError('website requires API key (use --api-key KEY,USER_ID)')
-        rows = ({k: v for k, _, v in re_attr.findall(m.group(1))} for m in re_xml_tag.finditer(text))
-        # an empty page is '<tag type="array"/>' on rule34.xxx (no id, no name); a tag with an empty name has an id: it counts
-        return [r for r in rows if r.get('id') or r.get('name')]
+    for page in _pid_pages(lambda pid: _gelbooru_tag_page(client, auth, pid), max_pages, resume):
+        yield from _gelbooru_tags(page, min_posts)
 
-    for page in _pid_pages(fetch, max_pages, resume):
-        for t in page:
-            count = _int(t.get('count'))
-            if count >= min_posts and t.get('name'):
-                # xml attribute values are escaped: '&amp;' -> '&', '&#039;' -> "'"
-                yield html.unescape(t['name']), count, GELBOORU_TYPES.get(_int(t.get('type')), 'general')
+
+def _iter_gelbooru_tail(client: PoliteClient, auth: str, min_posts: int, base: dict[str, tuple[int, str]], state: dict,
+                        on_page: Callable[[dict], None] | None = None) -> Iterator[tuple[str, int, str]]:
+    """The tail of a tag index in storage order (TagSource.tail_updates): the rows whose post count changed since 'base' was read
+    sit together at the end (rule34.xxx 2026-11-19, 4 hours after a full read: 8,867 of 8,870 changed tags on the last 10 pages,
+    ~960 of 1,000 rows each, then pages without a change).
+    Reads back from the last read's end until TAIL_QUIET_PAGES pages in a row barely changed (TAIL_MIN_PAGES at least,
+    TAIL_MAX_PAGES at most), then forward from that end to the first empty page: the rows appended since, those that moved
+    during this read included. state (kept in the progress file, so a stopped tail continues): phase 'back' / 'fwd', pid
+    (next page), quiet (quiet pages in a row), back (pages read back), end (the last read's end, then this one's)"""
+    previous: tuple | None = None
+    while True:
+        back = state['phase'] == 'back'
+        if back and (state['pid'] < 0 or state['back'] >= TAIL_MAX_PAGES
+                     or (state['quiet'] >= TAIL_QUIET_PAGES and state['back'] >= TAIL_MIN_PAGES)):
+            state.update(phase='fwd', pid=state['end'])
+            previous = None
+            continue
+        pid = state['pid']
+        page = _gelbooru_tag_page(client, auth, pid)
+        ids = tuple((t.get('id'), t.get('name')) for t in page)
+        if page and ids == previous:
+            raise RuntimeError(f'page {pid:d} is the same as the page before: the site ignores pid, stopping')
+        previous = ids
+        if not back and not page:
+            state['end'] = pid
+            return
+        changed = 0
+        for name, count, ttype in _gelbooru_tags(page, min_posts):
+            if name in base and base[name][0] != count:
+                changed += 1
+            yield name, count, ttype
+        if back:
+            state['quiet'] = state['quiet'] + 1 if changed <= len(page) * TAIL_QUIET_SHARE else 0
+            state['back'] += 1
+            state['pid'] = pid - 1
+        else:
+            state['pid'] = pid + 1
+        if on_page:
+            on_page(state)
 
 
 def _iter_danbooru(client: PoliteClient, api_key: str, min_posts: int, max_pages: int, resume: Resume | None = None) -> Iterator[tuple[str, int, str]]:
@@ -678,6 +843,8 @@ def _iter_source(source: TagSource, client: PoliteClient, api_key: str, min_post
         return _iter_szurubooru(client, min_posts, max_pages)
     if engine == 'shimmie_api':
         return _iter_shimmie(client, min_posts)
+    if engine == EXTENSION_JOB:
+        return _iter_extension_job(source, client, api_key, min_posts)
     raise ValueError(f'engine \'{engine}\' has no tag list source')
 
 
@@ -723,8 +890,30 @@ def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None
         tmp.unlink(missing_ok=True)
 
 
-def _load_partial(path: pathlib.Path, src: TagSource) -> tuple[int, dict[str, tuple[int, str]]] | None:
-    """(cursor, tags) of a list stopped half way, None when there is none (or it belongs to another site / engine, or is too old)"""
+re_list_value = re.compile(r'^([0-9]+) posts(?: \(([^()]*)\))?$')
+
+
+def read_tag_list(path: pathlib.Path) -> dict[str, tuple[int, str]]:
+    """{name: (posts, type)} of a list file in the bundled format (write_tag_list). Lines it cannot read are skipped"""
+    from .tagsdb import TagsDB
+    tags: dict[str, tuple[int, str]] = {}
+    with open(path, encoding=UTF8) as f:
+        for line in f:
+            if line.strip() in ('{', '}', ''):
+                continue
+            try:
+                name, value = TagsDB._parse_line(line)
+            except (ValueError, StopIteration):
+                continue
+            if m := re_list_value.match(value):
+                tags[name] = (int(m.group(1)), m.group(2) or 'general')
+    return tags
+
+
+def _load_partial(path: pathlib.Path, src: TagSource) -> tuple[str, int, dict[str, tuple[int, str]], dict] | None:
+    """(mode, cursor, tags, state) of a list stopped half way, None when there is none (or it belongs to another site / engine, or
+    is too old). mode: 'full' or 'tail' (only the tags of that read, merged at the end; state: _iter_gelbooru_tail's); files
+    written before tails existed are 'full'"""
     try:
         d = json.loads(path.read_text(encoding=UTF8))
     except (OSError, ValueError):
@@ -733,30 +922,56 @@ def _load_partial(path: pathlib.Path, src: TagSource) -> tuple[int, dict[str, tu
             or d.get('cursorKind') != RESUMABLE_ENGINES.get(src.engine) or time.time() - float(d.get('saved') or 0) > PARTIAL_MAX_AGE):
         return None
     tags = {str(k): (int(v[0]), str(v[1])) for k, v in (d.get('tags') or {}).items() if isinstance(v, list) and len(v) == 2}
-    return int(d.get('cursor') or 0), tags
+    state = d.get('state') if isinstance(d.get('state'), dict) else {}
+    return ('tail' if d.get('mode') == 'tail' else 'full'), int(d.get('cursor') or 0), tags, state
 
 
-def _save_partial(path: pathlib.Path, src: TagSource, cursor: int, tags: dict[str, tuple[int, str]]) -> None:
+def _save_partial(path: pathlib.Path, src: TagSource, cursor: int, tags: dict[str, tuple[int, str]], mode: str = 'full',
+                  state: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f'{path.name}.{uuid.uuid4().hex[:8]}.tmp')
     tmp.write_text(json.dumps({'site': src.site, 'engine': src.engine, 'cursorKind': RESUMABLE_ENGINES.get(src.engine), 'cursor': cursor,
-                               'saved': time.time(),
+                               'mode': mode, 'state': state or {}, 'saved': time.time(),
                                'tags': {k: [c, ty] for k, (c, ty) in tags.items()}}, ensure_ascii=False), encoding=UTF8)
+    os.replace(tmp, path)
+
+
+def _load_meta(path: pathlib.Path, src: TagSource) -> dict | None:
+    """How the list of <out> was read last ({pages, fullAt, updatedAt}), None when unknown or for another site / engine"""
+    try:
+        d = json.loads(path.read_text(encoding=UTF8))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or d.get('site') != src.site or d.get('engine') != src.engine:
+        return None
+    try:
+        return {'pages': int(d['pages']), 'fullAt': float(d['fullAt']), 'updatedAt': float(d.get('updatedAt') or 0)}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _save_meta(path: pathlib.Path, src: TagSource, pages: int, full_at: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'{path.name}.{uuid.uuid4().hex[:8]}.tmp')
+    tmp.write_text(json.dumps({'site': src.site, 'engine': src.engine, 'pages': pages, 'fullAt': full_at, 'updatedAt': time.time()}),
+                   encoding=UTF8)
     os.replace(tmp, path)
 
 
 def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.5, max_pages=0, api_key='', force=False,
                     progress: ProgressCb | None = None, reference: pathlib.Path | None = None, source: TagSource | None = None,
                     budget=REQUEST_BUDGET, allow_local=False, session=None, min_interval: float | None = None,
-                    deadline: float | None = None) -> UpdateResult:
+                    deadline: float | None = None, full: bool = False) -> UpdateResult:
     """reference: the list currently in use (may live in another folder). The sanity check compares against the bigger one,
     otherwise a failed first update into an empty folder would shadow the bundled list with an almost empty newer file.
     source: default tag_source(module); allow_local / session: tests (fake sites), session: also the generator's own transport;
-    min_interval / deadline: see PoliteClient (the generator bounds the time a draft waits for its list)"""
+    min_interval / deadline: see PoliteClient (the generator bounds the time a draft waits for its list).
+    A source with tail_updates reads only its last TAIL_PAGES pages and merges them into the list of <out> when that list came
+    from a full read less than FULL_EVERY ago (<out>/.meta/); full=True, or no such read, reads everything"""
     src = source or tag_source(module)
     if src is None:
-        raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions made from the engines '
-                         f'{", ".join(ENGINE_TAG_SOURCES)})')
+        raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions with their own '
+                         f'update (manifest tagUpdate); extensions made from the engines {", ".join(ENGINE_TAG_SOURCES)})')
     out_dir.mkdir(parents=True, exist_ok=True)
     res = UpdateResult(module, out_dir / f'{module}_tags.json')
     res.previous = max(_count_lines(res.path), _count_lines(reference) if reference else 0)
@@ -768,39 +983,82 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     # page / id cursor listings keep their progress in <out>/.partial/: a list stopped half way (rate limit, network, closed app)
     # continues from its cursor next time instead of starting over (the app only reads *_tags.json of <out> itself)
     partial_path = out_dir / PARTIAL_DIR / f'{module}_tags.json'
+    meta_path = out_dir / META_DIR / f'{module}_tags.json'
+    resumable = src.engine in RESUMABLE_ENGINES and not max_pages
+    meta = _load_meta(meta_path, src) if resumable and src.tail_updates and src.engine == 'gelbooru_dapi' else None
+    saved = _load_partial(partial_path, src) if resumable else None
+    # the end of the list only: when the list of <out> came from a full read that is recent enough, and no full read waits to
+    # continue
+    tail = bool(meta and not full and res.path.is_file() and meta['pages'] > 0 and time.time() - meta['fullAt'] < FULL_EVERY
+                and not (saved and saved[0] == 'full'))
+    mode = 'tail' if tail else 'full'
+    base: dict[str, tuple[int, str]] = read_tag_list(res.path) if tail else {}
     resume: Resume | None = None
-    if src.engine in RESUMABLE_ENGINES and not max_pages:
+    state: dict | None = None
+    pages = [0]
+    if resumable and mode == 'full':
         start = 0
-        if saved := _load_partial(partial_path, src):
-            start, tags = saved
+        if saved and saved[0] == 'full':
+            _mode, start, tags, _state = saved
             if progress:
                 where = f'page {start:d}' if RESUMABLE_ENGINES[src.engine] == 'pid' else f'id {start:d}'
                 progress(f'[{module}] continuing a stopped update: {len(tags):d} tags kept, from {where}', len(tags))
-        pages = [0]
 
         def on_page(cursor: int) -> None:
             pages[0] += 1
             if pages[0] % PARTIAL_SAVE_PAGES == 0:
                 _save_partial(partial_path, src, cursor, tags)
         resume = Resume(start, on_page)
+    elif mode == 'tail':
+        state = {'phase': 'back', 'pid': meta['pages'] - 1, 'quiet': 0, 'back': 0, 'end': meta['pages']}
+        if saved and saved[0] == 'tail' and saved[3].get('phase') in ('back', 'fwd'):
+            _mode, _cursor, tags, state = saved
+            if progress:
+                progress(f'[{module}] continuing a stopped update: {len(tags):d} tags kept, from page {state["pid"]:d}', len(tags))
+        elif progress:
+            progress(f'[{module}] reading the end of the list only, back from page {state["pid"]:d} (a full read every '
+                     f'{FULL_EVERY // 86400:d} days, the last one {(time.time() - meta["fullAt"]) / 86400:.0f} days ago)', 0)
+
+        def on_tail_page(st: dict) -> None:
+            pages[0] += 1
+            if pages[0] % PARTIAL_SAVE_PAGES == 0:
+                _save_partial(partial_path, src, st['pid'], tags, 'tail', st)
     try:
-        for i, (name, count, ttype) in enumerate(_iter_source(src, client, api_key, min_posts, max_pages, resume)):
+        source_iter = (_iter_gelbooru_tail(client, _dapi_auth(src, api_key), min_posts, base, state, on_tail_page) if state is not None
+                       else _iter_source(src, client, api_key, min_posts, max_pages, resume))
+        for i, (name, count, ttype) in enumerate(source_iter):
             if name not in tags or tags[name][0] < count:
                 tags[name] = (count, ttype)
             if progress and i % 5000 == 0:
                 progress(f'[{module}] {len(tags):d} tags...', len(tags))
     except BaseException:
-        if resume is not None and tags:
+        if (resume is not None or state is not None) and tags:
             with contextlib.suppress(OSError):
-                _save_partial(partial_path, src, resume.cursor, tags)
+                if state is not None:
+                    _save_partial(partial_path, src, state['pid'], tags, 'tail', state)
+                else:
+                    _save_partial(partial_path, src, resume.cursor, tags)
             if progress:
                 progress(f'[{module}] stopped: {len(tags):d} tags kept, the next update continues from there', len(tags))
         raise
     finally:
         res.requests = client.used
         res.waited = client.waited
-    if resume is not None:
+    if resume is not None or state is not None:
         partial_path.unlink(missing_ok=True)  # the listing is complete: nothing to continue
+    detail = ''
+    end_page = state['end'] if state is not None else resume.cursor if resume is not None else 0
+    if state is not None:
+        # the tail's counts replace the list's; tags it did not see keep theirs until the next full read
+        fetched = tags
+        tags = base
+        added = sum(1 for n in fetched if n not in tags)
+        changed = sum(1 for n, v in fetched.items() if n in tags and tags[n] != v)
+        tags.update(fetched)
+        detail = (f', the end of the list only: pages {meta["pages"] - state["back"]:d}-{end_page - 1:d} of {end_page:d}, '
+                  f'{added:d} new, {changed:d} updated')
+    elif resume is not None and src.tail_updates:
+        detail = f', full read of {end_page:d} pages'
     res.count = len(tags)
     if res.count == 0:
         res.message = 'not written: no tags fetched'
@@ -812,17 +1070,20 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
         return res
     write_tag_list(res.path, tags)
     res.written = True
+    if src.tail_updates and src.engine == 'gelbooru_dapi' and (resume is not None or state is not None):
+        _save_meta(meta_path, src, end_page, meta['fullAt'] if state is not None else time.time())
     waited = f', waited {res.waited:.0f} s for the site\'s rate limit' if res.waited else ''
-    res.message = f'written {res.count:d} tags (was {res.previous:d}, {res.requests:d} requests{waited})'
+    res.message = f'written {res.count:d} tags (was {res.previous:d}, {res.requests:d} requests{detail}{waited})'
     return res
 
 
 def _modules_arg(value: str) -> list[str]:
-    """'auto': every installed module with a tag source that needs no key of the user (the app's system schedule)"""
+    """'auto': every installed module with a tag source that needs no key of the user (the app's system schedule), except the
+    extensions' own updates: those run only when asked (TagSource.on_demand), here when the module is named"""
     mods: list[str] = []
     for m in (x.strip() for x in value.split(',')):
         if m == 'auto':
-            mods += [s.module for s in tag_sources() if s.key != 'required']
+            mods += [s.module for s in tag_sources() if s.key != 'required' and not s.on_demand]
         elif m:
             mods.append(m)
     return list(dict.fromkeys(mods))
@@ -849,7 +1110,8 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
     ap = argparse.ArgumentParser(prog='lustra-core tags',
                                  description='Update Lustra tag lists used for autocompletion and the A-Z tag browser')
     ap.add_argument('--modules', default='rx,db', help=f'comma separated module abbreviations (reviewed: {",".join(CURATED)}; '
-                    f'extensions made from a known engine), or \'auto\': every installed module that needs no API key')
+                    f'extensions with their own update or made from a known engine), or \'auto\': every installed module that '
+                    f'needs no API key, except the extensions\' own updates (run only when their module is named)')
     ap.add_argument('--out', default=str(default_out or data_dir() / 'tags'), help='output folder (default: <data dir>/tags)')
     ap.add_argument('--min-posts', type=int, default=1, help='skip tags with fewer posts (default 1)')
     ap.add_argument('--delay', type=float, default=0.5, help='delay between requests, seconds (be polite, default 0.5; a robots.txt '
@@ -858,6 +1120,8 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
     ap.add_argument('--max-pages', type=int, default=0, help='debug: stop after N pages (partial lists are not written without --force)')
     ap.add_argument('--api-key', default='', help='KEY,USER_ID (gelbooru based) or API_KEY,LOGIN (danbooru based), for every module')
     ap.add_argument('--force', action='store_true', help='write even if the sanity check fails')
+    ap.add_argument('--full', action='store_true', help=f'read the whole list even where the last pages would do (Rule34: a full read '
+                    f'happens anyway every {FULL_EVERY // 86400:d} days)')
     ap.add_argument('--log', default='', help='append the output to this file (scheduled runs: no shell redirection needed)')
     args = ap.parse_args(argv)
     log = open(args.log, 'a', encoding=UTF8) if args.log else None  # noqa: SIM115 (closed below)
@@ -883,7 +1147,7 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
                     say(f'[{time.strftime("%F %T")}] {module}: updating ({src.name or module}: {src.description})...')
                 key = args.api_key or os.environ.get(f'LUSTRA_API_KEY_{module.upper()}', '').strip()
                 res = update_tag_list(module, pathlib.Path(args.out), min_posts=args.min_posts, delay=args.delay, max_pages=args.max_pages,
-                                      api_key=key, force=args.force, progress=lambda msg, _n: say(f'  {msg}'), source=src,
+                                      api_key=key, force=args.force, full=args.full, progress=lambda msg, _n: say(f'  {msg}'), source=src,
                                       budget=args.max_requests, reference=in_use.get(module))
                 say(f'[{time.strftime("%F %T")}] {module}: {res.message} in {time.monotonic() - started:.0f}s -> {res.path}')
             except Exception as err:

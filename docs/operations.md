@@ -51,6 +51,11 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 ## 3. Cập nhật danh sách tag (autocomplete, Tags A–Z)
 **Nguồn danh sách** (`lustra/tags_updater.py`, lệnh `lustra-core tags` / `python -m lustra.tags_updater`):
 - 5 module đã duyệt: Rule34 (`rx`, cần khoá của bạn), Danbooru (`db`, dùng khoá nếu có), Xbooru (`xb`), Bbooru (`bb`), e621 (`en`).
+- Extension mang job cập nhật của riêng nó (manifest `"tagUpdate": {"entry": "tags.py:read_tags"}`, `"minSdkVersion": "1.1"`; plan [ext-tag-jobs](plans/ext-tag-jobs.md), chốt với chủ repo ngày 2026-11-19):
+  - Extension mang sẵn danh sách (`tagList`, file cạnh `manifest.json`). Job chỉ chạy khi người dùng yêu cầu: nút "Cập nhật" ở Tags A–Z, hoặc `lustra-core tags --modules <abbr>`. Lịch hệ thống (`auto`), việc tự cập nhật khi mở app và việc tải ngay sau khi cài không chạy job.
+  - `read_tags(job)` nhận `lustra.sdk.TagJob` (`site`, `api_key`, `min_posts`, `get_text`, `get_json`, `log`) và yield `(tên, số post, loại)`. Request của job đi qua cùng `PoliteClient` với các nguồn khác: chỉ https tới site của extension, nhịp tối thiểu 1 giây, robots.txt áp chặt, Retry-After, giới hạn của khoá, ngân sách request, không cookie.
+  - Lõi đổi khoảng trắng trong tên thành `_`, bỏ dòng sai, đưa loại lạ về `general`, lọc theo `--min-posts`. Job không cho tag nào thì không ghi gì.
+  - Job thay cho bộ đọc theo engine; extension chưa có `tagUpdate` vẫn dùng bộ đọc theo engine (bảng dưới). Trình tạo extension không chạy `tags.py` của bản nháp (code bản nháp chỉ chạy trong sandbox), nhưng kiểm nó bằng luật tĩnh R10 và đóng gói nó vào zip.
 - Mọi extension tạo từ một engine có danh sách tag. Updater đọc `$generator.engine` và `site` trong manifest; trình tạo extension (`lustra.extgen`) ghi sẵn hai trường này, kèm `tagList: "<abbr>_tags.json"`.
 
 | Engine | Cách đọc danh sách | Khoá |
@@ -99,6 +104,16 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Bộ đọc chỉ dừng ở trang rỗng: trang có ít hơn 1.000 tag (ví dụ có tag tên rỗng) không phải trang cuối.
   - Trang càng sâu site trả càng chậm (trang 5: 0,5 giây, trang 1.200: 4 giây, trang 1.600: 6–7 giây). Một lần cập nhật đầy đủ mất khoảng 1,5–2 giờ. Giới hạn của khoá chỉ là nút thắt ở khoảng 100 trang đầu (site trả nhanh hơn 1 giây), nên khoá được cấp thêm request gần như không làm việc này nhanh hơn; nó giúp nhiều hơn cho việc tải ảnh.
   - Đóng app giữa chừng không sao: lần sau tải tiếp từ trang đã dừng.
+- **Rule34: chỉ đọc phần cuối danh sách** (bản sau 2.0.6; `TagSource.tail_updates`):
+  - Các lần cập nhật sau một lần đọc đầy đủ chỉ đọc **phần cuối danh sách**. Lý do: tag vừa đổi số post bị dời xuống cuối và nằm liền thành một khối. Đo ngày 2026-11-19, 4 giờ sau một lần đọc đầy đủ: 8.867 trong 8.870 tag đổi số post nằm ở 10 trang cuối, mỗi trang khoảng 960/1.000 dòng đổi; các trang trước đó gần như không đổi.
+  - **Đọc lùi:** bắt đầu từ trang cuối của lần đọc trước, dừng khi gặp 3 trang liền "yên" (tối đa 1% tag đổi số post). Ít nhất 5 trang, nhiều nhất 800 trang.
+  - **Đọc tiếp phần mới:** sau đó đọc từ trang cuối cũ tới trang rỗng, để lấy các dòng mới thêm, kể cả các dòng bị dời xuống cuối trong lúc đang đọc.
+  - **Gộp:** số post đọc được thay số cũ; tag mới được thêm; tag không thấy giữ nguyên tới lần đọc đầy đủ sau.
+  - **Đọc đầy đủ** khi: chưa từng đọc đầy đủ (cần `<thư mục tags>/.meta/rx_tags.json`), lần đọc đầy đủ đã quá 30 ngày, có một lần đọc đầy đủ đang dở, hoặc khi người dùng yêu cầu. Yêu cầu từ app: Tags A–Z → **Đọc lại toàn bộ**; từ dòng lệnh: `--full`.
+  - **Chỉ lần đọc đầy đủ thấy được:**
+    - tag mới tạo giữa danh sách (đo được 12 tag mới trong 4 giờ, có cái không nằm ở cuối);
+    - tag mà lần đọc đầy đủ trước đã sót. Đọc hơn 1 giờ thì các dòng bị dời chỗ trong lúc đọc, nên lần đọc ngày 18/11 sót khoảng 1 tag mỗi trang;
+    - tag giảm về 0 post.
 - **Tải tiếp sau khi dừng giữa chừng** (Gelbooru: theo số trang `pid`; Danbooru: theo con trỏ id):
   - tiến độ được lưu ở `<thư mục tags>/.partial/<module>_tags.json` sau mỗi 20 trang và ngay khi dừng (429, mạng, đóng app);
   - lần cập nhật sau, trong vòng 3 ngày, tải tiếp từ con trỏ đó; xong thì xoá file tiến độ;
@@ -114,17 +129,17 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 
 **Trong app** (Tags A–Z → Danh sách tag):
 - Bảng liệt kê mọi extension đã cài, có cột "Nguồn" (rê chuột để xem site, cách đọc, có tuân thủ robots.txt không).
-  - Module có nguồn: có nút "Cập nhật".
+  - Module có nguồn: có nút "Cập nhật". Với extension có job riêng, nút này là cách duy nhất để chạy job.
   - Module bắt buộc khoá mà chưa có khoá: ghi "cần API key" (nhập ở Cài đặt → API key).
   - Module không có nguồn: cột "Nguồn" ghi "học từ post đã xem / đã tải", có nút "Học từ file đã tải"; cột dung lượng ghi "(đã học)" khi danh sách là danh sách học được. Module không có nguồn nhưng có danh sách đi kèm (ví dụ `2tags/` của repo) ghi "không có nguồn".
-  - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay.
+  - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay. Extension có job riêng thì không: job chỉ chạy khi bấm nút.
 - "Tự cập nhật mỗi N ngày khi mở app": Rule34 và Danbooru, bằng khoá đã lưu; Rule34 bị bỏ qua khi chưa có khoá.
 - "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" (mỗi tuần vào thứ Hai, hoặc mỗi ngày, lúc khoảng 4 giờ sáng):
   - Linux và macOS: app thêm hoặc xoá một khối có đánh dấu `# BEGIN lustra-tags` … `# END lustra-tags` trong crontab của người dùng, không đụng các dòng khác.
   - Windows: tác vụ `Lustra tag lists` của Task Scheduler.
   - Bản AppImage không hỗ trợ, vì lõi chỉ tồn tại khi app chạy.
 - Lịch chạy `lustra-core tags --modules auto --out <thư mục dữ liệu>/tags --min-posts 2 --log <thư mục dữ liệu>/logs/tags-schedule.log`; bản phát triển chạy `python -m lustra.tags_updater`.
-  - `auto` là mọi module đã cài có nguồn tag và không bắt buộc khoá: db, xb, bb, en (nếu đã cài) và các extension tạo từ engine.
+  - `auto` là mọi module đã cài có nguồn tag và không bắt buộc khoá: db, xb, bb, en (nếu đã cài) và các extension tạo từ engine. Extension có job riêng (`tagUpdate`) không nằm trong `auto`.
   - Danh sách module được tính lúc lịch chạy, nên extension cài sau cũng được cập nhật mà không cần ghi lại mục lịch.
 - Lịch không đọc được khoá đã mã hoá của app, nên module bắt buộc khoá (Rule34, extension Gelbooru cần khoá) không chạy theo lịch.
 - App ghi lại mục lịch mỗi lần mở, nên đường dẫn lõi luôn đúng sau khi cập nhật app.

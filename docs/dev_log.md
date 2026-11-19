@@ -844,7 +844,77 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - minimatch 11 cho công cụ build (7ao, PR #20; cảnh báo Dependabot #1 đóng khi bản này lên `production`).
 - **Phát hành:** version 2.0.6 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r6`), ghi chú `docs/releases/v2.0.6.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7aq)
+### 7ar. Rule34: cập nhật chỉ đọc phần cuối danh sách — 2026-11-19
+- **Vấn đề:** cập nhật đầy đủ danh sách Rule34 mất khoảng 1.620 request và 1–2 giờ, vì trang sâu chậm (4–7 giây) chứ không phải vì giới hạn request. Cập nhật hằng tuần mà đọc lại cả danh sách thì quá nặng.
+- **Đo thật** (khoá của chủ repo, 4 giờ sau lần đọc đầy đủ 20:50 ngày 18): đọc 200 trang cuối (1417–1616, 210 request, 25 phút) rồi so với danh sách đầy đủ.
+  - **8.870 tag đổi số post, 8.867 trong số đó nằm ở trang 1607–1616.** Mỗi trang này có khoảng 960/1.000 dòng đổi; từ trang 1606 trở về trước gần như không đổi (0–1 dòng mỗi trang). Ranh giới rất sắc.
+  - Tag hay dùng nhất nằm trong 100 trang cuối: 96% của top 100, 98,8% của top 1.000, 99% của top 10.000.
+  - **232 tag "mới" rải khắp 200 trang**, nhưng chỉ 12 tag có id mới. Số còn lại (id trung vị 2,3 triệu) là tag cũ mà lần đọc đầy đủ đã sót: các dòng bị dời chỗ trong lúc đọc hơn 1 giờ.
+  - **Kết luận:** số trang cần đọc tuỳ khoảng thời gian từ lần trước (sau 4 giờ là 10 trang, sau một tuần sẽ nhiều hơn), nên một số trang cố định không đủ an toàn.
+- **Làm (`lustra/tags_updater.py`):**
+  - `TagSource.tail_updates` (rx).
+  - `<thư mục tags>/.meta/rx_tags.json` ghi số trang và thời điểm của lần đọc đầy đủ.
+  - `_iter_gelbooru_tail` đọc lùi từ cuối lần đọc trước tới khi gặp 3 trang liền yên (≤ 1% tag đổi số post; ít nhất 5, nhiều nhất 800 trang). Sau đó đọc tiếp từ cuối cũ tới trang rỗng.
+  - Kết quả được gộp vào danh sách hiện có: số mới thay số cũ, tag mới được thêm, tag không thấy giữ nguyên.
+  - Đọc đầy đủ khi: chưa có `.meta`, lần đầy đủ quá 30 ngày, có lần đầy đủ đang dở, hoặc khi được yêu cầu (`--full`, RPC `tags.update` `full`, nút **Đọc lại toàn bộ** ở Tags A–Z).
+  - Một lần đọc phần cuối bị dừng cũng tải tiếp được: trạng thái nằm trong file tiến độ, chỉ chứa tag của lần đọc đó.
+  - `read_tag_list` đọc lại file danh sách, dùng `TagsDB._parse_line`.
+- **Chạy thật bằng code mới** (bản sao của danh sách ngày 18 với `.meta` của lần đọc đó):
+  - 15 request, 86 giây, so với khoảng 1.620 request và 1 giờ.
+  - Đọc trang 1604–1616 (10 trang đổi, 3 trang yên) và một trang rỗng.
+  - 8.962 tag cập nhật số post, 25 tag mới, tổng 1.588.044. `female`, `breasts`, `1girls` có số mới.
+- **Test:** site giả lưu theo thứ tự lưu trữ (tag đổi bị dời xuống cuối):
+  - đọc đầy đủ rồi chỉ đọc phần cuối;
+  - vùng đổi dài thì đọc lùi xa hơn, có trần;
+  - các trường hợp phải đọc đầy đủ;
+  - lần đọc đầy đủ đang dở được ưu tiên tải tiếp;
+  - lần đọc phần cuối đang dở tải tiếp được;
+  - `read_tag_list` đọc đúng tên có dấu ngoặc kép và gạch chéo ngược.
+  
+  430 test qua (`unittest discover`, giới hạn 4 GB, RAM tối đa 267 MB). Hai nút ở Tags A–Z đã xem trên bản giả lập.
+
+### 7as. Bản 2.0.7 — 2026-11-19
+- **Nội dung:**
+  - cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25);
+  - extension mang danh sách tag và job cập nhật riêng, chỉ chạy khi người dùng bấm nút; SDK 1.1 (7at, PR #29, #31). Bản rc đầu `v2.0.7-rc.61` chưa có phần này. Chủ repo chọn gộp nó vào 2.0.7 trước khi lên `production`, nên develop được đưa lên `staging` lần nữa để có bản rc mới.
+- **Không có trong bản này:** PR #26 (nhịp request của extension, headers / cookies theo site) chưa merge khi chủ repo quyết định phát hành.
+- **Phát hành:** version 2.0.7 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r7`, ngày 19 Nov 2026), ghi chú `docs/releases/v2.0.7.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
+
+### 7at. Extension mang job cập nhật tag của riêng nó — 2026-11-19
+- **Yêu cầu của chủ repo:** extension mang sẵn tag list và job cập nhật tag list của riêng nó. Lustra chỉ lấy danh sách đó và chạy job khi người dùng bấm nút; không chạy nền liên tục, chỉ chạy khi được yêu cầu.
+- **Đã chốt với chủ repo** (plan [ext-tag-jobs](plans/ext-tag-jobs.md)):
+  - job chạy trong app, trên máy người dùng, khi bấm nút; không có job phía server;
+  - bộ đọc theo engine của lõi được giữ làm dự phòng cho extension chưa có job;
+  - lịch hệ thống, việc tự cập nhật khi mở app và việc tải ngay sau khi cài không chạy job của extension.
+
+  Phương án đã gửi cho các session đang làm extension. Session "Các trang web tương tự R34" từng đề xuất job theo lịch trên Forgejo, và phương án này không theo hướng đó.
+- **Làm:**
+  - Manifest có `tagUpdate: {"entry": "tags.py:read_tags"}` (`lustra/modspec.py`): file ở thư mục gốc của extension, không có khoá nào khác; schema cập nhật.
+  - `lustra.sdk` lên 1.1, thêm `TagJob`. Lustra 2.0.6 trở về trước (và bản rc đầu của 2.0.7) từ chối field lạ, nên extension có job cần khai báo `minSdkVersion` 1.1. Template của trình tạo ghi `SDK_VERSION`, nên bản nháp mới cũng cần Lustra có SDK 1.1.
+  - `lustra/tags_updater.py`:
+    - nguồn `EXTENSION_JOB`, `TagSource.on_demand`;
+    - `_job_function` nạp hàm từ file của extension;
+    - `_iter_extension_job` kiểm từng tag: tên một từ (khoảng trắng thành `_`), không quá 200 ký tự, số post là số nguyên ≥ 0, loại lạ thành `general`. Job không cho tag nào thì báo lỗi, không ghi.
+    - `TagJob.get_text` / `get_json` đi qua `PoliteClient`: chỉ host của site, robots.txt áp chặt, nhịp, giới hạn khoá, ngân sách, không cookie.
+    - `auto` bỏ qua nguồn `on_demand`.
+  - Trình tạo (`lustra/extgen`):
+    - `bundle_tag_list` không chạy job của bản nháp (`source_for_manifest(m, jobs=False)`). Bản nháp có danh sách thì báo `bundled`, chưa có thì báo `later`.
+    - Luật tĩnh R10 kiểm cả file job (`check_source(..., downloader=False)`).
+    - `pack` đưa file job vào zip.
+  - App:
+    - `fetchNewTagList` (sau khi cài) và `scheduledTagModules` bỏ qua nguồn `onDemand`;
+    - Tags A–Z ghi rõ "chỉ chạy khi bạn bấm Cập nhật";
+    - bản giả lập có extension TBIB mang job riêng.
+- **Test** (`ExtensionJobTests`, 5 test):
+  - job là nguồn của module, `auto` bỏ qua nó, nêu tên module thì chạy;
+  - request của job đi đúng robots.txt rồi tới site;
+  - tag sai bị bỏ, tên có khoảng trắng và loại viết hoa được chuẩn hoá;
+  - job gọi host khác hoặc đường robots.txt cấm thì dừng, không ghi;
+  - job không cho tag nào thì không ghi;
+  - `entry` sai bị manifest từ chối;
+  - trình tạo không chạy job của bản nháp, nhưng R10 bắt `import requests` trong file job, và zip có file job.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7at)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
