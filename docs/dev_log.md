@@ -914,7 +914,19 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - `entry` sai bị manifest từ chối;
   - trình tạo không chạy job của bản nháp, nhưng R10 bắt `import requests` trong file job, và zip có file job.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7at)
+### 7au. Danh sách tag thật của Bbooru trong `2tags/` — 2026-11-19
+- **Vấn đề:** `2tags/bb_tags.json` là bản sao của `rx_tags.json` (cùng md5, đi kèm từ bản gốc). Trong bản checkout repo, autocomplete và Tags A–Z của Bbooru gợi ý tag của Rule34.
+- **Làm:**
+  - Đọc danh sách thật bằng `tools/update_tags.py --modules bb --min-posts 2 --delay 1.0 --force`. Nguồn là nguồn đã duyệt (Gelbooru DAPI). Nhịp 1 request/giây theo điều khoản của Bbooru ("API only, without hammering").
+  - Kết quả: 2.662 request, 2 giờ 3 phút, 1.678.561 tag có từ 2 post, 66,6 MB.
+  - Chủ repo chọn giữ tag từ 5 post trở lên, cùng ngưỡng với `rx_tags.json` của bản gốc: 1.007.966 tag, 40,3 MB (8,5 MB nén), dưới mức 50 MB GitHub khuyên. File được lọc và ghi bằng `read_tag_list` / `write_tag_list` của lõi.
+- **Phát hiện:**
+  - Bbooru gom nội dung nhiều site: `solo` có 11,2 triệu post, `1girl` 7,3 triệu, `1girls` 3,9 triệu, `anthro` 4,5 triệu. 586.653 tag trùng tên với danh sách của Rule34.
+  - Ghi chú ở 7al ("danh sách thật của Bbooru ít hơn một nửa") sai: danh sách thật lớn gấp khoảng 2,7 lần bản sao của Rule34.
+  - Lọc giới tính: `bb` vẫn dùng bảng `rx` (`RULESET_BY_MODULE` trong `lustra/gender.py`). Cả 47 tag của bảng `rx` đều có trên Bbooru, nhưng bảng thiếu các tag kiểu Danbooru `1girl` (7,3 triệu post) và `male_focus` (1,16 triệu). Chưa đổi code; đã ghi vào plan [gender-filter-model](plans/gender-filter-model.md).
+- Bản đóng gói không kèm `2tags/` (`tools/build_core.py` chỉ đóng file alias), nên người dùng app không thấy thay đổi. Họ lấy danh sách của Bbooru bằng nút "Cập nhật" ở Tags A–Z (khoảng 2 giờ).
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7au)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
@@ -928,4 +940,5 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
-  - danh sách tag: trình tạo (`lustra/extgen/fetch.py`) vẫn đọc robots.txt bằng `urllib.robotparser`, nên chuyển sang `lustra/robots.py` để trình tạo và updater đọc cùng một cách; chạy thử updater với một site thật cho mỗi engine mới; quyết định giữ hay bỏ `2tags/bb_tags.json` (bản sao của `rx_tags.json`).
+  - danh sách tag: trình tạo (`lustra/extgen/fetch.py`) vẫn đọc robots.txt bằng `urllib.robotparser`, nên chuyển sang `lustra/robots.py` để trình tạo và updater đọc cùng một cách; chạy thử updater với một site thật cho mỗi engine mới.
+  - lọc giới tính của `bb`: đo lại bảng luật với post thật của Bbooru; bảng `rx` đang dùng thiếu `1girl` và `male_focus` (7au).
