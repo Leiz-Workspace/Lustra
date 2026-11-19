@@ -940,7 +940,17 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Test:** `test_gender` thêm 10 ca `bb` (lấy từ post đã đổi nhãn khi đo) và `test_bbooru_has_its_own_table` (bảng `bb` giữ mọi tag của `rx`; `1girl penis` là both với `bb`, only_male với `rx`).
 - Số đo và chi tiết bảng: plan [gender-filter-model](plans/gender-filter-model.md) §2.1.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7av)
+### 7aw. Bản 2.0.8 — 2026-11-19
+- **Nội dung:**
+  - 6 extension của catalog theo luật từng site: nhịp request (paheal 3 giây, các extension khác 1 giây), Bbooru / Xbooru chỉ dùng API, headers / cookies theo site, trình tạo bỏ qua phần dò API bị chuyển hướng sang http; extension lên 1.0.1 (PR #26);
+  - trình tạo đọc robots.txt theo RFC 9309 bằng `lustra/robots.py`, như updater; `Crawl-delay` đứng trước mọi nhóm được áp dụng (PR #30);
+  - danh sách tag thật của Bbooru trong `2tags/` (7au, PR #34) và bảng luật giới tính riêng cho Bbooru (7av, PR #36).
+- **Không có trong bản này:** PR #37 (10 extension mới cho catalog). Chủ repo giữ PR này ở dạng bản nháp, để tự thử cài các extension từ file zip (`.extgen-drafts/`, `SHA256SUMS.txt`) trước khi đưa chúng vào catalog đi kèm app.
+- **Kiểm:** gộp thử 4 PR trên `develop`: không xung đột; danh sách unittest của CI 384 test OK (1 bỏ qua), `npm run check`, ruff sạch.
+- **Phát hành:** version 2.0.8 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r8`), ghi chú `docs/releases/v2.0.8.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
+- **Sau khi merge:** build và ký lại catalog chính thức (`docs/operations.md`, "Cập nhật catalog chính thức"), để bản đã cài nhận 6 extension 1.0.1.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7aw)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
@@ -954,4 +964,4 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - index: ánh xạ tag / alias giữa các site khi tải nhiều site; nhập thư viện từ site không phải Danbooru còn chậm (1 post mỗi request);
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
-  - danh sách tag: trình tạo (`lustra/extgen/fetch.py`) vẫn đọc robots.txt bằng `urllib.robotparser`, nên chuyển sang `lustra/robots.py` để trình tạo và updater đọc cùng một cách; chạy thử updater với một site thật cho mỗi engine mới.
+  - danh sách tag: chạy thử updater với một site thật cho mỗi engine mới (trình tạo đã đọc robots.txt bằng `lustra/robots.py` như updater, 7aw).
