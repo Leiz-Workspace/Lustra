@@ -874,7 +874,9 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   430 test qua (`unittest discover`, giới hạn 4 GB, RAM tối đa 267 MB). Hai nút ở Tags A–Z đã xem trên bản giả lập.
 
 ### 7as. Bản 2.0.7 — 2026-11-19
-- **Nội dung:** cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25).
+- **Nội dung:**
+  - cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25);
+  - extension mang danh sách tag và job cập nhật riêng, chỉ chạy khi người dùng bấm nút; SDK 1.1 (7at, PR #29, #31). Bản rc đầu `v2.0.7-rc.61` chưa có phần này. Chủ repo chọn gộp nó vào 2.0.7 trước khi lên `production`, nên develop được đưa lên `staging` lần nữa để có bản rc mới.
 - **Không có trong bản này:** PR #26 (nhịp request của extension, headers / cookies theo site) chưa merge khi chủ repo quyết định phát hành.
 - **Phát hành:** version 2.0.7 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r7`, ngày 19 Nov 2026), ghi chú `docs/releases/v2.0.7.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
 
@@ -888,7 +890,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   Phương án đã gửi cho các session đang làm extension. Session "Các trang web tương tự R34" từng đề xuất job theo lịch trên Forgejo, và phương án này không theo hướng đó.
 - **Làm:**
   - Manifest có `tagUpdate: {"entry": "tags.py:read_tags"}` (`lustra/modspec.py`): file ở thư mục gốc của extension, không có khoá nào khác; schema cập nhật.
-  - `lustra.sdk` lên 1.1, thêm `TagJob`. Lustra ≤ 2.0.7 từ chối field lạ, nên extension có job cần khai báo `minSdkVersion` 1.1. Template của trình tạo ghi `SDK_VERSION`, nên bản nháp mới cũng cần Lustra có SDK 1.1.
+  - `lustra.sdk` lên 1.1, thêm `TagJob`. Lustra 2.0.6 trở về trước (và bản rc đầu của 2.0.7) từ chối field lạ, nên extension có job cần khai báo `minSdkVersion` 1.1. Template của trình tạo ghi `SDK_VERSION`, nên bản nháp mới cũng cần Lustra có SDK 1.1.
   - `lustra/tags_updater.py`:
     - nguồn `EXTENSION_JOB`, `TagSource.on_demand`;
     - `_job_function` nạp hàm từ file của extension;

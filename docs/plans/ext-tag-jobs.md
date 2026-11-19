@@ -23,7 +23,7 @@
 ```
 - `tagList`: file danh sách nằm cạnh `manifest.json`, cùng định dạng các danh sách hiện có (`{"tag": "N posts (type)", ...}`, mỗi dòng một tag, đã sắp xếp). Lustra dùng file này ngay khi ext được cài.
 - `tagUpdate.entry`: `<file>.py:<hàm>`. File phải nằm ở thư mục gốc của ext. Ngoài `entry` không có khoá nào khác.
-- `minSdkVersion: "1.1"`: Lustra ≤ 2.0.7 không biết field `tagUpdate` và từ chối manifest có nó, nên ext cần khai báo SDK 1.1 để có thông báo rõ ràng.
+- `minSdkVersion: "1.1"`: Lustra 2.0.6 trở về trước không biết field `tagUpdate` và từ chối manifest có nó, nên ext cần khai báo SDK 1.1 để có thông báo rõ ràng.
 
 `tags.py`:
 ```python
