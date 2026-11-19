@@ -127,7 +127,7 @@ Mức bằng chứng: **H** (mạnh), **m** (vừa). Khi so khớp, tag được
 | real | `photo_(medium)`, `cosplay_photo` |
 
 **Rule34.xxx (`rx`)**, completeness prior 0,85:
-- `bb` dùng chung bảng này vì `bb_tags.json` trùng hệt `rx_tags.json`.
+- `bb` dùng chung bảng này vì `bb_tags.json` trùng hệt `rx_tags.json`. Lý do này không còn đúng từ 2026-11-19 (dev log 7au): `2tags/bb_tags.json` nay là danh sách thật của Bbooru. Bbooru gom nội dung nhiều site. Cả 47 tag của bảng này đều có trên Bbooru, nhưng bảng thiếu các tag kiểu Danbooru `1girl` (7,3 triệu post) và `male_focus` (1,16 triệu). Cần đo lại; chưa đổi code.
 - `rs` (rule34.us) và `xb` (xbooru) dùng bản `gelbooru_generic`, prior lần lượt 0,80 và 0,75. Bản này thêm `1girl` và `hetero`.
 
 | Bằng chứng | Tag |
