@@ -9,8 +9,9 @@ usage: python tools/build_core.py [--tags aliases|none|all|rx,db,...] [--out DIR
 The running interpreter needs the runtime requirements and PyInstaller:
   python -m pip install -r requirements.txt 'pyinstaller>=6.21'
 Bundled data: builtin extension manifests, gender rules, the domain denylist and trusted catalog keys (lustra/safety_data), the
-local extension catalog (extensions/), tag aliases and optionally
-tag lists (2tags/, large: ~124 MB for all modules; the app can download fresh lists into its data dir instead).
+local extension catalog (extensions/, with the 2tags/ list of each extension that has no tag source next to its manifest: rn, rp,
+rs, ~26 MB), tag aliases and optionally tag lists (2tags/, large: ~124 MB for all modules; the app can download fresh lists into its
+data dir instead).
 """
 #########################################
 #
@@ -86,8 +87,28 @@ def _extension_imports() -> list[str]:
     return sorted(n for n in names if not n.startswith('lustra') and n != 'collections.abc')
 
 
+def _stage_catalog(dest: pathlib.Path, src: pathlib.Path = ROOT / 'extensions', tags_dir: pathlib.Path = TAGS_DIR) -> pathlib.Path:
+    """The local extension catalog of the core: extensions/ without the tag lists a maintainer keeps next to the manifests (they go
+    into the catalog zips, tools/build_catalog.py). An extension whose manifest names a tagList and that has no tag source (no
+    'tagUpdate', not a reviewed module, no engine with a tag listing: lustra/tags_updater.py source_for_manifest) gets its list
+    from 2tags/ next to its manifest, so installing it (or updating it from the catalog) gives the module its list. Today rn, rp
+    and rs; the others read theirs from their source, which keeps the core small"""
+    sys.path.insert(0, str(ROOT))
+    from lustra.extensions import SOURCE_CATALOG, Extensions
+    from lustra.tags_updater import source_for_manifest
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.*', '*_tags.json'))
+    for m in Extensions._scan(dest, SOURCE_CATALOG):
+        if not m.tagList or source_for_manifest(m) is not None:
+            continue
+        lst = tags_dir / f'{m.abbr}_tags.json'
+        if m.tagList != lst.name or not lst.is_file():  # the app uses '<abbr>_tags.json' only (TagsDB.extension_lists)
+            print(f'note: {m.id} names the tag list {m.tagList}, {lst} is not it or not there: bundled without a list')
+            continue
+        shutil.copy2(lst, dest / m.id / lst.name)
+    return dest
+
+
 def _stage_data(stage: pathlib.Path, tags: str) -> list[tuple[pathlib.Path, str]]:
-    ignore = shutil.ignore_patterns('__pycache__', '*.pyc', '.*')
     data = [
         (ROOT / 'lustra' / 'builtin_ext', 'lustra/builtin_ext'),
         (ROOT / 'lustra' / 'gender_rules', 'lustra/gender_rules'),
@@ -102,9 +123,7 @@ def _stage_data(stage: pathlib.Path, tags: str) -> list[tuple[pathlib.Path, str]
         (refs / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, refs / rel)
     data.append((refs, 'aigen_refs'))
-    catalog = stage / 'extensions'
-    shutil.copytree(ROOT / 'extensions', catalog, ignore=ignore)
-    data.append((catalog, 'extensions'))
+    data.append((_stage_catalog(stage / 'extensions'), 'extensions'))
     tag_files: list[pathlib.Path] = []
     if tags != 'none' and (TAGS_DIR / ALIASES_FILE).is_file():
         tag_files.append(TAGS_DIR / ALIASES_FILE)

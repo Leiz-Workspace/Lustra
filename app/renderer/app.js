@@ -2144,8 +2144,24 @@ function tagSourceTitle(src) {
   const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
   return `${src.site} — ${src.description}. ${rule}${key}`;
 }
+// updates running in the core, module -> { count, message }: from tags.sources (running, also jobs started by main and after a reload
+// of the window) and tags.updateProgress; gone at tags.updateDone. A running row keeps its button off until the job ends
+const tagUpdates = new Map();
+const tagRunningText = (count) => (count ? `đang cập nhật… ${nf.format(count)} tag` : 'đang cập nhật…');
+const tagRunningButton = (message) => h('button', { class: 'btn sm', disabled: true, title: message || '', dataset: { running: '1' } }, 'Đang cập nhật…');
+function showTagRunning(m, count = tagUpdates.get(m)?.count, message = tagUpdates.get(m)?.message) {
+  tagUpdates.set(m, { count: Number(count) || 0, message: message || '' });
+  const cell = $(`#tagupd-${m}`);
+  if (cell) { cell.textContent = tagRunningText(count); cell.title = message || ''; }
+  const act = $(`#tagact-${m}`);
+  const btn = act && $('[data-running]', act);
+  if (btn) btn.title = message || '';
+  else if (act) act.replaceChildren(tagRunningButton(message));
+}
+let tagStatusGen = 0;
 async function refreshTagStatus() {
   if (!azPage.loaded) { azPage.loaded = true; azPage.reload(); }
+  const gen = ++tagStatusGen;
   let rows = [];
   let sources = [];
   try {
@@ -2153,8 +2169,13 @@ async function refreshTagStatus() {
     S.tagLists = new Set(rows.filter((r) => r.size > 0).map((r) => r.module));
   } catch { /* ignore */ }
   try { sources = await L.rpc('tags.sources'); } catch { /* core without tags.sources: no update buttons */ }
+  if (gen !== tagStatusGen) return; // a later call asked the core after this one: its answer is the newer one
   const byMod = Object.fromEntries(rows.map((r) => [r.module, r]));
   const srcByMod = Object.fromEntries((Array.isArray(sources) ? sources : []).map((src) => [src.module, src]));
+  for (const src of Object.values(srcByMod)) {
+    if (src.running) tagUpdates.set(src.module, { count: Number(src.count) || 0, message: src.message || '' });
+    else if (src.running === false) tagUpdates.delete(src.module);
+  }
   const installed = S.modules.filter((m) => m.installed);
   const mods = [...installed.filter((m) => srcByMod[m.abbr]), ...installed.filter((m) => !srcByMod[m.abbr])]; // updatable first
   const table = $('#tag-status');
@@ -2165,14 +2186,20 @@ async function refreshTagStatus() {
       const r = byMod[m];
       const src = srcByMod[m];
       const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
+      const run = src ? tagUpdates.get(m) : undefined;
       let action;
-      if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
+      if (run) action = tagRunningButton(run.message);
+      else if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
       else if (!src) {
         action = h('button', { class: 'btn sm', title: 'Đọc tag của các file đã tải (index), không gửi request tới site', onclick: async (e) => {
           e.currentTarget.disabled = true;
           try {
             const res = await L.rpc('tags.learn', { module: m });
-            toast(res.newPosts ? `Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải` : `Tag ${m}: không có post đã tải mới`);
+            // mayLearn false: the module has a list from a source (or learning is off); indexed false: nothing downloaded yet
+            if (res.mayLearn === false) toast(res.sourceList ? `Tag ${m}: đã có danh sách tag từ nguồn, không cần học` : `Tag ${m}: chức năng học tag đang tắt`);
+            else if (res.newPosts) toast(`Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải`);
+            else if (res.indexed === false) toast(`Chưa có post nào của ${name || m} trong index: tải vài post (hoặc xem Preview) để Lustra học tag`);
+            else toast(`Tag ${m}: không có post đã tải mới`);
             refreshTagStatus();
             loadTagLists();
           } catch (err) { toast(errMsg(err), 'err'); }
@@ -2184,7 +2211,11 @@ async function refreshTagStatus() {
           try {
             await L.tags.update(m, full ? { full: true } : undefined);
             toast(`Đang ${full ? 'đọc lại toàn bộ' : 'cập nhật'} danh sách tag ${m}…`);
-          } catch (err) { toast(errMsg(err), 'err'); }
+          } catch (err) {
+            const running = /already running/i.test(errMsg(err));
+            toast(running ? `Danh sách tag ${m} đang được cập nhật` : errMsg(err), running ? undefined : 'err');
+          }
+          refreshTagStatus(); // the core says whether it runs (a job that failed at once has already ended)
         };
         // tail sources (Rule34): 'Cập nhật' reads the last pages only (a full read every 30 days on its own)
         action = src.tailUpdates
@@ -2199,8 +2230,9 @@ async function refreshTagStatus() {
           src ? (src.name || name || m) : (r && !r.learned ? '—' : 'học từ post đã xem / đã tải')),
         h('td', { class: 'mono', title: r?.path || '' }, r ? r.path.split(/[\\/]/).slice(-2).join('/') : '—'),
         h('td', { title: r?.learned ? 'Danh sách học từ post đã xem / đã tải' : '' }, r ? `${r.size >= 1048576 ? `${(r.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(r.size / 1024))} KB`}${r.learned ? ' (đã học)' : ''}` : '—'),
-        h('td', { id: `tagupd-${m}` }, r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
-        h('td', {}, action));
+        h('td', { id: `tagupd-${m}`, title: run?.message || '' },
+          run ? tagRunningText(run.count) : r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
+        h('td', { id: `tagact-${m}` }, action));
     }));
   $('#tags-autoupdate').checked = !!S.settings.tags.autoUpdate;
   $('#tags-autoupdate-days').value = S.settings.tags.autoUpdateDays;
@@ -3174,8 +3206,8 @@ function listen() {
   L.on('jobs:log', (m) => appendJobLog(m.id, m.text));
   L.on('sidecar:notify', ({ method, params }) => {
     if (method === 'tags.updateProgress') {
-      const cell = $(`#tagupd-${params.module}`);
-      if (cell) cell.textContent = `đang tải… ${nf.format(params.count)} tag`;
+      // whoever started it (this page, main's auto update or a new extension): the row shows it and its button stays off
+      showTagRunning(params.module, params.count, params.message);
     } else if (method === 'index.cleanProgress' || method === 'index.cleanDone') {
       onIndexCleanNotify(method, params);
     } else if (method === 'app.notice') {
@@ -3187,6 +3219,7 @@ function listen() {
       loadTagLists();
       if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
+      tagUpdates.delete(params.module);
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
       if (params.written) {
         for (const k of [...resolveCache.keys()]) if (k.startsWith(`${params.module}\n`)) resolveCache.delete(k);

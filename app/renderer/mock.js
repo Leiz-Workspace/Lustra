@@ -12,6 +12,7 @@
     { id: 'full-mask-orange', name: 'Full mask · Orange' }, { id: 'exposed-jaw-orange', name: 'Exposed jaw · Orange' },
     { id: 'full-mask-monochrome', name: 'Full mask · Mono' }, { id: 'exposed-jaw-monochrome', name: 'Exposed jaw · Mono' },
   ];
+  const mockTagRuns = new Map(); // module -> { count, message } of a running tag list update (tags.update below)
   const mockSchedule = { ok: true, kind: 'crontab', enabled: false, installed: false, frequency: 'weekly', time: '04:31',
     modules: [{ module: 'db', name: 'Danbooru' }, { module: 'fb', name: 'Fakebooru' }], log: '~/.config/Lustra/logs/tags-schedule.log', lastRun: 0 };
   const settings = {
@@ -250,9 +251,9 @@
           { module: 'db', name: 'Danbooru', engine: 'danbooru_json', site: 'https://danbooru.donmai.us/', key: 'optional', keyFormat: 'API_KEY,LOGIN', robots: false, curated: true, description: 'tags.json, id cursor' },
           { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, tailUpdates: false, description: 'DAPI tag index, pages by number (pid)' },
           { module: 'tb', name: 'TBIB', engine: 'extension_job', site: 'https://tbib.org/', key: 'none', keyFormat: '', robots: true, curated: false, tailUpdates: false, onDemand: true, job: 'tags.py:read_tags', description: "the extension's own update (tags.py:read_tags), run only when asked" },
-        ];
+        ].map((s) => ({ ...s, running: mockTagRuns.has(s.module), count: mockTagRuns.get(s.module)?.count || 0, message: mockTagRuns.get(s.module)?.message || '' }));
       }
-      if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12 };
+      if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12, mayLearn: true, sourceList: false, indexed: true };
       if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
@@ -277,7 +278,21 @@
       throw new Error(`mock: ${method}`);
     },
     tags: {
-      update: async (m, _opts) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; },
+      update: async (m, _opts) => {
+        // like the core: running until done (tags.sources running / count), progress every ~2 s, -32004 while it runs
+        if (mockTagRuns.has(m)) throw new Error(`tag list update for '${m}' is already running`);
+        mockTagRuns.set(m, { count: 0, message: '' });
+        [1, 2, 3].forEach((k) => setTimeout(() => {
+          const run = { count: k * 1500, message: `[${m}] ${k * 1500} tags...` };
+          mockTagRuns.set(m, run);
+          emit('sidecar:notify', { method: 'tags.updateProgress', params: { job: `tags-${m}`, module: m, ...run } });
+        }, k * 2000));
+        setTimeout(() => {
+          mockTagRuns.delete(m);
+          emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 4500 tags (mock)' } });
+        }, 8000);
+        return { job: `tags-${m}` };
+      },
       scheduleStatus: async () => ({ ...mockSchedule }),
       schedule: async (o) => { Object.assign(mockSchedule, { enabled: !!o.enabled, installed: !!o.enabled, frequency: o.frequency || 'weekly' }); return { ...mockSchedule }; },
     },

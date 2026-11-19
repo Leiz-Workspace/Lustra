@@ -20,6 +20,7 @@ import platform
 import re
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -299,12 +300,15 @@ def m_tags_status(_: dict) -> list[dict]:
 
 def m_tags_learn(p: dict) -> dict:
     """Learns a module's tag list from its downloaded files (download index) when it has no list from a source; the app calls it
-    after each download job. No request is made. -> {module, posts (new), learned, tags}"""
+    after each download job. No request is made. -> {module, learned, posts, tags (status), newPosts, mayLearn (False: nothing is
+    learned, the module has a list from a source, see sourceList), sourceList, indexed (the download index holds posts of the module)}"""
     module = str(p.get('module', ''))
     if not re_abbr.fullmatch(module):
         raise RpcError(-32602, f'invalid module \'{module}\'')
-    new = tags_learned.learn_from_index(module)
-    return {'module': module, **tags_learned.status(module), 'newPosts': new}
+    may = tags_learned.may_learn(module)
+    new = tags_learned.learn_from_index(module) if may else 0
+    return {'module': module, **tags_learned.status(module), 'newPosts': new, 'mayLearn': may,
+            'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module)}
 
 
 def _learn_from_preview(module: str, items: list[dict]) -> None:
@@ -323,14 +327,28 @@ def _learn_quietly(module: str, posts: list) -> None:
 
 
 _tags_updates_lock = threading.Lock()
-_tags_updates: set[str] = set()
+_tags_updates: dict[str, dict] = {}
+'''running tag list updates, module -> {count, message, startedAt}: Tags A-Z shows them as running whoever started them (its button,
+the app's auto update, an extension just installed), also after the window was reloaded'''
+
+
+def _running_tag_updates() -> dict[str, dict]:
+    with _tags_updates_lock:
+        return {m: dict(st) for m, st in _tags_updates.items()}
 
 
 def m_tags_sources(_: dict) -> list[dict]:
     """Installed modules with a tag list source (the five reviewed ones, extensions made from a known engine): the Tags A-Z page
-    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'"""
+    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'.
+    running: an update of the module runs in this core (count: tags read so far, message: its last progress line, startedAt: epoch s)"""
     from .tags_updater import tag_sources
-    return [s.as_dict() for s in tag_sources()]
+    running = _running_tag_updates()
+    rows = []
+    for s in tag_sources():
+        st = running.get(s.module) or {}
+        rows.append({**s.as_dict(), 'running': bool(st), 'count': st.get('count', 0), 'message': st.get('message', ''),
+                     'startedAt': st.get('startedAt', 0)})
+    return rows
 
 
 def m_tags_update(p: dict) -> dict:
@@ -341,25 +359,34 @@ def m_tags_update(p: dict) -> dict:
         raise RpcError(-32602, f'tag list update is not supported for \'{module}\'')
     out_dir = pathlib.Path(p['outDir']) if p.get('outDir') else tags_dirs()[0] if os.environ.get(ENV_TAGS_DIR) else data_dir() / 'tags'
     job = f'tags-{module}'
+    reference = TagsDB.get_file(module)
     with _tags_updates_lock:
         if module in _tags_updates:
             raise RpcError(-32004, f'tag list update for \'{module}\' is already running')
-        _tags_updates.add(module)
-    reference = TagsDB.get_file(module)
+        _tags_updates[module] = {'count': 0, 'message': '', 'startedAt': time.time()}
+
+    def progress(msg: str, count: int) -> None:
+        msg = _redact(msg)
+        with _tags_updates_lock:
+            if (st := _tags_updates.get(module)) is not None:
+                st.update(count=int(count), message=msg)
+        notify('tags.updateProgress', {'job': job, 'module': module, 'count': count, 'message': msg})
 
     def run() -> None:
+        done: dict = {'job': job, 'module': module, 'ok': False, 'written': False, 'message': 'failed: stopped'}
         try:
             res = update_tag_list(module, out_dir, api_key=p.get('apiKey', ''), delay=float(p.get('delay', 0.5)), reference=reference,
-                                  source=source, full=p.get('full') is True,
-                                  progress=lambda msg, n: notify('tags.updateProgress', {'job': job, 'module': module, 'count': n, 'message': msg}))
+                                  source=source, full=p.get('full') is True, progress=progress)
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
-            notify('tags.updateDone', {'job': job, 'ok': True, **res.as_dict()})
+            done = {'job': job, 'ok': True, **res.as_dict()}
         except Exception as err:
-            notify('tags.updateDone', {'job': job, 'module': module, 'ok': False, 'written': False, 'message': _redact(f'failed: {err}')})
+            done = {'job': job, 'module': module, 'ok': False, 'written': False, 'message': _redact(f'failed: {err}')}
         finally:
             with _tags_updates_lock:
-                _tags_updates.discard(module)
+                _tags_updates.pop(module, None)
+            # told once the running state is gone: the app reads tags.sources again when an update ends
+            notify('tags.updateDone', done)
 
     threading.Thread(target=run, daemon=True, name=job).start()
     return {'job': job, 'outDir': out_dir.as_posix()}

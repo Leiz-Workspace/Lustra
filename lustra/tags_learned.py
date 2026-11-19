@@ -27,7 +27,8 @@ from .modspec import re_abbr
 from .tags_updater import write_tag_list
 from .tagsdb import TagsDB
 
-__all__ = ('ENV_TAGS_LEARN', 'LEARNED_TYPE', 'enabled', 'is_learned', 'learn', 'learn_from_index', 'list_path', 'may_learn', 'status')
+__all__ = ('ENV_TAGS_LEARN', 'LEARNED_TYPE', 'enabled', 'has_source_list', 'indexed', 'is_learned', 'learn', 'learn_from_index',
+           'list_path', 'may_learn', 'status')
 
 ENV_TAGS_LEARN = 'LUSTRA_TAGS_LEARN'
 '''0: nothing is learned (the offline tests set it, lustra/tests/__init__.py; the learning tests turn it on)'''
@@ -120,6 +121,26 @@ def may_learn(module: str) -> bool:
             return False  # a list registered in memory (tools, tests)
         return not list_path(module).exists() or is_learned(module)
     return is_learned(module, located)
+
+
+def has_source_list(module: str) -> bool:
+    """The module has a list that is not the learned one: from the updater, an installed extension, 2tags/ or registered in memory
+    (learning it is not needed)"""
+    if not re_abbr.fullmatch(str(module or '')):
+        return False
+    located = TagsDB.get_file(module)
+    if located is None:
+        return TagsDB.is_loaded(module) or (list_path(module).exists() and not is_learned(module))
+    return not is_learned(module, located)
+
+
+def indexed(module: str) -> bool:
+    """The download index holds files of this module (what the learning reads besides Preview)"""
+    if not re_abbr.fullmatch(str(module or '')):
+        return False
+    from .dlindex import DownloadIndex
+    with DownloadIndex() as index:
+        return bool(index.posts_after(module, 0, 1))
 
 
 def _norm(tag) -> str:

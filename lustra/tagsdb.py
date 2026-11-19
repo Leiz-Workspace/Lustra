@@ -562,6 +562,15 @@ def _read_tag_list(path: pathlib.Path, use_cache: bool, cache_min_size: int) -> 
     return lst
 
 
+def _is_learned_list(module: str, path: pathlib.Path) -> bool:
+    """The list at <data dir>/tags is the one lustra/tags_learned.py wrote last (its state is a small sqlite file next to it)"""
+    try:
+        from .tags_learned import is_learned
+        return is_learned(module, path)
+    except Exception:  # an unreadable learning state: the list counts as any other
+        return False
+
+
 class TagsDB:
     """TagsDB !Static!
     Thread-safe: shared state is guarded by an internal lock (never held while parsing a list or while callers use the result),
@@ -761,14 +770,17 @@ class TagsDB:
     @staticmethod
     def locate_default_lists(reload: Iterable[str] = ()) -> int:
         """LUSTRA_TAGS_DIR wins, otherwise the most recently updated list per module among <data dir>/tags, the lists shipped
-        inside installed extensions (extension_lists) and repo 2tags/.
+        inside installed extensions (extension_lists) and repo 2tags/. A list learned from the posts seen here (lustra/tags_learned.py)
+        is used only for a module that has no other list, however recent it is: a list from a source always wins.
         Loaded lists stay in memory unless their file changed or they are listed in 'reload'"""
         from .extensions import data_dir
         env = os.environ.get('LUSTRA_TAGS_DIR')
         env_dir = pathlib.Path(env).expanduser() if env else None
-        dirs = [d for d in (env_dir, data_dir() / 'tags', pathlib.Path(__file__).resolve().parent.parent / '2tags') if d]
+        learned_dir = data_dir() / 'tags'
+        dirs = [d for d in (env_dir, learned_dir, pathlib.Path(__file__).resolve().parent.parent / '2tags') if d]
         reload = set(reload)
         files: dict[str, pathlib.Path] = {}
+        learned: dict[str, pathlib.Path] = {}
         alias_file: pathlib.Path | None = None
 
         def consider(module: str, f: pathlib.Path, from_env: bool) -> None:
@@ -782,9 +794,15 @@ class TagsDB:
             if not d.is_dir():
                 continue
             for f in d.glob('*_tags.json'):
-                consider(f.name[:-len('_tags.json')], f, d == env_dir)
+                module = f.name[:-len('_tags.json')]
+                if d == learned_dir and d != env_dir and _is_learned_list(module, f):
+                    learned[module] = f
+                    continue
+                consider(module, f, d == env_dir)
             if alias_file is None and (alias := d / FILE_NAME_ALIASES).is_file():
                 alias_file = alias
+        for module, f in learned.items():
+            files.setdefault(module, f)
         with TagsDB._lock:
             old_files = dict(TagsDB.DBFiles)
             TagsDB.DBFiles.clear()
