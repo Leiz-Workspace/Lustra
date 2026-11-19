@@ -10,8 +10,9 @@ checksum between catalog builds. Sign the result with tools/sign_catalog.py, the
 the zips side by side under --base-url (the official catalog: the "catalog" release of the GitHub repository).
 
 Tag lists stay out of the repository (docs/plans/ext-tag-jobs.md): an extension's manifest names its list ("tagList":
-"<abbr>_tags.json") and --lists is the folder that holds those files (made with 'lustra-core tags --modules <abbr> --out
-<dir>', or taken out of the zips of the catalog in use). Each list goes into its extension's zip, next to manifest.json, so
+"<abbr>_tags.json"). A list kept next to its manifest on the maintainer's machine (.gitignore leaves extensions/*/*_tags.json
+out) is used first; --lists is a folder for the others (made with 'lustra-core tags --modules <abbr> --out <dir>', or taken
+out of the zips of the catalog in use). Each list goes into its extension's zip, next to manifest.json, so
 the extension has it as soon as it is installed. An extension whose list is not there is built without it: the app reads the
 list with the extension's own update when the user asks (Tags A-Z, "Cập nhật"). A zip over the installer's limits is refused.
 """

@@ -978,6 +978,10 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Plan [ext-tag-jobs](plans/ext-tag-jobs.md) và `docs/operations.md` 3d ghi cách mới, gồm cách lấy lại danh sách từ zip của catalog đang phát hành.
 - **Ext đã kiểm:** ext khai báo `tagList` mà không kèm file vẫn cài, nạp và nhận job như thường (zip Gelbooru, lõi đóng gói 2.0.7). 6 ext hiện có của catalog vốn đã không có file danh sách trong repo.
 - **Việc của session tạo ext:** bỏ 9 file `*_tags.json` khỏi PR #37 (giữ code và `specs.md`), cập nhật skill `new-site-extension` để PR vào catalog không kèm danh sách; danh sách vẫn nằm trong zip bản nháp.
+- **Bổ sung (chủ repo yêu cầu):**
+  - `.gitignore` bỏ qua `/extensions/*/*_tags.json`. Danh sách cứ để cạnh `manifest.json` trên máy; `build_catalog.py` dùng file đó trước, `--lists` cho danh sách ở chỗ khác. Với PR #37: `git rm --cached extensions/*/*_tags.json` là đủ, file vẫn ở trên máy.
+  - Test chặn chỉ xét file được git theo dõi (`git ls-files`), và kiểm rằng `.gitignore` bỏ qua đúng mẫu đó.
+  - Workflow Release coi `tools/build_catalog.py`, `tools/sign_catalog.py`, `tools/check_selftest.py` như tài liệu (không file phát hành nào sinh ra từ chúng). Vì vậy đưa các thay đổi này lên `staging` / `production` không đăng bản mới và không cần nâng version.
 
 ### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ay)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).

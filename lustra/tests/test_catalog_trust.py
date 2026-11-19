@@ -411,11 +411,20 @@ class BuildCatalogTests(TestCase):
         self.assertIn('over the installer limits', str(ctx.exception))
 
     def test_repository_extensions_carry_no_tag_list(self) -> None:
-        # a list is data, not code: it goes into the catalog zips (--lists), not into the repository, which the app also bundles
-        # (tools/build_core.py copies extensions/ into the frozen core)
-        big = [str(p.relative_to(ROOT)) for p in (ROOT / 'extensions').rglob('*') if p.is_file()
-               and (p.name.endswith('_tags.json') or p.stat().st_size > 1024 * 1024)]
-        self.assertEqual([], big, 'tag lists belong in the catalog zips: tools/build_catalog.py --lists (docs/plans/ext-tag-jobs.md)')
+        # a list is data, not code: it goes into the catalog zips (tools/build_catalog.py), not into the repository, which the app
+        # also bundles (tools/build_core.py copies extensions/ into the frozen core). Committed files only: a maintainer keeps the
+        # lists next to their manifest, where .gitignore leaves them out
+        tracked = subprocess.run(('git', 'ls-files', '-z', '--', 'extensions'), cwd=ROOT, capture_output=True, timeout=60)
+        if tracked.returncode == 0:
+            files = [ROOT / x for x in tracked.stdout.decode('utf-8').split('\0') if x]
+        else:  # not a git checkout (source archive)
+            files = [p for p in (ROOT / 'extensions').rglob('*') if p.is_file()]
+        big = [str(p.relative_to(ROOT)) for p in files if p.is_file() and (p.name.endswith('_tags.json') or p.stat().st_size > 1024 * 1024)]
+        self.assertEqual([], big, 'tag lists belong in the catalog zips: tools/build_catalog.py (docs/plans/ext-tag-jobs.md)')
+        ignored = subprocess.run(('git', 'check-ignore', '-q', 'extensions/bbooru/bb_tags.json'), cwd=ROOT, capture_output=True,
+                                 timeout=60)
+        if tracked.returncode == 0:
+            self.assertEqual(0, ignored.returncode, '.gitignore must leave out extensions/*/*_tags.json')
 
 
 def zipfile_names(path: pathlib.Path) -> list[str]:
