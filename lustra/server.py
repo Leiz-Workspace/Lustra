@@ -31,7 +31,7 @@ _PROTO_OUT = sys.stdout
 sys.stdout = sys.stderr
 
 from . import tags_learned  # noqa: E402
-from .defines import ThreadInterruptException  # noqa: E402
+from .defines import DATE_MAX_DEFAULT, DATE_MIN_DEFAULT, ModuleCaps, ThreadInterruptException  # noqa: E402
 from .extensions import ENV_CATALOG_AUTOLOAD, Extensions, data_dir  # noqa: E402
 from .gender import decide, infer_from_tags, rules_for_module  # noqa: E402
 from .help import APP_ADDRESS  # noqa: E402
@@ -43,6 +43,7 @@ from .safety import blocked_tag  # noqa: E402
 from .tags import TAG_NAMES_BY_TYPE, TagTypes  # noqa: E402
 from .tagsdb import TAG_ALIASES, TagsDB, is_wtag, load_tag_aliases, wildcard_pattern  # noqa: E402
 from .task import KNOWN_META_NAMES, re_meta_name  # noqa: E402
+from .utils import as_date  # noqa: E402
 from .vcs import APP_NAME, APP_VERSION  # noqa: E402
 
 __all__ = ('main',)
@@ -365,14 +366,28 @@ def m_tags_update(p: dict) -> dict:
     return {'job': job, 'outDir': out_dir.as_posix()}
 
 
+def _date_filter_kind(dwn, args) -> str:
+    """How the date limits (-mindate / -maxdate) reach a search, after argument parsing:
+    '' none set; 'native': the site filters (db turns them into a 'date:' metatag), so counts and pages are exact;
+    'local': not part of the site query: a results page hides the posts outside the limits, the count ignores them (the download
+    finds the right pages by date first, download.py); 'unsupported': the module cannot filter by date, the limits were dropped"""
+    if dwn.date_min != DATE_MIN_DEFAULT or dwn.date_max != DATE_MAX_DEFAULT:
+        return 'native' if dwn._supports_native_date_filter() else 'local'
+    asked = bool(getattr(args, 'mindate', None) or getattr(args, 'maxdate', None))
+    return 'unsupported' if asked and not dwn._has_capability(ModuleCaps.DATE_FILTER) else ''
+
+
 def m_search_count(p: dict) -> dict:
     def fn(dwn, args) -> dict:
         dwn.launch_check_tags(args)
         if dwn.launch_error or dwn.interrupted:
             raise RpcError(-32002, dwn.launch_error or 'cancelled', {'log': list(_tls.log or []), 'cfChallenge': dwn.cf_challenge_hit})
         counts = list(dwn.task_counts)
-        return {'count': int(dwn.total_count), 'taskCounts': counts, 'approximate': len(counts) > 1 or bool(dwn.required_tags),
-                'requiredTags': list(dwn.required_tags), 'cfChallenge': dwn.cf_challenge_hit}
+        dates = _date_filter_kind(dwn, args)
+        # 'local' dates: the site counted every date, the real count is lower (an upper bound, like required tags)
+        return {'count': int(dwn.total_count), 'taskCounts': counts,
+                'approximate': len(counts) > 1 or bool(dwn.required_tags) or dates == 'local',
+                'requiredTags': list(dwn.required_tags), 'dateFilter': dates, 'cfChallenge': dwn.cf_challenge_hit}
     return _with_downloader(p.get('module', 'rx'), p.get('tags', ''), list(p.get('args', [])), fn)
 
 
@@ -432,7 +447,7 @@ def _fetch_results_page(dwn, page: int, page_size: int, maxlim: int | None) -> t
 
 class _ResultsFilter:
     """Local filters of a results page, as the download applies them: safety blacklist (-safety_blacklist), required tags,
-    negative groups, gender. Counts what it hides"""
+    negative groups, date limits the site query does not carry (see _date_filter_kind), gender. Counts what it hides"""
 
     def __init__(self, dwn) -> None:
         self.dwn = dwn
@@ -441,6 +456,8 @@ class _ResultsFilter:
         self.safety_on = bool(dwn.safety_blacklist)
         self.rules = rules_for_module(dwn._get_module_abbr()) if self.gender_on else None
         self.with_tags = bool(dwn._can_extract_item_info_without_fetch())
+        local_dates = _date_filter_kind(dwn, None) == 'local'
+        self.dates = (as_date(dwn.date_min), as_date(dwn.date_max)) if local_dates else None
         self.gender_stats: dict[str, int] = {}
         self.blocked = 0
         self.hidden_no_tags = 0
@@ -474,6 +491,8 @@ class _ResultsFilter:
             excluded_by.append('required')
         if any(all(any(pt.fullmatch(t) for t in tl) for pt in pl) for pl in dwn.neg_and_groups):
             excluded_by.append('neg')
+        if self.dates is not None and not self._in_dates(info.date):
+            excluded_by.append('date')
         if self.rules is not None:
             res = infer_from_tags(tags, self.rules)
             keep, eff = decide(res, dwn.gender_select, dwn.gender_min_conf, dwn.gender_strict)
@@ -488,6 +507,16 @@ class _ResultsFilter:
         item['excluded'] = bool(excluded_by)
         item['excludedBy'] = excluded_by
         return item
+
+    def _in_dates(self, date: str) -> bool:
+        """Post date (FMT_DATE) within the limits; a post without a readable date is kept, as the download keeps it"""
+        if self.dates is None:
+            return True
+        try:
+            day = as_date(date)
+        except (TypeError, ValueError):
+            return True
+        return self.dates[0] <= day <= self.dates[1]
 
 
 PREVIEW_MODEL_MAX = 40
@@ -552,8 +581,11 @@ def _mark_downloaded(module: str, items: list[dict]) -> None:
 
 
 def m_search_preview(p: dict) -> dict:
-    """Page `page` of search results with thumbnails, local filters (required tags / negative groups) applied.
-    pageSize: see _results_page_size. Multi-task queries: page `page` of every task, merged (see _fetch_results_page)"""
+    """Page `page` of search results with thumbnails, local filters (required tags / negative groups / dates / gender) applied.
+    pageSize: see _results_page_size. Multi-task queries: page `page` of every task, merged (see _fetch_results_page).
+    dateFilter: see _date_filter_kind, plus 'unchecked' (local limits, but the listing carries no post dates: nothing hidden).
+    Pages are the site's pages: with 'local' limits a page may hold no post in range (finding the first page by date costs a
+    search per step, the download does it)"""
     page = max(0, int(p.get('page', 0)))
 
     def fn(dwn, args) -> dict:
@@ -564,10 +596,13 @@ def m_search_preview(p: dict) -> dict:
         result = [item for item in map(filt.item, items_raw) if item is not None]
         _apply_gender_model(filt, result)
         _mark_downloaded(dwn._get_module_abbr(), result)
+        dates = _date_filter_kind(dwn, args)
+        if dates == 'local' and not filt.with_tags:
+            dates = 'unchecked'
         return {'page': page, 'pageSize': page_size, 'hasMore': has_more, 'items': result, 'tasks': list(dwn.tags_str_arr),
                 'requiredTags': list(dwn.required_tags), 'site': dwn._get_sitename(), 'genderStats': filt.gender_stats,
                 'blockedCount': filt.blocked, 'hiddenNoTags': filt.hidden_no_tags, 'genderEnabled': filt.gender_on,
-                'genderModel': filt.model_info}
+                'genderModel': filt.model_info, 'dateFilter': dates}
     module = p.get('module', 'rx')
     res = _with_downloader(module, p.get('tags', ''), list(p.get('args', [])), fn)
     _learn_from_preview(module, res.get('items', []))
