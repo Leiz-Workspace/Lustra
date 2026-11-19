@@ -5,6 +5,8 @@ Lustra: tools of the local download index (lustra/dlindex.py)
   python -m lustra.dlindex_tools import FOLDER [--module ABBR] [--no-recursive] [--verify-md5] [--dry-run] [--json]
   python -m lustra.dlindex_tools retag PATH... [--module ABBR] [--types auto|general,copyright,artist,character,metadata]
                                     [--source both|index|json]
+  python -m lustra.dlindex_tools trash list [--json]
+  python -m lustra.dlindex_tools trash purge (--days N | --all) [--json]
 - clean: drops the rows whose file is no longer on disk. Rows only: files are never touched. Rows whose folder is gone too (an
   unplugged drive looks the same) are kept unless --missing-folders
 - import: records media files already on disk (a library downloaded earlier). Module + post id (or md5) come from the file name
@@ -14,6 +16,9 @@ Lustra: tools of the local download index (lustra/dlindex.py)
   never guessed. Plain numbers ('12345.jpg') and md5 names need --module
 - retag: the re-tag tool (score and tags appended to Lustra file names) with tags from the index, the info files of the folder
   ('-dump_tags') as fallback
+- trash: the files the desktop app's "Đã tải" page deleted (moved to a trash folder, see DownloadIndex.trash). list: what is in
+  it; purge: deletes for good the files trashed more than N days ago (--days 0: all of them) or all of them, then their rows. The
+  app empties its trash by itself (settings: library.trashDays)
 Desktop app: 'import' runs as a job (frozen core: 'lustra-core index import ...'); with LUSTRA_IPC=1 it prints '@@LUSTRA_PROGRESS'
 lines and reads 'cancel' on stdin like download jobs. 'clean' runs in the sidecar ('index.clean'). Exit codes: 0 ok, 1 error,
 2 invalid arguments, 3 finished with failed requests, 130 cancelled
@@ -40,12 +45,12 @@ from dataclasses import dataclass, field
 from multiprocessing.dummy import current_process
 
 from .defines import KNOWN_EXTENSIONS, ThreadInterruptException
-from .dlindex import CleanResult, DownloadIndex, IndexRecord, norm_md5, record_for
+from .dlindex import SEARCH_PAGE_SIZE_MAX, CleanResult, DownloadIndex, IndexRecord, norm_md5, record_for
 from .file_identify import ID_LIST_CHUNK, ID_LIST_MODULES, identify_file_name
 from .logger import Logger, trace
 from .module import ProcModule
 
-__all__ = ('ImportResult', 'LibraryImport', 'clean_index', 'main', 'scan_library')
+__all__ = ('ImportResult', 'LibraryImport', 'clean_index', 'main', 'purge_trash', 'scan_library')
 
 ENV_SECRET_MODULE_ARGS = 'LUSTRA_SECRET_MODULE_ARGS'
 '''JSON object {module abbr: [arguments]} (ex. {"db": ["-api_key", "KEY,LOGIN"]}): per module secrets of an import job, removed from
@@ -82,6 +87,25 @@ def clean_index(*, include_missing_dirs: bool = False, dry_run: bool = False, in
         return index.clean_missing(include_missing_dirs=include_missing_dirs, dry_run=dry_run, progress=progress, cancel=cancel)
 
 
+# ----- trash -----
+
+def purge_trash(*, days: float | None = None, everything: bool = False, index_path: str | os.PathLike | None = None) -> dict:
+    """DownloadIndex.purge_trash: files trashed more than `days` ago, or every file of the trash. A missing index: nothing to do"""
+    with DownloadIndex(index_path) as index:
+        if everything:
+            return index.purge_trash(all=True)
+        return index.purge_trash(older_than_days=days)
+
+
+def trash_items(index_path: str | os.PathLike | None = None) -> Iterator[dict]:
+    """Rows of the trash, most recently trashed first (see DownloadIndex.search)"""
+    with DownloadIndex(index_path) as index:
+        page = 0
+        while items := index.search('', trash=True, order='trashed', page=page, page_size=SEARCH_PAGE_SIZE_MAX)['items']:
+            yield from items
+            page += 1
+
+
 # ----- import -----
 
 @dataclass(slots=True)
@@ -101,7 +125,8 @@ class LibraryFile:
 
 def scan_library(folder: str | os.PathLike, *, recursive: bool = True, cancel: threading.Event | None = None) -> Iterator[LibraryFile]:
     """Media files (known extensions, not empty) under folder, sorted by path. Symlinked folders are not followed, '.part' files and
-    hidden folders are skipped. Only names and sizes are read"""
+    hidden folders are skipped (among them '.lustra-trash', the app's trash: its files are not imported again). Only names and
+    sizes are read"""
     root = os.path.abspath(os.fspath(folder))
     stack = [(root, 0)]
     while stack:
@@ -631,6 +656,37 @@ def _run_clean(ns: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _when(ts: float | None) -> str:
+    return time.strftime('%Y-%m-%d %H:%M', time.localtime(ts)) if ts else '-'
+
+
+def _run_trash(ns: argparse.Namespace) -> int:
+    if ns.trash_command == 'list':
+        items = list(trash_items())
+        if ns.json:
+            print(json.dumps({'total': len(items), 'items': items}, ensure_ascii=False))
+            return EXIT_OK
+        for it in items:
+            print(f'{_when(it["trashedAt"])}  {it["module"]} {it["id"]}  {it["origPath"]}{"" if it["exists"] else "  (file gone)"}')
+            print(f'    in the trash: {it["path"]}')
+        size = sum(int(it['size'] or 0) for it in items)
+        print(f'Trash: {len(items):d} file(s), {size / 1048576:.1f} MB')
+        return EXIT_OK
+    if ns.days is not None and ns.days < 0:
+        print('ERROR: --days must be 0 or more', file=sys.stderr)
+        return EXIT_ARGS
+    res = purge_trash(days=ns.days, everything=ns.all)
+    if ns.json:
+        print(json.dumps(res, ensure_ascii=False))
+    else:
+        which = 'every file' if ns.all else f'files trashed more than {ns.days:d} day(s) ago'
+        print(f'Trash purge ({which}): {res["files"]:d} file(s) deleted ({res["bytes"] / 1048576:.1f} MB), {res["purged"]:d} row(s) '
+              f'removed, {len(res["failed"]):d} failed')
+        for f in res['failed']:
+            print(f'  not deleted: {f["path"]}: {f["error"]}')
+    return EXIT_PARTIAL if res['failed'] else EXIT_OK
+
+
 RETAG_TYPES = ('general', 'copyright', 'artist', 'character', 'metadata')
 
 
@@ -715,6 +771,15 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument('--module', default='rx', help='module whose tag filters are used (--types auto)')
     r.add_argument('--types', default='auto', help=f'auto, or tags of these types only: {",".join(RETAG_TYPES)} (needs tag lists)')
     r.add_argument('--source', choices=('both', 'index', 'json'), default='both')
+    t = sub.add_parser('trash', help='files the desktop app deleted (kept in a trash folder until purged)')
+    tsub = t.add_subparsers(dest='trash_command', required=True)
+    tl = tsub.add_parser('list', help='files in the trash, most recently deleted first')
+    tl.add_argument('--json', action='store_true')
+    tp = tsub.add_parser('purge', help='delete files of the trash for good (and their rows)')
+    which = tp.add_mutually_exclusive_group(required=True)
+    which.add_argument('--days', type=int, help='files deleted more than N days ago (0: all of them)')
+    which.add_argument('--all', action='store_true', help='every file of the trash')
+    tp.add_argument('--json', action='store_true')
     return ap
 
 
@@ -725,6 +790,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_clean(ns)
     if ns.command == 'import':
         return _run_import(ns)
+    if ns.command == 'trash':
+        return _run_trash(ns)
     return _run_retag(ns)
 
 

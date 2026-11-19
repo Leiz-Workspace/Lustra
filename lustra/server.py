@@ -742,8 +742,9 @@ def _int_param(p: dict, key: str, default: int) -> int:
 
 
 def m_index_search(p: dict) -> dict:
-    """{tags, module, dateFrom, dateTo, page, pageSize, order} -> {total, page, pageSize, items: [...], terms}.
+    """{tags, module, dateFrom, dateTo, page, pageSize, order, trash} -> {total, page, pageSize, items: [...], terms}.
     tags: 'tag -tag pre* rating:e md5:<hash> id:<n>' (all must match); dates: post date 'YYYY-MM-DD' (inclusive); pages from 0.
+    trash: true lists the files in the trash (items: trashedAt, origPath) instead of the library.
     Reads only the index: no request to any website. Each call has its own connection (the rpc pool is multi-threaded)"""
     from .dlindex import DownloadIndex
     tags = p.get('tags') or ''
@@ -754,7 +755,7 @@ def m_index_search(p: dict) -> dict:
     with DownloadIndex() as index:
         return index.search(tags[:INDEX_QUERY_MAX_LEN], module=module, date_from=str(p.get('dateFrom') or ''),
                             date_to=str(p.get('dateTo') or ''), page=_int_param(p, 'page', 0), page_size=_int_param(p, 'pageSize', 50),
-                            order=str(p.get('order') or 'downloaded'))
+                            order=str(p.get('order') or 'downloaded'), trash=p.get('trash') is True)
 
 
 def _model_server_params(p: dict) -> tuple[str, str]:
@@ -909,6 +910,78 @@ def m_index_clean_cancel(_: dict) -> dict:
 
 
 METHODS.update({'index.clean': m_index_clean, 'index.cleanCancel': m_index_clean_cancel})
+
+
+# ----- trash of the library (lustra/dlindex.py). The app calls these from main only (library:* handlers), never the renderer -----
+
+INDEX_PATHS_MAX = 1000
+INDEX_ROOTS_MAX = 8
+INDEX_PATH_MAX_LEN = 4096
+TRASH_DAYS_MAX = 3650
+
+
+def _paths_param(p: dict, key: str, max_count: int, required: bool = True) -> list[str]:
+    """A list of absolute paths (the index compares them as stored: they come from index.search items)"""
+    raw = p.get(key)
+    if raw is None and not required:
+        return []
+    if not isinstance(raw, list) or (required and not raw) or len(raw) > max_count:
+        raise RpcError(-32602, f'invalid \'{key}\'')
+    for x in raw:
+        if not isinstance(x, str) or not x or len(x) > INDEX_PATH_MAX_LEN or '\x00' in x or not os.path.isabs(x):
+            raise RpcError(-32602, f'invalid \'{key}\': absolute paths only')
+    return raw
+
+
+def m_index_trash(p: dict) -> dict:
+    """{paths, roots?} -> {trashed: [{path, trashPath}], failed: [{path, error}], refused: [path]}. Moves files of the library into
+    the trash (renamed on the same drive, never copied; roots: the download folders, see DownloadIndex.trash_folders). Only files
+    the index has as rows of the library: any other path is refused, never touched"""
+    from .dlindex import DownloadIndex
+    paths = _paths_param(p, 'paths', INDEX_PATHS_MAX)
+    roots = _paths_param(p, 'roots', INDEX_ROOTS_MAX, required=False)
+    with DownloadIndex() as index:
+        return index.trash(paths, roots=roots)
+
+
+def m_index_restore(p: dict) -> dict:
+    """{paths: paths in the trash} -> {restored: [{path, restoredPath}], failed, refused}: files back where they were"""
+    from .dlindex import DownloadIndex
+    paths = _paths_param(p, 'paths', INDEX_PATHS_MAX)
+    with DownloadIndex() as index:
+        return index.restore(paths)
+
+
+def m_index_purge_trash(p: dict) -> dict:
+    """{days} | {paths} | {all: true} -> {purged, files, bytes, failed, kept}: deletes files of the trash for good (trashed more
+    than `days` days ago, the given paths of the trash, or all of them), then their rows. Cannot be undone: the app asks first"""
+    from .dlindex import DownloadIndex
+    ways = [k for k in ('days', 'paths', 'all') if p.get(k) is not None and p.get(k) is not False]
+    if len(ways) != 1:
+        raise RpcError(-32602, 'one of \'days\', \'paths\' or \'all\'')
+    with DownloadIndex() as index:
+        if ways[0] == 'days':
+            days = p['days']
+            if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= TRASH_DAYS_MAX:
+                raise RpcError(-32602, f'invalid \'days\': 0..{TRASH_DAYS_MAX:d}')
+            return index.purge_trash(older_than_days=days)
+        if ways[0] == 'paths':
+            return index.purge_trash(paths=_paths_param(p, 'paths', INDEX_PATHS_MAX))
+        if p['all'] is not True:
+            raise RpcError(-32602, 'invalid \'all\'')
+        return index.purge_trash(all=True)
+
+
+def m_index_forget(p: dict) -> dict:
+    """{paths} -> {removed, refused}: drops the rows of files that are no longer on disk (rows only)"""
+    from .dlindex import DownloadIndex
+    paths = _paths_param(p, 'paths', INDEX_PATHS_MAX)
+    with DownloadIndex() as index:
+        return index.forget(paths)
+
+
+METHODS.update({'index.trash': m_index_trash, 'index.restore': m_index_restore, 'index.purgeTrash': m_index_purge_trash,
+                'index.forget': m_index_forget})
 
 
 def main() -> int:

@@ -464,6 +464,12 @@ body.safe .card:hover img { filter: none; }
 .lib-grid .card img, .lib-grid .card .ph { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
 .lib-grid .card .ph { display: grid; place-items: center; font-size: 34px; color: var(--muted); background: var(--panel-2); }
 .lib-grid .card.missing { opacity: .45; }
+.lib-grid .card.missing.sel { opacity: .75; }
+.lib-grid { user-select: none; } /* shift + click selects a range of cards, not text */
+.lib-grid .card .b.left { background: var(--warn); color: #241500; }
+.lib-tools { margin-left: auto; }
+#lib-view button { white-space: nowrap; }
+.toast.has-action { display: flex; align-items: center; gap: 12px; }
 .lib-path { font-size: 12px; word-break: break-all; }
 .lightbox video, .lightbox audio { width: 100%; max-height: 70vh; border-radius: var(--radius-sm); background: #000; }
 .lightbox .cover { display: grid; gap: 10px; }

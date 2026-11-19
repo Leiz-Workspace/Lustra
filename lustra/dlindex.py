@@ -10,6 +10,11 @@ Lustra: local index of downloaded files, <data dir>/index/downloads.sqlite
 - LUSTRA_DLINDEX=0 disables recording (reading still works)
 - maintenance (lustra/dlindex_tools.py): clean_missing() drops rows whose file is gone (rows only, never files), the library
   import adds files already on disk, rename_paths() follows files renamed by the re-tag / sort tools
+- trash (the "Đã tải" page of the desktop app): trash() renames files into a trash folder on the same drive (never copied, see
+  trash_folders), restore() puts them back, purge_trash() deletes them for good, forget() drops rows whose file is gone. A trashed row
+  keeps its metadata: path is where the file is now (in the trash), orig_path where it was, trashed_at when. Readers that mean "files
+  of the library" (find_known, search, stats, rows_for_posts, posts_after) leave trashed rows out: a post whose file is in the trash
+  or was purged can be downloaded again
 """
 #########################################
 #
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import errno
 import os
 import pathlib
 import queue
@@ -34,15 +40,15 @@ from .defines import FMT_DATE, ItemInfo
 from .logger import trace
 
 __all__ = (
-    'ENV_DLINDEX', 'CleanResult', 'DownloadIndex', 'IndexRecord', 'IndexWriter', 'file_present', 'index_path', 'indexing_enabled',
-    'norm_date', 'norm_md5', 'parse_search_terms', 'record_for', 'rename_indexed_files',
+    'ENV_DLINDEX', 'CleanResult', 'DownloadIndex', 'IndexRecord', 'IndexWriter', 'file_present', 'in_trash_folder', 'index_path',
+    'indexing_enabled', 'norm_date', 'norm_md5', 'parse_search_terms', 'record_for', 'rename_indexed_files',
 )
 
 ENV_DLINDEX = 'LUSTRA_DLINDEX'
 '''0: finished downloads are not recorded (the index stays readable, -skip_known keeps working)'''
 INDEX_DIR_NAME = 'index'
 INDEX_FILE_NAME = 'downloads.sqlite'
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT = 10.0
 '''seconds a connection waits while another process holds the write lock'''
 WRITE_ATTEMPTS = 3
@@ -62,6 +68,14 @@ TAG_MAX_CHAR = '\U0010ffff'
 '''upper bound of a prefix range: name >= prefix AND name < prefix + this'''
 CLEAN_BATCH = 500
 '''rows checked on disk per step of clean_missing(): each step deletes in its own short transaction'''
+TRASH_DIR_NAME = 'trash'
+'''<data dir>/trash: the trash of files on the same drive as the data dir'''
+TRASH_HIDDEN_NAME = '.lustra-trash'
+'''trash folder on another drive: at the root of the download folder, else next to the file (the library import skips dot folders)'''
+TRASH_BATCH = 200
+'''files moved per write transaction of trash() / restore()'''
+TRASH_NAME_TRIES = 1000
+DAY_SECONDS = 86400
 
 re_md5 = re.compile(r'[0-9a-f]{32}')
 re_int = re.compile(r'[-+]?\d+')
@@ -98,18 +112,28 @@ SCHEMA = (
     ) WITHOUT ROWID''',
     'CREATE INDEX IF NOT EXISTS file_tags_file ON file_tags(file_id)',
 )
-'''post_id has INTEGER affinity: numeric ids are stored (and compared) as numbers'''
+'''schema 1. post_id has INTEGER affinity: numeric ids are stored (and compared) as numbers'''
+MIGRATIONS = {
+    2: (
+        'ALTER TABLE files ADD COLUMN trashed_at REAL',
+        'ALTER TABLE files ADD COLUMN orig_path TEXT',
+        'CREATE INDEX IF NOT EXISTS files_trashed_at ON files(trashed_at) WHERE trashed_at IS NOT NULL',
+    ),
+}
+'''schema N-1 -> N. A new index runs them after SCHEMA too, so both ways give the same tables. Rows already there are untouched
+(trashed_at NULL: not in the trash)'''
 
 UPSERT_FILE = (
     'INSERT INTO files (module, post_id, md5, path, ext, size, tags, score, rating, post_date, downloaded_at) '
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
     'ON CONFLICT(path) DO UPDATE SET module = excluded.module, post_id = excluded.post_id, md5 = excluded.md5, ext = excluded.ext, '
     'size = excluded.size, tags = excluded.tags, score = excluded.score, rating = excluded.rating, post_date = excluded.post_date, '
-    'downloaded_at = excluded.downloaded_at'
+    'downloaded_at = excluded.downloaded_at, trashed_at = NULL, orig_path = NULL'
 )
-'''one row per file path: downloading a post again into the same file refreshes its row'''
+'''one row per file path: downloading a post again into the same file refreshes its row (a file written there is not in the trash)'''
 
-ROW_COLUMNS = 'f.module, f.post_id, f.md5, f.path, f.ext, f.size, f.tags, f.score, f.rating, f.post_date, f.downloaded_at'
+ROW_COLUMNS = ('f.module, f.post_id, f.md5, f.path, f.ext, f.size, f.tags, f.score, f.rating, f.post_date, f.downloaded_at, '
+               'f.trashed_at, f.orig_path')
 SEARCH_ORDERS = {
     'downloaded': 'f.downloaded_at DESC, f.id DESC',
     'downloaded_asc': 'f.downloaded_at ASC, f.id ASC',
@@ -117,6 +141,7 @@ SEARCH_ORDERS = {
     'date_asc': "f.post_date = '' ASC, f.post_date ASC, f.downloaded_at ASC",
     'score': 'f.score IS NULL ASC, f.score DESC, f.downloaded_at DESC',
     'id': 'f.module ASC, f.post_id DESC',
+    'trashed': 'f.trashed_at DESC, f.id DESC',
 }
 TAG_FILES_EQ = 'SELECT file_id FROM file_tags WHERE tag_id = (SELECT id FROM tag_names WHERE name = ?)'
 TAG_FILES_PREFIX = 'SELECT file_id FROM file_tags WHERE tag_id IN (SELECT id FROM tag_names WHERE name >= ? AND name < ?)'
@@ -202,6 +227,34 @@ def file_present(path: str) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
+def _device(path: str) -> int | None:
+    """Device of path, or of its nearest existing parent (a trash folder not created yet). None if nothing of it exists"""
+    p = os.path.abspath(path)
+    while True:
+        with contextlib.suppress(OSError):
+            return os.stat(p).st_dev
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
+def _within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(root)]) == os.path.normcase(root)
+    except ValueError:  # Windows: another drive
+        return False
+
+
+def in_trash_folder(path: str) -> bool:
+    """path is a file directly inside a trash folder (see DownloadIndex.trash_folders): purge_trash() deletes no other file"""
+    return os.path.basename(os.path.dirname(path)) in (TRASH_DIR_NAME, TRASH_HIDDEN_NAME)
+
+
+def _os_error(err: OSError) -> str:
+    return f'{type(err).__name__}: {err.strerror or err}'
+
+
 @dataclass(slots=True)
 class IndexRecord:
     """A finished file. post_date: 'YYYY-MM-DD' or ''"""
@@ -280,10 +333,12 @@ def parse_search_terms(text: str | Sequence[str]) -> list[tuple[bool, str, str]]
 
 class DownloadIndex:
     """A connection to the index (one thread at a time). Readers never create the file: an index that does not exist yet is
-    empty. Writers (create=True) create it and its schema"""
+    empty. Writers (create=True) create it and its schema. trash_dir: the trash on the drive of the data dir (default: next to
+    the index folder, <data dir>/trash)"""
 
-    def __init__(self, path: str | os.PathLike | None = None, *, create: bool = False) -> None:
+    def __init__(self, path: str | os.PathLike | None = None, *, create: bool = False, trash_dir: str | os.PathLike | None = None) -> None:
         self.path = pathlib.Path(path) if path else index_path()
+        self.trash_dir = pathlib.Path(trash_dir) if trash_dir else self.path.parent.parent / TRASH_DIR_NAME
         self._create = create
         self._conn: sqlite3.Connection | None = None
         self._tag_ids: dict[str, int] = {}
@@ -337,11 +392,16 @@ class DownloadIndex:
     def _ensure_schema(conn: sqlite3.Connection) -> None:
         if conn.execute('PRAGMA user_version').fetchone()[0] >= SCHEMA_VERSION:
             return
-        conn.execute('BEGIN IMMEDIATE')  # another process may be creating it right now
+        conn.execute('BEGIN IMMEDIATE')  # another process may be creating or migrating it right now
         try:
-            if conn.execute('PRAGMA user_version').fetchone()[0] < SCHEMA_VERSION:
-                for statement in SCHEMA:
-                    conn.execute(statement)
+            version = conn.execute('PRAGMA user_version').fetchone()[0]
+            if version < SCHEMA_VERSION:
+                if version < 1:
+                    for statement in SCHEMA:
+                        conn.execute(statement)
+                for step in range(max(version, 1) + 1, SCHEMA_VERSION + 1):
+                    for statement in MIGRATIONS[step]:
+                        conn.execute(statement)
                 conn.execute(f'PRAGMA user_version = {SCHEMA_VERSION:d}')
             conn.execute('COMMIT')
         except BaseException:
@@ -390,7 +450,8 @@ class DownloadIndex:
     # ----- read -----
 
     def find_known(self, module: str, post_ids: Iterable[str] = (), md5s: Iterable[str] = ()) -> tuple[dict[str, str], dict[str, str]]:
-        """({post id: path} of this module's posts, {md5: path} of any module) whose indexed file is still on disk"""
+        """({post id: path} of this module's posts, {md5: path} of any module) whose indexed file is still on disk. Files in the
+        trash do not count (deleted by the user: the post may be downloaded again)"""
         by_id: dict[str, str] = {}
         by_md5: dict[str, str] = {}
         conn = self._connection()
@@ -398,20 +459,21 @@ class DownloadIndex:
             return by_id, by_md5
         ids = list(dict.fromkeys(str(x).strip() for x in post_ids if str(x).strip()))
         for chunk in _chunks(ids, SQL_CHUNK):
-            sql = f'SELECT post_id, path FROM files WHERE module = ? AND post_id IN ({_qs(len(chunk))})'
+            sql = f'SELECT post_id, path FROM files WHERE module = ? AND post_id IN ({_qs(len(chunk))}) AND trashed_at IS NULL'
             for post_id, path in conn.execute(sql, (module, *(_db_post_id(x) for x in chunk))):
                 if str(post_id) not in by_id and file_present(path):
                     by_id[str(post_id)] = path
         hashes = list(dict.fromkeys(h for h in (norm_md5(x) for x in md5s) if h))
         for chunk in _chunks(hashes, SQL_CHUNK):
-            for md5, path in conn.execute(f'SELECT md5, path FROM files WHERE md5 IN ({_qs(len(chunk))})', chunk):
+            for md5, path in conn.execute(f'SELECT md5, path FROM files WHERE md5 IN ({_qs(len(chunk))}) AND trashed_at IS NULL', chunk):
                 if md5 not in by_md5 and file_present(path):
                     by_md5[md5] = path
         return by_id, by_md5
 
     @staticmethod
-    def _search_filter(terms: list[tuple[bool, str, str]], module: str, date_from: str, date_to: str) -> tuple[str, list]:
-        clauses: list[str] = []
+    def _search_filter(terms: list[tuple[bool, str, str]], module: str, date_from: str, date_to: str,
+                       trash: bool = False) -> tuple[str, list]:
+        clauses: list[str] = ['f.trashed_at IS NOT NULL' if trash else 'f.trashed_at IS NULL']
         params: list = []
         if module:
             clauses.append('f.module = ?')
@@ -439,14 +501,15 @@ class DownloadIndex:
 
     @staticmethod
     def _row(r: tuple) -> dict:
-        module, post_id, md5, path, ext, size, tags, score, rating, post_date, downloaded_at = r
-        return {'module': module, 'id': str(post_id), 'md5': md5 or '', 'path': path, 'name': os.path.basename(path), 'ext': ext,
-                'size': size, 'tags': tags, 'score': score, 'rating': rating, 'date': post_date, 'downloadedAt': downloaded_at,
-                'exists': file_present(path)}
+        module, post_id, md5, path, ext, size, tags, score, rating, post_date, downloaded_at, trashed_at, orig_path = r
+        return {'module': module, 'id': str(post_id), 'md5': md5 or '', 'path': path, 'name': os.path.basename(orig_path or path),
+                'ext': ext, 'size': size, 'tags': tags, 'score': score, 'rating': rating, 'date': post_date, 'downloadedAt': downloaded_at,
+                'exists': file_present(path), 'trashedAt': trashed_at, 'origPath': orig_path or ''}
 
     def search(self, tags: str | Sequence[str] = '', *, module: str = '', date_from: str = '', date_to: str = '', page: int = 0,
-               page_size: int = 50, order: str = 'downloaded') -> dict:
-        """Files matching all terms (see parse_search_terms), module, post date range (inclusive). Pages start at 0"""
+               page_size: int = 50, order: str = 'downloaded', trash: bool = False) -> dict:
+        """Files matching all terms (see parse_search_terms), module, post date range (inclusive). Pages start at 0.
+        trash: the files in the trash instead of the library (path: in the trash, origPath: where the file was)"""
         page_size = max(1, min(SEARCH_PAGE_SIZE_MAX, int(page_size or 50)))
         page = max(0, int(page or 0))
         terms = parse_search_terms(tags)
@@ -454,7 +517,7 @@ class DownloadIndex:
         conn = self._connection()
         if conn is None:
             return res
-        where, params = self._search_filter(terms, module, date_from, date_to)
+        where, params = self._search_filter(terms, module, date_from, date_to, trash)
         res['total'] = conn.execute(f'SELECT COUNT(*) FROM files f WHERE {where}', params).fetchone()[0]
         order_by = SEARCH_ORDERS.get(order, SEARCH_ORDERS['downloaded'])
         sql = f'SELECT {ROW_COLUMNS} FROM files f WHERE {where} ORDER BY {order_by} LIMIT ? OFFSET ?'
@@ -462,25 +525,32 @@ class DownloadIndex:
         return res
 
     def stats(self) -> dict:
-        """Totals for the settings page. Files are not checked on disk (a stat per file would be slow on large indexes)"""
+        """Totals for the settings page: the library (files in the trash left out) and the trash {files, bytes, oldest: trashed_at}.
+        Files are not checked on disk (a stat per file would be slow on large indexes)"""
         db_bytes = 0
         for suffix in ('', '-wal', '-shm'):
             with contextlib.suppress(OSError):
                 db_bytes += os.path.getsize(f'{self.path}{suffix}')
         out = {'path': str(self.path), 'exists': False, 'schema': 0, 'files': 0, 'posts': 0, 'withMd5': 0, 'tags': 0, 'bytes': 0,
-               'dbBytes': db_bytes, 'first': None, 'last': None, 'modules': [], 'recording': indexing_enabled()}
+               'dbBytes': db_bytes, 'first': None, 'last': None, 'modules': [], 'recording': indexing_enabled(),
+               'trash': {'files': 0, 'bytes': 0, 'oldest': None}}
         conn = self._connection()
         if conn is None:
             return out
         files, with_md5, size, first, last = conn.execute(
-            'SELECT COUNT(*), COUNT(md5), COALESCE(SUM(size), 0), MIN(downloaded_at), MAX(downloaded_at) FROM files').fetchone()
+            'SELECT COUNT(*), COUNT(md5), COALESCE(SUM(size), 0), MIN(downloaded_at), MAX(downloaded_at) FROM files '
+            'WHERE trashed_at IS NULL').fetchone()
+        trashed, trash_bytes, oldest = conn.execute(
+            'SELECT COUNT(*), COALESCE(SUM(size), 0), MIN(trashed_at) FROM files WHERE trashed_at IS NOT NULL').fetchone()
         out.update({
             'exists': True, 'schema': conn.execute('PRAGMA user_version').fetchone()[0], 'files': files, 'withMd5': with_md5,
             'bytes': size, 'first': first, 'last': last,
-            'posts': conn.execute('SELECT COUNT(*) FROM (SELECT 1 FROM files GROUP BY module, post_id)').fetchone()[0],
+            'posts': conn.execute('SELECT COUNT(*) FROM (SELECT 1 FROM files WHERE trashed_at IS NULL GROUP BY module, post_id)').fetchone()[0],
             'tags': conn.execute('SELECT COUNT(*) FROM tag_names').fetchone()[0],
             'modules': [{'module': m, 'files': n, 'bytes': b, 'last': t} for m, n, b, t in conn.execute(
-                'SELECT module, COUNT(*), COALESCE(SUM(size), 0), MAX(downloaded_at) FROM files GROUP BY module ORDER BY COUNT(*) DESC')],
+                'SELECT module, COUNT(*), COALESCE(SUM(size), 0), MAX(downloaded_at) FROM files WHERE trashed_at IS NULL '
+                'GROUP BY module ORDER BY COUNT(*) DESC')],
+            'trash': {'files': trashed, 'bytes': trash_bytes, 'oldest': oldest},
         })
         return out
 
@@ -509,22 +579,23 @@ class DownloadIndex:
 
     def posts_after(self, module: str, after: int = 0, limit: int = 5000) -> list[tuple[int, str, str]]:
         """(row id, post id, tags) of this module's files with a row id above 'after', oldest first: tag lists learned from the
-        downloads read the index in steps (lustra/tags_learned.py)"""
+        downloads read the index in steps (lustra/tags_learned.py). Files in the trash are left out"""
         conn = self._connection()
         if conn is None:
             return []
-        rows = conn.execute('SELECT id, post_id, tags FROM files WHERE module = ? AND id > ? ORDER BY id LIMIT ?', (module, int(after), int(limit)))
+        rows = conn.execute('SELECT id, post_id, tags FROM files WHERE module = ? AND id > ? AND trashed_at IS NULL ORDER BY id LIMIT ?',
+                            (module, int(after), int(limit)))
         return [(int(r[0]), str(r[1]), str(r[2] or '')) for r in rows]
 
     def rows_for_posts(self, module: str, post_ids: Iterable[str]) -> dict[str, dict]:
-        """{post id: row} of this module's posts (the most recent download of each), any path"""
+        """{post id: row} of this module's posts (the most recent download of each), any path. Files in the trash are left out"""
         conn = self._connection()
         out: dict[str, dict] = {}
         if conn is None:
             return out
         ids = list(dict.fromkeys(str(x).strip() for x in post_ids if str(x).strip()))
         for chunk in _chunks(ids, SQL_CHUNK):
-            sql = (f'SELECT {ROW_COLUMNS} FROM files f WHERE f.module = ? AND f.post_id IN ({_qs(len(chunk))}) '
+            sql = (f'SELECT {ROW_COLUMNS} FROM files f WHERE f.module = ? AND f.post_id IN ({_qs(len(chunk))}) AND f.trashed_at IS NULL '
                    'ORDER BY f.downloaded_at ASC')
             for r in conn.execute(sql, (module, *(_db_post_id(x) for x in chunk))):
                 out[str(r[1])] = self._row(r)
@@ -619,6 +690,231 @@ class DownloadIndex:
                 conn.execute('ROLLBACK')
             raise
         return removed
+
+    # ----- trash (the "Đã tải" page of the desktop app, see the module docstring) -----
+
+    def trash_folders(self, path: str, roots: Sequence[str | os.PathLike] = ()) -> list[str]:
+        """Trash folders for the file at path, best first: <data dir>/trash when it is on the file's drive, '.lustra-trash' at the
+        root of the download folder that holds the file (roots: the configured download folders), '.lustra-trash' next to the file.
+        Files are only renamed into one of them, never copied: a folder on another drive is left out, and trash() goes on to the
+        next one when a rename still fails with EXDEV (a mount point inside the download folder)"""
+        try:
+            dev = os.stat(path).st_dev
+        except OSError:
+            return []
+        out: list[str] = []
+        if _device(str(self.trash_dir)) == dev:
+            out.append(str(self.trash_dir))
+        folder = os.path.dirname(os.path.abspath(path))
+        for root in roots:
+            root = os.path.abspath(os.fspath(root))
+            if _within(folder, root) and _device(root) == dev:
+                out.append(os.path.join(root, TRASH_HIDDEN_NAME))
+        out.append(os.path.join(folder, TRASH_HIDDEN_NAME))
+        return list(dict.fromkeys(out))
+
+    @staticmethod
+    def _free_path(conn: sqlite3.Connection, folder: str, name: str) -> str:
+        """folder/name, else folder/<stem>_1<ext>, _2, ... when a file or a row of the index has that path already"""
+        stem, ext = os.path.splitext(name)
+        for n in range(TRASH_NAME_TRIES):
+            target = os.path.join(folder, f'{stem}_{n:d}{ext}' if n else name)
+            if not os.path.lexists(target) and conn.execute('SELECT 1 FROM files WHERE path = ?', (target,)).fetchone() is None:
+                return target
+        raise FileExistsError(errno.EEXIST, 'no free name', os.path.join(folder, name))
+
+    def _rename_into(self, conn: sqlite3.Connection, src: str, folders: Sequence[str], name: str) -> tuple[str, str]:
+        """Renames src into the first of folders that takes it: (new path, ''), or ('', why) when none did"""
+        why = ''
+        for folder in folders:
+            try:
+                os.makedirs(folder, exist_ok=True)
+                target = self._free_path(conn, folder, name)
+                os.replace(src, target)
+                return target, ''
+            except OSError as err:  # EXDEV: another drive after all, the next folder is nearer to the file
+                if not why or err.errno != errno.EXDEV:
+                    why = _os_error(err)
+        return '', why or 'no trash folder on the drive of the file'
+
+    @staticmethod
+    def _commit_moves(conn: sqlite3.Connection, moved: list[tuple[int, str, str]], sql: str,
+                      args: Callable[[tuple[int, str, str]], tuple]) -> list[tuple[int, str, str]]:
+        """The rows of files just renamed (row id, old path, new path) follow them in one transaction. A file whose row changed
+        meanwhile (no match), and every file of a transaction that fails, is renamed back. Returns the moves kept"""
+        if not moved:
+            return []
+        kept: list[tuple[int, str, str]] = []
+        undo: list[tuple[int, str, str]] = []
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            for m in moved:
+                (kept if conn.execute(sql, args(m)).rowcount else undo).append(m)
+            conn.execute('COMMIT')
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute('ROLLBACK')
+            undo = moved
+            raise
+        finally:
+            for _, old, new in undo:
+                if not os.path.lexists(old):
+                    with contextlib.suppress(OSError):
+                        os.replace(new, old)
+        return kept
+
+    def trash(self, paths: Iterable[str], *, roots: Sequence[str | os.PathLike] = (), now: float | None = None) -> dict:
+        """Moves files of the library into the trash (see trash_folders; named '<row id>_<name>') and marks their rows: path = where
+        the file is now, orig_path = where it was, trashed_at. Only rows of the library whose file is on disk: a path the index does
+        not know, or already in the trash, is refused and never touched.
+        {trashed: [{path, trashPath}], failed: [{path, error}], refused: [path]}"""
+        wanted = list(dict.fromkeys(str(p) for p in paths))
+        res: dict = {'trashed': [], 'failed': [], 'refused': []}
+        conn = self._connection()
+        if conn is None:
+            res['refused'] = wanted
+            return res
+        when = time.time() if now is None else float(now)
+        for chunk in _chunks(wanted, TRASH_BATCH):
+            ids = {p: i for i, p in conn.execute(
+                f'SELECT id, path FROM files WHERE path IN ({_qs(len(chunk))}) AND trashed_at IS NULL', chunk)}
+            moved: list[tuple[int, str, str]] = []
+            for path in chunk:
+                row_id = ids.get(path)
+                if row_id is None or not file_present(path):
+                    res['refused'].append(path)
+                    continue
+                target, why = self._rename_into(conn, path, self.trash_folders(path, roots), f'{row_id:d}_{os.path.basename(path)}')
+                if target:
+                    moved.append((row_id, path, target))
+                else:
+                    res['failed'].append({'path': path, 'error': why})
+            kept = self._commit_moves(conn, moved, 'UPDATE files SET path = ?, orig_path = ?, trashed_at = ? '
+                                                   'WHERE id = ? AND path = ? AND trashed_at IS NULL',
+                                      lambda m: (m[2], m[1], when, m[0], m[1]))
+            res['trashed'] += [{'path': old, 'trashPath': new} for _, old, new in kept]
+            res['failed'] += [{'path': m[1], 'error': 'changed meanwhile'} for m in moved if m not in kept]
+        return res
+
+    def restore(self, paths: Iterable[str]) -> dict:
+        """Moves files of the trash (their current paths) back where they were and clears their trash mark. A folder that is gone
+        is created again; a name taken meanwhile (a file, or the row of a new download of the post) gets _1, _2, ... Only rows in
+        the trash: any other path is refused. A rename that fails (another drive: files are never copied) leaves the file in the
+        trash. {restored: [{path, restoredPath}], failed: [{path, error}], refused: [path]}"""
+        wanted = list(dict.fromkeys(str(p) for p in paths))
+        res: dict = {'restored': [], 'failed': [], 'refused': []}
+        conn = self._connection()
+        if conn is None:
+            res['refused'] = wanted
+            return res
+        for chunk in _chunks(wanted, TRASH_BATCH):
+            rows = {p: (i, orig) for i, p, orig in conn.execute(
+                f'SELECT id, path, orig_path FROM files WHERE path IN ({_qs(len(chunk))}) AND trashed_at IS NOT NULL', chunk)}
+            moved: list[tuple[int, str, str]] = []
+            for path in chunk:
+                row_id, orig = rows.get(path, (None, ''))
+                if row_id is None or not orig:
+                    res['refused'].append(path)
+                    continue
+                if not file_present(path):
+                    res['failed'].append({'path': path, 'error': 'the file is no longer in the trash'})
+                    continue
+                folder, name = os.path.split(orig)
+                try:
+                    os.makedirs(folder, exist_ok=True)
+                    target = self._free_path(conn, folder, name)
+                    os.replace(path, target)
+                except OSError as err:
+                    res['failed'].append({'path': path, 'error': _os_error(err)})
+                    continue
+                moved.append((row_id, path, target))
+            kept = self._commit_moves(conn, moved, 'UPDATE files SET path = ?, orig_path = NULL, trashed_at = NULL '
+                                                   'WHERE id = ? AND path = ? AND trashed_at IS NOT NULL',
+                                      lambda m: (m[2], m[0], m[1]))
+            res['restored'] += [{'path': old, 'restoredPath': new} for _, old, new in kept]
+            res['failed'] += [{'path': m[1], 'error': 'changed meanwhile'} for m in moved if m not in kept]
+        return res
+
+    def purge_trash(self, *, older_than_days: float | None = None, paths: Iterable[str] | None = None, all: bool = False,  # noqa: A002
+                    now: float | None = None, batch: int = CLEAN_BATCH) -> dict:
+        """Deletes files of the trash for good, then their rows and tags, a batch at a time (one short transaction each): rows
+        trashed more than older_than_days ago, the given paths (rows in the trash only), or all of them; one of the three. A file
+        already gone only loses its row; a file that cannot be deleted (in use) keeps it. Only files directly inside a trash folder
+        are deleted: a row of the trash that points anywhere else loses its row, its file stays (kept). Empty '.lustra-trash'
+        folders are removed. {purged: rows removed, files: files deleted, bytes, failed: [{path, error}], kept}"""
+        if (older_than_days is not None) + (paths is not None) + bool(all) != 1:
+            raise ValueError('purge_trash: older_than_days, paths or all, one of them')
+        res: dict = {'purged': 0, 'files': 0, 'bytes': 0, 'failed': [], 'kept': 0}
+        conn = self._connection()
+        if conn is None:
+            return res
+        batch = max(1, int(batch))
+
+        def steps() -> Iterator[list[tuple[int, str, float]]]:
+            if paths is not None:
+                for chunk in _chunks(list(dict.fromkeys(str(p) for p in paths)), min(batch, SQL_CHUNK)):
+                    yield conn.execute(f'SELECT id, path, downloaded_at FROM files WHERE path IN ({_qs(len(chunk))}) '
+                                       'AND trashed_at IS NOT NULL', chunk).fetchall()
+                return
+            where, args = 'trashed_at IS NOT NULL', []
+            if older_than_days is not None:
+                where += ' AND trashed_at < ?'
+                args.append((time.time() if now is None else float(now)) - float(older_than_days) * DAY_SECONDS)
+            last = 0
+            while rows := conn.execute(f'SELECT id, path, downloaded_at FROM files WHERE {where} AND id > ? ORDER BY id LIMIT ?',
+                                       (*args, last, batch)).fetchall():
+                last = rows[-1][0]
+                yield rows
+
+        folders: set[str] = set()
+        for rows in steps():
+            gone: list[tuple[int, str, float]] = []
+            for row in rows:
+                path = row[1]
+                if not in_trash_folder(path):
+                    res['kept'] += 1
+                else:
+                    try:
+                        size = os.lstat(path).st_size
+                        os.remove(path)
+                        res['files'] += 1
+                        res['bytes'] += size
+                        folders.add(os.path.dirname(path))
+                    except FileNotFoundError:
+                        pass
+                    except OSError as err:
+                        res['failed'].append({'path': path, 'error': _os_error(err)})
+                        continue
+                gone.append(row)
+            if gone:
+                res['purged'] += self._delete_rows(conn, gone)
+        for folder in folders:
+            if os.path.basename(folder) == TRASH_HIDDEN_NAME:
+                with contextlib.suppress(OSError):
+                    os.rmdir(folder)  # only when empty
+        return res
+
+    def forget(self, paths: Iterable[str]) -> dict:
+        """Drops the rows (and tags) of files that are no longer on disk, in the library or the trash. Rows only: a path whose file
+        is still there, or that the index does not know, is refused. {removed, refused: [path]}"""
+        wanted = list(dict.fromkeys(str(p) for p in paths))
+        res: dict = {'removed': 0, 'refused': []}
+        conn = self._connection()
+        if conn is None:
+            res['refused'] = wanted
+            return res
+        for chunk in _chunks(wanted, SQL_CHUNK):
+            rows = {r[1]: r for r in conn.execute(f'SELECT id, path, downloaded_at FROM files WHERE path IN ({_qs(len(chunk))})', chunk)}
+            gone = []
+            for path in chunk:
+                row = rows.get(path)
+                if row is None or file_present(path):
+                    res['refused'].append(path)
+                else:
+                    gone.append(row)
+            if gone:
+                res['removed'] += self._delete_rows(conn, gone)
+        return res
 
 
 def rename_indexed_files(pairs: Sequence[tuple[str | os.PathLike, str | os.PathLike]]) -> int:
