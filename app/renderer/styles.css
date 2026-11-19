@@ -18,6 +18,7 @@
   --border: rgba(255, 220, 190, .09); --border-strong: rgba(255, 220, 190, .18);
   --text: #f4ece5; --muted: #a8998d; --accent: #ff6a1a; --accent-2: #ffae73; --accent-ink: #1a0d05;
   --ok: #4fd18b; --danger: #ff5468; --warn: #ffb547; --meta: #6fa8ff; --or: #b892ff; --neg: #ff8a3d;
+  --warn-ink: #241500; /* text on a --warn background (WCAG AA 4.5:1) */
   --shadow: 0 10px 30px rgba(0, 0, 0, .45); --dim-color: 8, 6, 5;
 }
 [data-theme="graphite"] {
@@ -26,6 +27,7 @@
   --border: rgba(255, 255, 255, .08); --border-strong: rgba(255, 255, 255, .18);
   --text: #ececec; --muted: #9a9a9e; --accent: #e8e8e8; --accent-2: #bdbdbd; --accent-ink: #111;
   --ok: #7fd6a0; --danger: #ff6b7a; --warn: #f4c06b; --meta: #9cc0ff; --or: #c9b3ff; --neg: #f0a070;
+  --warn-ink: #241500; /* text on a --warn background (WCAG AA 4.5:1) */
   --shadow: 0 10px 30px rgba(0, 0, 0, .5); --dim-color: 6, 6, 7;
 }
 [data-theme="paper"] {
@@ -34,6 +36,7 @@
   --border: rgba(60, 40, 20, .12); --border-strong: rgba(60, 40, 20, .24);
   --text: #221a14; --muted: #6f6258; --accent: #e2570b; --accent-2: #b8460a; --accent-ink: #fff;
   --ok: #17864b; --danger: #c8283b; --warn: #a86400; --meta: #2563c9; --or: #7046c9; --neg: #c25a10;
+  --warn-ink: #fff; /* text on a --warn background (WCAG AA 4.5:1) */
   --shadow: 0 8px 24px rgba(60, 40, 20, .14); --dim-color: 250, 246, 240;
 }
 [data-theme="oled"] {
@@ -42,6 +45,7 @@
   --border: rgba(255, 255, 255, .07); --border-strong: rgba(255, 255, 255, .16);
   --text: #f2f2f2; --muted: #8d8d8d; --accent: #ff6a1a; --accent-2: #ffae73; --accent-ink: #000;
   --ok: #4fd18b; --danger: #ff5468; --warn: #ffb547; --meta: #6fa8ff; --or: #b892ff; --neg: #ff8a3d;
+  --warn-ink: #241500; /* text on a --warn background (WCAG AA 4.5:1) */
   --shadow: none; --dim-color: 0, 0, 0;
 }
 
@@ -466,7 +470,7 @@ body.safe .card:hover img { filter: none; }
 .lib-grid .card.missing { opacity: .45; }
 .lib-grid .card.missing.sel { opacity: .75; }
 .lib-grid { user-select: none; } /* shift + click selects a range of cards, not text */
-.lib-grid .card .b.left { background: var(--warn); color: #241500; }
+.lib-grid .card .b.left { background: var(--warn); color: var(--warn-ink, #241500); }
 .lib-tools { margin-left: auto; }
 #lib-view button { white-space: nowrap; }
 .toast.has-action { display: flex; align-items: center; gap: 12px; }

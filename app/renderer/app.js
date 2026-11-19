@@ -177,8 +177,9 @@ const S = {
   chips: [], chipSeq: 0, selected: new Set(),
   // moved: the user picked a suggestion with the arrow keys (only then Enter takes a suggestion instead of the typed text)
   ac: { items: [], index: -1, seq: 0, moved: false, fuzzy: false },
-  // key: previewKey() of the query the posts answer (null after a failed Preview), see previewStale
-  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', key: '', showExcluded: false, seq: 0, hasMore: true, kind: 'all', dateFilter: '' },
+  // key: previewKey() of the query the posts on screen answer; failed: the last Preview request failed (the grid is an older
+  // answer, maybe of this same query: a page turn that did not load), see previewStale
+  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', key: '', failed: false, showExcluded: false, seq: 0, hasMore: true, kind: 'all', dateFilter: '' },
   countSeq: 0,
   tagLists: null, // modules that have a local tag list (tags.status), null until known
   jobs: new Map(),
@@ -902,17 +903,19 @@ function previewKey(q = currentQuery()) {
   const gender = g.select?.length ? [g.op, [...g.select].sort(), g.conf, !!g.strict, g.mode] : []; // no group picked: filter off
   return JSON.stringify([q.module, q.tags, q.dateMin || '', q.dateMax || '', gender, !!q.safetyBlacklist]);
 }
-// P.key null: the last Preview failed, the grid on screen is an older answer
+// the posts on screen answer another query or filters, or the last Preview failed (the grid is an older answer)
 function previewStale() {
   const P = S.preview;
-  return P.items.length > 0 && P.key !== previewKey();
+  return P.items.length > 0 && (P.failed || P.key !== previewKey());
 }
+// the posts on screen were fetched for the query and filters now in the form (a later request may have failed)
+const previewOfThisQuery = () => S.preview.items.length > 0 && S.preview.key === previewKey();
 function markPreviewStale() {
   if (!S.preview.items.length) return;
   $('#grid').classList.toggle('stale', previewStale());
   if (previewStale() && !$('#results-info').dataset.stale) {
     $('#results-info').dataset.stale = '1';
-    $('#results-info').append(h('span', { class: 'stale-note' }, S.preview.key === null ? ' · các post bên dưới là kết quả cũ'
+    $('#results-info').append(h('span', { class: 'stale-note' }, S.preview.failed ? ' · các post bên dưới là kết quả cũ'
       : ' · kết quả của truy vấn hoặc bộ lọc trước: bấm Preview để xem lại'));
   } else if (!previewStale() && $('#results-info').dataset.stale) renderGrid();
 }
@@ -922,7 +925,7 @@ $('#f-safety').addEventListener('change', markPreviewStale);
 function clearPreview() {
   const P = S.preview;
   P.seq++; // an answer still on its way belongs to the cleared query
-  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', key: '', required: [], tasks: [], hasMore: true });
+  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', key: '', failed: false, required: [], tasks: [], hasMore: true });
   P.selected.clear();
   gridCards.clear();
   $('#grid').replaceChildren();
@@ -1031,21 +1034,26 @@ async function runPreview(page = 0) {
   try {
     const r = await L.search.preview(q, page);
     if (seq !== S.preview.seq) return;
-    Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, key: previewKey(q), required: r.requiredTags || [], tasks: r.tasks || [],
+    Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, key: previewKey(q), failed: false, required: r.requiredTags || [], tasks: r.tasks || [],
       genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled, genderModel: r.genderModel || {},
       pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean', dateFilter: r.dateFilter || '' });
     S.preview.selected.clear();
     renderGrid();
   } catch (err) {
     if (seq !== S.preview.seq) return;
-    S.preview.key = null; // the grid still on screen is not the answer to this request: dimmed until a Preview works
-    $('#results-info').textContent = `Lỗi: ${errMsg(err)}`;
-    delete $('#results-info').dataset.stale;
-    markPreviewStale();
-    toast(`Preview thất bại: ${errMsg(err)}`, 'err');
+    previewFailed(err);
   } finally {
     if (seq === S.preview.seq) { btn.disabled = false; btn.textContent = 'Preview'; }
   }
+}
+function previewFailed(err) {
+  // the grid still on screen is not the answer to this request: dimmed until a Preview works. Its picked posts stay picked (still
+  // posts of this query when only a page turn failed: "Tải xuống" asks about them, see downloadClicked)
+  S.preview.failed = true;
+  $('#results-info').textContent = `Lỗi: ${errMsg(err)}`;
+  delete $('#results-info').dataset.stale;
+  markPreviewStale();
+  toast(`Preview thất bại: ${errMsg(err)}`, 'err');
 }
 $('#btn-preview').addEventListener('click', () => runPreview(0));
 $('#pg-prev').addEventListener('click', () => { if (S.preview.page > 0) runPreview(S.preview.page - 1); });
@@ -1197,10 +1205,11 @@ function downloadSelected() {
 }
 $('#dl-selected').addEventListener('click', downloadSelected);
 // "Tải xuống" (and Ctrl+Enter) with posts picked in the preview on screen: the user may mean those posts, not the whole query
-// (whose first post, in ascending order, is its oldest one): ask. A stale preview is not asked about: the query is what changed
+// (whose first post, in ascending order, is its oldest one): ask. Posts of another query or filters are not asked about: the query
+// is what changed. A failed page turn still asks: the grid on screen is a page of this query
 function downloadClicked() {
   const n = S.preview.selected.size;
-  if (!n || !S.preview.items.length || previewStale()) { startDownload(); return; }
+  if (!n || !previewOfThisQuery()) { startDownload(); return; }
   const done = (pick) => { closeModal(); if (pick === 'selected') downloadSelected(); else if (pick === 'query') startDownload(); };
   openModal(h('div', { class: 'qchange dl-ask' },
     h('h2', { text: 'Tải những gì?' }),
@@ -1276,6 +1285,7 @@ async function refreshLibraryStats() {
     setText($('#lib-stats'), !st.exists ? 'chưa có file nào trong index'
       : LIB.view === 'trash' ? `${nf.format(t.files)} file · ${fmtBytes(t.bytes)} trong thùng rác` : `${nf.format(st.files || 0)} file · ${fmtBytes(st.bytes || 0)}`);
     setText($('#lib-trash-count'), t.files ? `(${nf.format(t.files)})` : '');
+    if (LIB.view === 'trash' && !LIB.total && !LIB.items.length) renderLibrary(); // "trống" or "không khớp bộ lọc" needs the count
     updateLibTools();
   } catch { /* old core: no index */ }
 }
@@ -1308,9 +1318,10 @@ function renderLibrary() {
   const pages = Math.max(1, Math.ceil(LIB.total / LIB.pageSize));
   const missing = LIB.items.filter((it) => !it.exists).length;
   const days = trashDays();
+  const inTrash = LIB.trash?.files || 0; // the whole trash (index.stats), not only what the search bar keeps
   setText($('#lib-info'), trash
     ? (LIB.total ? `${nf.format(LIB.total)} file trong thùng rác · ${days ? `tự xoá vĩnh viễn sau ${days} ngày` : 'không tự xoá'}`
-      : 'Thùng rác trống.')
+      : inTrash ? `Không có file nào trong thùng rác khớp bộ lọc (thùng rác có ${nf.format(inTrash)} file).` : 'Thùng rác trống.')
     : LIB.total ? `${nf.format(LIB.total)} file${missing ? ` · ${missing} file trên trang này không còn trên đĩa` : ''}`
       : 'Không có file nào khớp. Index chỉ có những file tải từ khi có tính năng này (và khi đang bật ghi index).');
   setText($('#lib-page'), `${LIB.page + 1} / ${pages}`);
@@ -1384,9 +1395,12 @@ function afterLibraryChange() {
   refreshLibraryStats();
   if ($('#page-settings').classList.contains('active')) refreshIndexStats();
 }
+// errors of the core (lustra/dlindex.py) the user can act on
+const LIB_ERRORS = [[/^the trash folder is not reachable/, 'không truy cập được thư mục thùng rác (ổ đã rút?)']];
+const libError = (e) => LIB_ERRORS.find(([re]) => re.test(String(e || '')))?.[1] || e;
 function reportLibFailed(failed, what) {
   if (!failed?.length) return;
-  toast(`${what} ${failed.length} file: ${failed[0].error}${failed.length > 1 ? '…' : ''}`, 'err');
+  toast(`${what} ${failed.length} file: ${libError(failed[0].error)}${failed.length > 1 ? '…' : ''}`, 'err');
 }
 async function releaseMedia() {
   // a playing video keeps its file open (Windows refuses to move or delete it): stop the lightbox media before the file is touched
@@ -1404,7 +1418,13 @@ async function libDelete(items) {
       const r = await L.library.trash(present);
       reportLibFailed(r.failed, 'Không chuyển được vào thùng rác');
       const moved = r.trashed.map((x) => x.trashPath);
-      if (moved.length) toastAction(`Đã chuyển ${moved.length} file vào thùng rác`, 'Hoàn tác', () => libRestore(moved, true));
+      // the toast sits above the lightbox: a lightbox opened meanwhile on one of these files (Thùng rác) is closed and its media
+      // stopped first, as its own buttons do (an open video keeps its file: Windows refuses to move it)
+      const undo = async () => {
+        if (moved.includes($('#modal-card .lightbox')?.dataset.path)) await releaseMedia();
+        libRestore(moved, true);
+      };
+      if (moved.length) toastAction(`Đã chuyển ${moved.length} file vào thùng rác`, 'Hoàn tác', undo);
     } catch (err) { toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
   }
   if (gone.length) {
@@ -1427,7 +1447,11 @@ async function libPurge(paths) {
   try {
     const r = await (paths ? L.library.purge(paths) : L.library.emptyTrash());
     reportLibFailed(r.failed, 'Không xoá được');
-    if (r.purged) toast(`Đã xoá vĩnh viễn ${r.purged} file (${fmtBytes(r.bytes)})`, 'ok');
+    // purged counts rows: files deleted, rows whose file was already gone, rows of files outside a trash folder (kept on disk)
+    const gone = Math.max(0, (r.purged || 0) - (r.files || 0) - (r.kept || 0));
+    const parts = [r.files ? `Đã xoá vĩnh viễn ${r.files} file (${fmtBytes(r.bytes)})` : '', gone ? `bỏ ${gone} mục không còn file` : '',
+      r.kept ? `giữ ${r.kept} file nằm ngoài thùng rác` : ''].filter(Boolean);
+    if (parts.length) toast(parts.join(', ').replace(/^./, (c) => c.toUpperCase()), 'ok');
   } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
   afterLibraryChange();
 }
@@ -1452,7 +1476,7 @@ function openLibraryItem(it) {
     L.library?.trash ? h('button', { class: 'btn danger', title: it.exists ? 'Chuyển vào thùng rác' : 'Bỏ khỏi thư viện (file đã mất)', onclick: act(() => libDelete([it])) },
       it.exists ? 'Xoá' : 'Xoá khỏi thư viện') : null,
   ];
-  openModal(h('div', { class: 'lightbox' },
+  openModal(h('div', { class: 'lightbox', dataset: { path: it.path } },
     h('div', {}, media),
     h('div', {},
       h('h2', {}, `${it.module} #${it.id} `, h('span', { class: 'muted' }, [it.ext, it.size && fmtBytes(it.size), it.date, it.rating].filter(Boolean).join(' · '))),
@@ -1478,12 +1502,15 @@ $('#lib-restore').addEventListener('click', () => {
 });
 $('#lib-purge').addEventListener('click', () => { if (LIB.selected.size) libPurge(libSelectedItems().map((it) => it.path)); });
 $('#lib-empty').addEventListener('click', () => libPurge(null));
+// the key labelled "delete" on a Mac keyboard sends Backspace (fn + delete sends Delete)
+const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent || '');
 document.addEventListener('keydown', (e) => {
   // library page: Delete moves the selected cards to the trash (reversible), Escape clears the selection. Capture phase: runs
   // before the listener that closes the lightbox on Escape, so closing it keeps the selection
   if (!$('#page-library').classList.contains('active') || !$('#modal').hidden) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
-  if (e.key === 'Delete' && LIB.view === 'library' && LIB.selected.size) libDelete(libSelectedItems());
+  const del = e.key === 'Delete' || (IS_MAC && e.key === 'Backspace');
+  if (del && LIB.view === 'library' && LIB.selected.size) { e.preventDefault(); libDelete(libSelectedItems()); }
   else if (e.key === 'Escape' && LIB.selected.size) { LIB.selected.clear(); updateLibTools(); }
 }, true);
 
@@ -3430,7 +3457,12 @@ function onSidecarStatus(st) {
   $('#core-dot').className = `dot ${st.ok ? 'ok' : st.error === 'starting' ? '' : 'err'}`;
   $('#core-status').textContent = st.ok ? `Lõi sẵn sàng · ${st.info?.version || ''}`
     : st.error === 'starting' ? 'Đang khởi động lõi…' : `Lõi lỗi: ${st.error}`;
-  if (st.ok && !coreOk) { loadModules(); renderAbout(); warmupTags(S.module); loadTagLists(); }
+  if (st.ok && !coreOk) {
+    loadModules(); renderAbout(); warmupTags(S.module); loadTagLists();
+    // a core that exited took its running tag updates with it (no tags.updateDone comes): the new one says what runs
+    tagUpdates.clear();
+    if (azPage.loaded) refreshTagStatus();
+  }
   coreOk = !!st.ok;
 }
 function listen() {

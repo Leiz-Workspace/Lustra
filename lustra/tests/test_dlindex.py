@@ -994,6 +994,11 @@ class FrontendTests(TestCase):
             self.assertNotIn('confirm', line)
             self.assertIn('libraryPaths(paths)', line)
         self.assertIn('library: { trashDays: 30 },', main_js)  # settings.library.trashDays default
+        # a time the app did not write (corrupt file, hand edit) turns the automatic purge off: never the default on a guess
+        self.assertIn('if (error) settings.library.trashDays = 0;', main_js)
+        sanitize = re.search(r'\nfunction sanitizeSettings\(\) \{.*?\n\}\n', main_js, re.S).group(0)
+        self.assertIn('settings.library.trashDays = 0;', sanitize)
+        self.assertNotIn('settings.library.trashDays = DEFAULT_SETTINGS', main_js)
         self.assertIn('const validTrashDays = (d) => Number.isInteger(d) && d >= 0 && d <= TRASH_DAYS_MAX;', main_js)
         self.assertIn('const TRASH_DAYS_MAX = 365;', main_js)
         # 60 s after the core is up, then on the 5-minute tick (purgeOldTrash itself waits 12 h between two timer runs)
@@ -1021,6 +1026,23 @@ class FrontendTests(TestCase):
             self.assertIn(name, library)
         self.assertIn('library: { trashDays: 30 },', mock_js)
         self.assertIn('p.trash === true', mock_js)
+
+    def test_trash_badge_contrast(self) -> None:
+        # 'còn X ngày' / 'sắp xoá' on a --warn background: WCAG AA (4.5:1) for its 10.5px text in every theme
+        css = (ROOT / 'app' / 'renderer' / 'styles.css').read_text(encoding='utf-8')
+        self.assertIn('.lib-grid .card .b.left { background: var(--warn); color: var(--warn-ink', css)
+
+        def lum(hex_color: str) -> float:
+            rgb = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)] if len(hex_color) == 7 else [int(c * 2, 16) / 255 for c in hex_color[1:]]
+            lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+            return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+        themes = re.findall(r'\[data-theme="(\w+)"\] \{(.*?)\n\}', css, re.S)
+        self.assertEqual(['ember', 'graphite', 'paper', 'oled'], [t for t, _ in themes])
+        for theme, body in themes:
+            warn = re.search(r'--warn: (#[0-9a-fA-F]+);', body).group(1)
+            ink = re.search(r'--warn-ink: (#[0-9a-fA-F]+);', body).group(1)
+            hi, lo = sorted((lum(warn), lum(ink)), reverse=True)
+            self.assertGreaterEqual((hi + 0.05) / (lo + 0.05), 4.5, theme)
 
     def test_desktop_wiring(self) -> None:
         main_js = (ROOT / 'app' / 'main.js').read_text(encoding='utf-8')
