@@ -8,7 +8,9 @@
       "2girls",
       "3girls",
       "multiple_girls",
-      "female"
+      "female",
+      "1girl",
+      "female_focus"
     ],
     "medium": [
       "yuri",
@@ -21,7 +23,8 @@
       "2boys",
       "3boys",
       "multiple_boys",
-      "male"
+      "male",
+      "male_focus"
     ],
     "medium": [
       "yaoi",
@@ -59,10 +62,15 @@
       "1futa",
       "multiple_futa",
       "dickgirl",
-      "intersex"
+      "intersex",
+      "gynomorph",
+      "herm"
     ],
     "futaMale": [
-      "cuntboy"
+      "cuntboy",
+      "andromorph",
+      "maleherm",
+      "male_with_breasts"
     ],
     "trap": [
       "femboy",
@@ -85,7 +93,8 @@
     ],
     "pov": [
       "pov",
-      "male_pov"
+      "male_pov",
+      "female_pov"
     ]
   },
   "maleBodypart": [
@@ -93,6 +102,22 @@
     "disembodied_penis",
     "faceless_male",
     "male_pov"
+  ],
+  "femaleBodypart": [
+    "pussy",
+    "vagina",
+    "vulva",
+    "disembodied_pussy",
+    "faceless_female",
+    "female_pov",
+    "breasts",
+    "large_breasts",
+    "big_breasts",
+    "huge_breasts",
+    "medium_breasts",
+    "small_breasts",
+    "hyper_breasts",
+    "gigantic_breasts"
   ],
   "aliases": {
     "hetero": "straight",

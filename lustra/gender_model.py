@@ -316,7 +316,7 @@ def _conf_of(p: float) -> GenderConf:
 def _rule_tags(rules) -> frozenset[str]:
     """every tag a ruleset reads (an undecided one of these can change a label)"""
     out = set(rules.both | rules.exclusive_female | rules.exclusive_male | rules.exclusive_futa | rules.solo | rules.other
-              | rules.none | rules.male_bodypart) | set(rules.aliases)
+              | rules.none | rules.male_bodypart | rules.female_bodypart) | set(rules.aliases)
     for table in (rules.female, rules.male, rules.flags):
         for tags in table.values():
             out |= tags

@@ -2753,7 +2753,96 @@ async function selfTestContract(js, quick) {
     made.forEach((id) => { jobs.cancel(id); jobs.jobs.delete(id); });
     jobs.pump = realPump;
   }
+  out.selectedDownload = await selfTestSelectedDownload(js);
   saveSettings();
+  return out;
+}
+
+async function selfTestSelectedDownload(js) {
+  // "Tải đã chọn" downloads exactly the picked posts: the panel's post limit, dates and gender filter are not sent (limit 1 with
+  // two picked posts downloaded one). "Tải xuống" with posts picked in a current preview asks first; a stale preview (a date
+  // changed since) does not. A fake preview of danbooru post 12579374, nothing is spawned (pump is off), the panel is restored
+  const out = {};
+  const realPump = jobs.pump;
+  const before = new Set(jobs.jobs.keys());
+  const newJobs = () => [...jobs.jobs.values()].filter((j) => !before.has(j.id));
+  const waitJob = async (n) => {
+    for (let i = 0; i < 50 && newJobs().length < n; i++) await new Promise((r) => setTimeout(r, 100));
+    return newJobs()[n - 1] || null;
+  };
+  const clean = (job) => job && {
+    tail: job.args.slice(-2).join(' '), label: job.label,
+    dropped: job.args.filter((a) => ['-dlimit', '-mindate', '-maxdate'].includes(a) || a.startsWith('-gender')),
+  };
+  const argsOk = (c) => Boolean(c && c.tail === '-- id:12579374' && c.dropped.length === 0);
+  try {
+    jobs.pump = () => {};
+    out.setup = await js(`(async () => {
+      document.querySelector('[data-page="search"]').click();
+      const keep = { limit: $('#f-limit').value, dateMin: $('#f-datemin').value, path: $('#f-path').value, gender: S.settings.download.gender,
+        warn: S.settings.download.warnNonEmpty };
+      window.__selftestKeep = keep;
+      $('#f-limit').value = '1';
+      $('#f-datemin').value = '2020-01-01';
+      $('#f-path').value = ${JSON.stringify(path.join(os.tmpdir(), 'lustra-selftest-selected'))};
+      S.settings.download.gender = { select: ['only_female'], conf: 'medium', op: 'keep' };
+      S.settings.download.warnNonEmpty = false; // no folder question in the middle of the test
+      Object.assign(S.preview, { module: 'db', tags: 'selftest_selected', site: '', page: 0, hasMore: false, dateFilter: 'native',
+        items: [{ id: '12579374', excludedBy: [], excluded: false }, { id: '12579375', excludedBy: [], excluded: false }] });
+      S.preview.key = previewKey();
+      renderGrid();
+      S.preview.selected.clear();
+      S.preview.selected.add('12579374');
+      syncSelection();
+      // what the panel would send with a whole query download
+      const sent = { limit: downloadOptions().limit, dates: currentQuery().dateMin, gender: genderState().select.join(',') };
+      document.querySelector('#dl-selected').click();
+      return { button: document.querySelector('#dl-selected').textContent, stale: previewStale(), sent };
+    })()`);
+    out.selected = clean(await waitJob(1));
+    newJobs().forEach((j) => jobs.cancel(j.id)); // the same job again below must not be refused as a duplicate
+    out.ask = await js(`(async () => {
+      document.querySelector('#btn-download').click();
+      await new Promise((r) => setTimeout(r, 50));
+      const buttons = [...document.querySelectorAll('#modal-card .modal-actions button')].map((b) => b.textContent);
+      const open = !document.querySelector('#modal').hidden && Boolean(document.querySelector('#dl-ask-selected'));
+      document.querySelector('#dl-ask-selected')?.click();
+      return { open, buttons, closed: document.querySelector('#modal').hidden };
+    })()`);
+    out.askSelected = clean(await waitJob(2));
+    // a date changed since the preview: the grid is stale, "Tải xuống" means the query (no question; with the quick self-test the
+    // query is empty and refused, after the UI walkthrough it is queued like any download and removed below)
+    out.stale = await js(`(async () => {
+      const d = document.querySelector('#f-datemin');
+      d.value = '2021-01-01';
+      d.dispatchEvent(new Event('input', { bubbles: true }));
+      const dimmed = document.querySelector('#grid').classList.contains('stale');
+      document.querySelector('#btn-download').click();
+      await new Promise((r) => setTimeout(r, 50));
+      return { dimmed, stale: previewStale(), asked: !document.querySelector('#modal').hidden };
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    out.staleJobs = newJobs().filter((j) => j.tags.startsWith('id:')).length; // no third job of the picked posts
+  } catch (e) {
+    out.error = String(e.message || e);
+  } finally {
+    newJobs().forEach((j) => { jobs.cancel(j.id); jobs.jobs.delete(j.id); });
+    jobs.pump = realPump;
+    await js(`(() => {
+      const k = window.__selftestKeep;
+      if (k) {
+        $('#f-limit').value = k.limit; $('#f-datemin').value = k.dateMin; $('#f-path').value = k.path;
+        S.settings.download.gender = k.gender; S.settings.download.warnNonEmpty = k.warn;
+        delete window.__selftestKeep;
+      }
+      closeModal();
+      clearPreview();
+      document.querySelector('#jobs-clear').click(); // the renderer drops the jobs main no longer has
+    })()`).catch(() => {});
+  }
+  out.ok = Boolean(out.setup?.sent?.limit === 1 && out.setup.sent.dates === '2020-01-01' && out.setup.sent.gender === 'only_female'
+    && out.setup.stale === false && argsOk(out.selected) && out.ask?.open && out.ask.closed && out.ask.buttons.join('|') === 'Huỷ|Tải cả truy vấn|Tải 1 post đã chọn'
+    && argsOk(out.askSelected) && out.stale?.dimmed === true && out.stale.stale === true && out.stale.asked === false && out.staleJobs === 2);
   return out;
 }
 
@@ -2891,6 +2980,9 @@ async function selfTestIndexTools(js, shot) {
     // wait for the card's final state (the "Danh sách" button of an ended import), not only for the card, which a slow machine
     // may still show as running
     await js(`document.querySelector('[data-page="downloads"]').click()`);
+    // under a virtual X server (xvfb-run, no screenshot taken for a while: quick self-test) the page may draw no frame, so
+    // requestAnimationFrame does not run and the card never appears; a capture makes it draw again (seen 2026-11-20)
+    await mainWindow.webContents.capturePage().catch(() => {});
     const cardFrom = Date.now();
     out.importCard = await js(`(async () => {
       const listsOf = (card) => [...card.querySelectorAll('.job-actions .btn')].find((b) => b.textContent === 'Danh sách');
