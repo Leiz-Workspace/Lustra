@@ -944,7 +944,8 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Nội dung:**
   - 6 extension của catalog theo luật từng site: nhịp request (paheal 3 giây, các extension khác 1 giây), Bbooru / Xbooru chỉ dùng API, headers / cookies theo site, trình tạo bỏ qua phần dò API bị chuyển hướng sang http; extension lên 1.0.1 (PR #26);
   - trình tạo đọc robots.txt theo RFC 9309 bằng `lustra/robots.py`, như updater; `Crawl-delay` đứng trước mọi nhóm được áp dụng (PR #30);
-  - danh sách tag thật của Bbooru trong `2tags/` (7au, PR #34) và bảng luật giới tính riêng cho Bbooru (7av, PR #36).
+  - danh sách tag thật của Bbooru trong `2tags/` (7au, PR #34) và bảng luật giới tính riêng cho Bbooru (7av, PR #36);
+  - hai lỗi chạy đua của index: tiến độ nhập thư viện, `index.clean`; phép tự kiểm và báo cáo của nó (7ax, PR #40). Bản rc đầu `v2.0.8-rc.77` chưa có phần này. Chủ repo chọn gộp nó vào 2.0.8 trước khi lên `production`, nên develop được đưa lên `staging` lần nữa để có bản rc mới.
 - **Không có trong bản này:** PR #37 (10 extension mới cho catalog). Chủ repo giữ PR này ở dạng bản nháp, để tự thử cài các extension từ file zip (`.extgen-drafts/`, `SHA256SUMS.txt`) trước khi đưa chúng vào catalog đi kèm app.
 - **Kiểm:** gộp thử 4 PR trên `develop`: không xung đột; danh sách unittest của CI 384 test OK (1 bỏ qua), `npm run check`, ruff sạch.
 - **Phát hành:** version 2.0.8 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r8`), ghi chú `docs/releases/v2.0.8.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
