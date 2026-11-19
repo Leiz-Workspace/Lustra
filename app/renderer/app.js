@@ -2307,7 +2307,13 @@ $('#ext-zip').addEventListener('click', async () => {
   if (!file) return;
   const v = await prompt2('Cài extension từ file .zip', [{ label: 'SHA-256 của file (bắt buộc, lấy từ nơi phát hành)', placeholder: 'e3b0c442…' }]);
   if (!v) return;
-  try { await L.ext.installZip(file, v[0]); toast('Đã cài extension', 'ok'); renderExtensions(); } catch (err) { toast(errMsg(err), 'err'); }
+  try {
+    // an update of an extension this app run already loaded takes effect after a restart (the catalog installs say so too)
+    const r = await L.ext.installZip(file, v[0]);
+    const name = r?.name ? `${r.name} v${r.version}` : 'extension';
+    toast(r?.restartRequired ? `Đã cài ${name}. Khởi động lại app để dùng phiên bản mới.` : `Đã cài ${name}`, 'ok');
+    renderExtensions();
+  } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(errMsg(err), 'err'); }
 });
 $('#catalog-load').addEventListener('click', async () => {
   const url = $('#catalog-url').value.trim();

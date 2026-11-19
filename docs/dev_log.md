@@ -983,7 +983,19 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Test chặn chỉ xét file được git theo dõi (`git ls-files`), và kiểm rằng `.gitignore` bỏ qua đúng mẫu đó.
   - Workflow Release coi `tools/build_catalog.py`, `tools/sign_catalog.py`, `tools/check_selftest.py` như tài liệu (không file phát hành nào sinh ra từ chúng). Vì vậy đưa các thay đổi này lên `staging` / `production` không đăng bản mới và không cần nâng version.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ay)
+### 7az. Thử "Cài từ file .zip…" với 15 extension mới — 2026-11-19
+- **Cách thử:**
+  - App chạy từ mã nguồn của `develop` (cùng cây commit với `v2.0.8`), dưới xvfb, với thư mục dữ liệu tạm; điều khiển giao diện qua DevTools.
+  - Chỉ hai hộp thoại của hệ điều hành được trả lời sẵn trong tiến trình chính: chọn file (đường dẫn zip) và xác nhận ("Đồng ý").
+  - Mọi bước khác chạy thật: nút "Cài từ file .zip…", ô SHA-256, lệnh `ext.install` của lõi, trang Extensions, Tags A–Z, autocomplete.
+- **Kết quả:**
+  - Cả 15 zip trong `.extgen-drafts/` (10 ext của PR #37, rule34video, rule34comic, rule34gen, naughtymachinima 1.0.0 và 1.1.0) đều cài được.
+  - SHA-256 sai bị từ chối (`archive checksum mismatch`).
+  - Tags A–Z liệt kê đủ ext có danh sách đi kèm, mỗi ext có nút "Cập nhật" (job của ext, chỉ chạy khi bấm). Gelbooru: "chưa có", cần khoá.
+  - Autocomplete trả tag ngay, không gửi request (sf, yr, zc, rz, na, ru, rg, tb).
+- **Lỗi tìm ra và đã sửa:** cài zip đè lên một ext mà lần chạy này đã nạp (naughtymachinima 1.0.0 → 1.1.0) chỉ báo "Đã cài extension". Thẻ ext vẫn hiện v1.0.0 cho tới khi mở lại app; mở lại thì đúng 1.1.0. Hai đường cài từ catalog vốn đã báo cần khởi động lại. Nay đường zip cũng báo "Đã cài <tên> v<phiên bản>. Khởi động lại app để dùng phiên bản mới." (`restartRequired` của lõi). Không báo lỗi khi người dùng huỷ ở hộp xác nhận.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7az)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
