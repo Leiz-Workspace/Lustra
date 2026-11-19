@@ -39,6 +39,7 @@ from lustra.extgen.policy import check_source, errors  # noqa: E402
 from lustra.extgen.sandbox import check_draft, pack, run_sandbox  # noqa: E402
 from lustra.extgen.scaffold import create_draft, survey  # noqa: E402
 from lustra.extgen.templates import render_downloader  # noqa: E402
+from lustra.robots import RobotsRules  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HOST = 'fakebooru.test'
@@ -291,6 +292,12 @@ class FetchPolicyTests(TestCase):
         self.assertEqual(2.0, f.robots_info(SITE)['crawlDelay'])
         self.assertTrue(f.robots_info(f'{SITE}images/1')['allowed'])
         self.assertFalse(f.robots_info(f'{SITE}search?q=a')['allowed'])
+        # a Crawl-delay before any user-agent line (www.zerochan.net) applies to every agent; the larger delay wins
+        z = fake_fetcher(lambda u: fake_gelbooru(u, robots='Crawl-delay: 10\nUser-agent: *\nDisallow: /forum\n'))
+        self.assertEqual(10.0, z.robots_info(SITE)['crawlDelay'])
+        self.assertFalse(z.robots_info(f'{SITE}forum')['allowed'])
+        self.assertEqual(4.0, RobotsRules.parse('Crawl-delay: 2\nUser-agent: lustra\nCrawl-delay: 4\n', 'Lustra').crawl_delay)
+        self.assertEqual(0.0, RobotsRules.parse('Disallow: /x\nUser-agent: *\nAllow: /\n', 'Lustra').crawl_delay)
         # the longest rule wins, not the first one: 'Allow: /' then 'Disallow: /*.json'
         g = fake_fetcher(lambda u: fake_gelbooru(u, robots='User-agent: *\nAllow: /\nDisallow: /*.json\n'))
         self.assertFalse(g.robots_info(f'{SITE}tags.json')['allowed'])
