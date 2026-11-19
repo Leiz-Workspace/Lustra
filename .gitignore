@@ -17,6 +17,9 @@ app/dist/
 .lustra-cache/
 # extension drafts of python -m lustra.extgen / the new-site-extension skill (reviewed and installed by hand)
 .extgen-drafts/
+# tag lists of the catalog extensions: data, kept next to their manifest on the maintainer's machine and put into the catalog
+# zips by tools/build_catalog.py, never committed (docs/plans/ext-tag-jobs.md)
+/extensions/*/*_tags.json
 # release bundles (app: electron-builder, model server: tools/build_model_server.py)
 *.AppImage
 /dist-model-server/

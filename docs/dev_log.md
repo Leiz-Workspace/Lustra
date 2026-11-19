@@ -966,7 +966,24 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **`tools/check_selftest.py`:** in tên các kiểm tra con sai (`indexTools: false: importOk`), rồi in mỗi giá trị một dòng (tối đa 400 ký tự). Workflow Release giữ báo cáo và ảnh chụp của lần tự kiểm lỗi làm artifact `selftest-<nền tảng>` trong 7 ngày.
 - **Kiểm:** danh sách unittest của CI 387 test OK (1 bỏ qua), `npm run check`, ruff. Tự kiểm của app chạy từ mã nguồn dưới xvfb đạt, cả khi CPU bị giới hạn 5%. Lỗi trên CI chưa tái hiện được trên máy, nên chỉ lượt build arm64 tiếp theo mới cho biết chắc.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ax)
+### 7ay. Danh sách tag của ext trong catalog nằm ngoài repo — 2026-11-19
+- **Vấn đề:**
+  - PR #37 (10 ext mới cho catalog) có +897.461 dòng, nhưng 99,9 % là 9 file `*_tags.json`, tổng 33,8 MB; riêng `sf_tags.json` của Safebooru là 23,7 MB. Code thật chỉ 0,23 MB.
+  - Merge như vậy thì repo nặng thêm 34 MB, và lịch sử git giữ mãi. App cũng nặng thêm chừng đó trên mọi nền tảng, vì `tools/build_core.py` chép cả `extensions/` vào lõi đóng gói (lõi 2.0.7 khoảng 52 MB).
+- **Chủ repo chọn** để danh sách ngoài repo, và vẫn dùng được ngay khi cài từ zip hoặc từ catalog chính thức.
+- **Làm:**
+  - `tools/build_catalog.py --lists <thư mục>` gói danh sách mà manifest khai báo (`tagList`) vào zip của ext; zip vẫn tất định. Ext thiếu danh sách vẫn được build, kèm một dòng báo. Zip vượt giới hạn của trình cài (`ARCHIVE_SIZE_MAX`, `ARCHIVE_UNPACKED_MAX`, `ARCHIVE_ENTRIES_MAX` của `lustra/extensions.py`) bị từ chối.
+  - Test `test_repository_extensions_carry_no_tag_list` từ chối `*_tags.json` hoặc file trên 1 MB trong `extensions/`. CI của PR #37 sẽ lỗi cho tới khi bỏ các danh sách khỏi PR.
+  - `test_tag_lists_come_from_the_lists_folder`: danh sách vào zip, zip tất định, ext cài từ zip có danh sách ngay; thiếu danh sách, danh sách sai, zip quá lớn.
+  - Plan [ext-tag-jobs](plans/ext-tag-jobs.md) và `docs/operations.md` 3d ghi cách mới, gồm cách lấy lại danh sách từ zip của catalog đang phát hành.
+- **Ext đã kiểm:** ext khai báo `tagList` mà không kèm file vẫn cài, nạp và nhận job như thường (zip Gelbooru, lõi đóng gói 2.0.7). 6 ext hiện có của catalog vốn đã không có file danh sách trong repo.
+- **Việc của session tạo ext:** bỏ 9 file `*_tags.json` khỏi PR #37 (giữ code và `specs.md`), cập nhật skill `new-site-extension` để PR vào catalog không kèm danh sách; danh sách vẫn nằm trong zip bản nháp.
+- **Bổ sung (chủ repo yêu cầu):**
+  - `.gitignore` bỏ qua `/extensions/*/*_tags.json`. Danh sách cứ để cạnh `manifest.json` trên máy; `build_catalog.py` dùng file đó trước, `--lists` cho danh sách ở chỗ khác. Với PR #37: `git rm --cached extensions/*/*_tags.json` là đủ, file vẫn ở trên máy.
+  - Test chặn chỉ xét file được git theo dõi (`git ls-files`), và kiểm rằng `.gitignore` bỏ qua đúng mẫu đó.
+  - Workflow Release coi `tools/build_catalog.py`, `tools/sign_catalog.py`, `tools/check_selftest.py` như tài liệu (không file phát hành nào sinh ra từ chúng). Vì vậy đưa các thay đổi này lên `staging` / `production` không đăng bản mới và không cần nâng version.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ay)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
