@@ -490,8 +490,8 @@ class TagJob:
         return self._client.get(url, accept='application/json').json()
 
     def log(self, text: str) -> None:
-        """A line of the update's progress (shown in the app)"""
-        self._client._tell(f'[{self._client.source.module}] {redact(str(text))[:300]}')
+        """A line of the update's progress (shown in the app; the update puts the module in front)"""
+        self._client._tell(redact(str(text))[:300])
 
 
 def _job_function(source: TagSource) -> Callable[[TagJob], Iterable]:
@@ -538,7 +538,7 @@ def _iter_extension_job(source: TagSource, client: PoliteClient, api_key: str, m
         if tag[1] >= min_posts:
             yield tag
     if bad:
-        client._tell(f'[{source.module}] {bad:d} of {good + bad:d} tags from {source.job} skipped: not (name, posts, type)')
+        client._tell(f'{bad:d} of {good + bad:d} tags from {source.job} skipped: not (name, posts, type)')
     if not good:
         raise RuntimeError(f'{source.job} gave no tag (expected (name, posts, type) for each tag of the site)')
 
