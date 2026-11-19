@@ -11,6 +11,7 @@ Handles short queries (tags, preview, count, extensions, tag list updates). Down
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import io
 import json
@@ -32,7 +33,7 @@ _PROTO_OUT = sys.stdout
 sys.stdout = sys.stderr
 
 from . import tags_learned  # noqa: E402
-from .defines import DATE_MAX_DEFAULT, DATE_MIN_DEFAULT, ModuleCaps, ThreadInterruptException  # noqa: E402
+from .defines import DATE_MIN_DEFAULT, ModuleCaps, ThreadInterruptException  # noqa: E402
 from .extensions import ENV_CATALOG_AUTOLOAD, Extensions, data_dir  # noqa: E402
 from .gender import decide, infer_from_tags, rules_for_module  # noqa: E402
 from .help import APP_ADDRESS  # noqa: E402
@@ -398,7 +399,7 @@ def _date_filter_kind(dwn, args) -> str:
     '' none set; 'native': the site filters (db turns them into a 'date:' metatag), so counts and pages are exact;
     'local': not part of the site query: a results page hides the posts outside the limits, the count ignores them (the download
     finds the right pages by date first, download.py); 'unsupported': the module cannot filter by date, the limits were dropped"""
-    if dwn.date_min != DATE_MIN_DEFAULT or dwn.date_max != DATE_MAX_DEFAULT:
+    if dwn._has_date_limits():
         return 'native' if dwn._supports_native_date_filter() else 'local'
     asked = bool(getattr(args, 'mindate', None) or getattr(args, 'maxdate', None))
     return 'unsupported' if asked and not dwn._has_capability(ModuleCaps.DATE_FILTER) else ''
@@ -483,8 +484,9 @@ class _ResultsFilter:
         self.safety_on = bool(dwn.safety_blacklist)
         self.rules = rules_for_module(dwn._get_module_abbr()) if self.gender_on else None
         self.with_tags = bool(dwn._can_extract_item_info_without_fetch())
-        local_dates = _date_filter_kind(dwn, None) == 'local'
-        self.dates = (as_date(dwn.date_min), as_date(dwn.date_max)) if local_dates else None
+        self.dates = _date_bounds(dwn) if _date_filter_kind(dwn, None) == 'local' else None
+        self.dated = 0
+        '''posts of the page whose listing gave a readable date (none: the dates could not be checked, see m_search_preview)'''
         self.gender_stats: dict[str, int] = {}
         self.blocked = 0
         self.hidden_no_tags = 0
@@ -543,7 +545,16 @@ class _ResultsFilter:
             day = as_date(date)
         except (TypeError, ValueError):
             return True
+        self.dated += 1
         return self.dates[0] <= day <= self.dates[1]
+
+
+def _date_bounds(dwn) -> tuple[datetime.date, datetime.date]:
+    """First and last day a download keeps (download_base: _filter_last_items, _filter_first_items): a min date on or before
+    DATE_MIN_DEFAULT and a max date on or after the downloader's day (date_today, the default) limit nothing. A site ahead of the
+    user's time zone dates its newest posts tomorrow: they stay, as in the download"""
+    lo, hi = as_date(dwn.date_min), as_date(dwn.date_max)
+    return lo if lo > as_date(DATE_MIN_DEFAULT) else datetime.date.min, hi if hi < dwn.date_today else datetime.date.max
 
 
 PREVIEW_MODEL_MAX = 40
@@ -610,7 +621,7 @@ def _mark_downloaded(module: str, items: list[dict]) -> None:
 def m_search_preview(p: dict) -> dict:
     """Page `page` of search results with thumbnails, local filters (required tags / negative groups / dates / gender) applied.
     pageSize: see _results_page_size. Multi-task queries: page `page` of every task, merged (see _fetch_results_page).
-    dateFilter: see _date_filter_kind, plus 'unchecked' (local limits, but the listing carries no post dates: nothing hidden).
+    dateFilter: see _date_filter_kind, plus 'unchecked' (local limits, but no post of the listing carries a date: nothing hidden).
     Pages are the site's pages: with 'local' limits a page may hold no post in range (finding the first page by date costs a
     search per step, the download does it)"""
     page = max(0, int(p.get('page', 0)))
@@ -624,7 +635,8 @@ def m_search_preview(p: dict) -> dict:
         _apply_gender_model(filt, result)
         _mark_downloaded(dwn._get_module_abbr(), result)
         dates = _date_filter_kind(dwn, args)
-        if dates == 'local' and not filt.with_tags:
+        # no post of the page had a readable date in the listing (rule34hentai lists tags, not dates): nothing could be checked
+        if dates == 'local' and (not filt.with_tags or (result and not filt.dated)):
             dates = 'unchecked'
         return {'page': page, 'pageSize': page_size, 'hasMore': has_more, 'items': result, 'tasks': list(dwn.tags_str_arr),
                 'requiredTags': list(dwn.required_tags), 'site': dwn._get_sitename(), 'genderStats': filt.gender_stats,
