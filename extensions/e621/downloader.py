@@ -49,6 +49,8 @@ from lustra.vcs.debug import __LUSTRA_DEBUG__
 __all__ = ('DownloaderEn',)
 
 SITENAME = base64.b64decode(SITENAME_B_EN).decode()
+INFO_TEXT_FIELDS = dict.fromkeys((name for name in ItemInfo.__slots__ if name != 'comments'), '')
+'''every text field of ItemInfo, empty: fields are set by name without setattr() (static checks, R10)'''
 ITEMS_PER_PAGE = ITEMS_PER_PAGE_EN
 MAX_SEARCH_DEPTH_PAGES = 750
 MAX_SEARCH_DEPTH = MAX_SEARCH_DEPTH_PAGES * ITEMS_PER_PAGE  # set by site devs
@@ -71,11 +73,11 @@ class DownloaderEn(Downloader):
         return 1.0
 
     def _get_min_request_interval(self) -> float:
-        return 0.5  # api limit: 2 requests per second
+        return 1.0  # api: hard limit 2 requests per second, at most 1 per second sustained; robots.txt: Crawl-delay 1
 
     def _solve_module_specific_conflicts(self) -> bool:
         if self.dump_comments and self.maxthreads_items > 2 and not self.check_tags and not self.get_max_id:
-            trace('Warning (W1): EN module can\'t fetch comments faster than 2/sec due to API limitation. Forcing 2 download threads!')
+            trace('Warning (W1): EN module can\'t fetch comments faster than 1/sec due to API limitation. Forcing 2 download threads!')
             self.maxthreads_items = 2
             return True
         return False
@@ -262,6 +264,7 @@ class DownloaderEn(Downloader):
             item_info = ItemInfo()
             if self.is_killed():
                 return item_info
+            fields: dict[str, str] = {}
             for part in re_item_info_part_xml.findall(item):
                 name, value = tuple(str(part).split('=', 1))
                 name = ITEM_INFO_FIELDS.get(name, name)
@@ -269,11 +272,11 @@ class DownloaderEn(Downloader):
                     value = value[value.rfind('.') + 1:]
                 elif name == 'date':
                     value = self._extract_post_date(item)
-                if name in item_info.__slots__:
+                if name in INFO_TEXT_FIELDS:
                     while name == 'id' and not value[0].isnumeric():  # id=p1234567
                         value = value[1:]
-                    setattr(item_info, name, value.replace('\n', ' ').replace('"', '').strip())
-            return item_info
+                    fields[name] = value.replace('\n', ' ').replace('"', '').strip()
+            return ItemInfo.from_dict({**INFO_TEXT_FIELDS, **fields, 'comments': []})
         except Exception:
             self._on_thread_exception(current_process().name)
             raise

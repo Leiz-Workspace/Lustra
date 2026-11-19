@@ -39,6 +39,7 @@ from lustra.extgen.policy import check_source, errors  # noqa: E402
 from lustra.extgen.sandbox import check_draft, pack, run_sandbox  # noqa: E402
 from lustra.extgen.scaffold import create_draft, survey  # noqa: E402
 from lustra.extgen.templates import render_downloader  # noqa: E402
+from lustra.robots import RobotsRules  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HOST = 'fakebooru.test'
@@ -270,6 +271,7 @@ class FetchPolicyTests(TestCase):
         with self.assertRaises(FetchPolicyError) as ctx:
             f.fetch('https://other.example/x')
         self.assertEqual('R10', ctx.exception.rule)
+        self.assertFalse(ctx.exception.redirect)  # the address asked for, not a redirect target
         with self.assertRaises(FetchPolicyError) as ctx:
             f.fetch(f'https://user:pw@{HOST}/x')
         self.assertEqual('R1', ctx.exception.rule)
@@ -278,6 +280,28 @@ class FetchPolicyTests(TestCase):
         with self.assertRaises(FetchPolicyError) as ctx:  # no allow_local: plain http refused
             g.fetch(f'http://{HOST}/')
         self.assertEqual('R10', ctx.exception.rule)
+
+    def test_robots_rfc9309_groups_merged(self) -> None:
+        # Cloudflare's managed block ('User-agent: *' + 'Allow: /') comes before the site's own '*' group (manebooru.art,
+        # furbooru.org 2026-11-19): RFC 9309 merges both groups, so '/api' stays disallowed; urllib.robotparser used only the first
+        robots = ('User-agent: *\nContent-Signal: search=yes,ai-train=no\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /\n\n'
+                  'User-agent: *\nCrawl-delay: 2\nAllow: /images/*\nDisallow: /api\nDisallow: /search\n')
+        f = fake_fetcher(lambda u: fake_gelbooru(u, robots=robots))
+        with self.assertRaises(FetchPolicyError) as ctx:
+            f.fetch(f'{SITE}api/v1/json/search/images?q=*')
+        self.assertEqual('R2', ctx.exception.rule)
+        self.assertEqual(2.0, f.robots_info(SITE)['crawlDelay'])
+        self.assertTrue(f.robots_info(f'{SITE}images/1')['allowed'])
+        self.assertFalse(f.robots_info(f'{SITE}search?q=a')['allowed'])
+        # a Crawl-delay before any user-agent line (www.zerochan.net) applies to every agent; the larger delay wins
+        z = fake_fetcher(lambda u: fake_gelbooru(u, robots='Crawl-delay: 10\nUser-agent: *\nDisallow: /forum\n'))
+        self.assertEqual(10.0, z.robots_info(SITE)['crawlDelay'])
+        self.assertFalse(z.robots_info(f'{SITE}forum')['allowed'])
+        self.assertEqual(4.0, RobotsRules.parse('Crawl-delay: 2\nUser-agent: lustra\nCrawl-delay: 4\n', 'Lustra').crawl_delay)
+        self.assertEqual(0.0, RobotsRules.parse('Disallow: /x\nUser-agent: *\nAllow: /\n', 'Lustra').crawl_delay)
+        # the longest rule wins, not the first one: 'Allow: /' then 'Disallow: /*.json'
+        g = fake_fetcher(lambda u: fake_gelbooru(u, robots='User-agent: *\nAllow: /\nDisallow: /*.json\n'))
+        self.assertFalse(g.robots_info(f'{SITE}tags.json')['allowed'])
 
     def test_budget_redirect_challenge_and_no_cookies(self) -> None:
         f = fake_fetcher(budget=3)
@@ -295,6 +319,7 @@ class FetchPolicyTests(TestCase):
         with self.assertRaises(FetchPolicyError) as ctx:
             f.fetch(f'{SITE}go')
         self.assertEqual('R10', ctx.exception.rule)
+        self.assertTrue(ctx.exception.redirect)
         self.assertFalse(any('evil.example' in c[1] for c in f._session.calls))
 
         def challenge(u: str):
@@ -329,6 +354,34 @@ class FetchPolicyTests(TestCase):
         self.assertEqual('fakebooru', sv['names']['id'])
         self.assertEqual([], sv['existing'])
         self.assertTrue(sv['names']['abbr'])
+
+    def test_survey_skips_api_probes_redirected_to_http(self) -> None:
+        def site(home_redirects: bool):
+            def route(u: str):  # unknown paths answer with a redirect to plain http (seen on a real site)
+                p = url_parse.urlparse(u)
+                if p.path == '/robots.txt':
+                    return 404, b'', {}
+                if p.path == '/' and not home_redirects:
+                    return 200, b'<html><title>videos</title></html>', {'content-type': 'text/html'}
+                return 302, b'', {'location': f'http://{HOST}/?{p.query}'}
+            return route
+
+        public = [(socket.AF_INET, 1, 6, '', ('93.184.215.14', 443))]
+        for home_redirects in (False, True):
+            f = SafeFetcher(allowed_hosts={HOST}, min_interval=0.0)  # no allow_local: plain http is refused, as in the app
+            f._session = FakeSession(site(home_redirects))
+            with self.subTest(home_redirects=home_redirects), mock.patch('socket.getaddrinfo', return_value=public):
+                if home_redirects:  # the site itself is not usable over https: still a stop
+                    with self.assertRaises(FetchPolicyError) as ctx:
+                        survey(SITE, f)
+                    self.assertEqual('R10', ctx.exception.rule)
+                    self.assertTrue(ctx.exception.redirect)
+                else:
+                    eng = survey(SITE, f)['engine']
+                    self.assertEqual(('custom', 'low'), (eng['engine'], eng['confidence']))
+                    self.assertEqual(6, sum(n.startswith('redirected ') for n in eng['notes']))
+                    self.assertEqual([SITE], [e['url'] for e in eng['evidence']])
+                self.assertFalse(any(c[1].startswith('http:') for c in f._session.calls))  # a redirect to http is never followed
 
 
 class PolicyTests(TestCase):

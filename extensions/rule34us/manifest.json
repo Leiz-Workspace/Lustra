@@ -3,7 +3,7 @@
   "id": "rule34us",
   "name": "Rule34.us",
   "abbr": "rs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,

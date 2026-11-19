@@ -20,12 +20,12 @@ from dataclasses import dataclass, field
 from http.cookiejar import DefaultCookiePolicy
 from threading import Lock
 from urllib import parse as url_parse
-from urllib import robotparser
 
 import requests
 
 from lustra.denylist import ascii_host, denied, denied_message
 from lustra.network import LUSTRA_USER_AGENT, is_cloudflare_challenge, parse_retry_after
+from lustra.robots import RobotsRules
 
 __all__ = ('FetchPolicyError', 'FetchResult', 'SafeFetcher', 'host_of', 'normalize_site')
 
@@ -39,12 +39,14 @@ re_secret_param = re.compile(r'([?&](?:api_key|login|user_id|password|pass_hash|
 
 
 class FetchPolicyError(Exception):
-    """A request refused by a hard rule: rule is the plan rule id (R2 robots, R4 rate/budget, R5 challenge, R10 address)"""
+    """A request refused by a hard rule: rule is the plan rule id (R2 robots, R4 rate/budget, R5 challenge, R10 address).
+    redirect: the refused address is where the site redirected the request (never contacted), not the address asked for"""
 
-    def __init__(self, rule: str, message: str) -> None:
+    def __init__(self, rule: str, message: str, *, redirect: bool = False) -> None:
         super().__init__(f'[{rule}] {message}')
         self.rule = rule
         self.message = message
+        self.redirect = redirect
 
 
 @dataclass
@@ -118,7 +120,7 @@ def _is_public(addr: str) -> bool:
 
 @dataclass
 class _HostState:
-    robots: robotparser.RobotFileParser | None = None
+    robots: RobotsRules | None = None
     robots_status: str = ''
     crawl_delay: float = 0.0
     last: float = 0.0
@@ -184,33 +186,34 @@ class SafeFetcher:
             return st
         st = _HostState()
         self._hosts[key] = st
-        rp = robotparser.RobotFileParser()
         robots_url = f'{key}/robots.txt'
+        # RFC 9309 (lustra/robots.py, as the tag list updater): groups of the same agent are merged and the longest rule wins.
+        # urllib.robotparser kept only the first 'User-agent: *' group: with Cloudflare's managed 'Allow: /' block first, a later
+        # 'Disallow: /api' of the site (manebooru.art, furbooru.org) was ignored
         try:
             r = self._raw_get(robots_url, count=True)
             if 200 <= r.status < 300:
-                rp.parse(r.text().splitlines())
+                rp = RobotsRules.parse(r.text(), ROBOTS_AGENT)
                 st.robots_status = 'found'
             elif 400 <= r.status < 500:
-                rp.allow_all = True  # RFC 9309: unavailable (4xx) -> no restrictions
                 st.robots_status = f'none ({r.status})'
+                rp = RobotsRules.allow_all(st.robots_status)  # RFC 9309: unavailable (4xx) -> no restrictions
             else:
-                rp.disallow_all = True  # RFC 9309: unreachable (5xx) -> complete disallow
                 st.robots_status = f'unreachable ({r.status})'
+                rp = RobotsRules.disallow_all(st.robots_status)  # RFC 9309: unreachable (5xx) -> complete disallow
         except FetchPolicyError:
             raise
         except Exception as err:
-            rp.disallow_all = True
             st.robots_status = f'unreachable ({type(err).__name__})'
+            rp = RobotsRules.disallow_all(st.robots_status)
         st.robots = rp
-        delay = rp.crawl_delay(ROBOTS_AGENT) or rp.crawl_delay('*')
-        st.crawl_delay = min(float(delay), 30.0) if delay else 0.0
+        st.crawl_delay = min(float(rp.crawl_delay), 30.0) if rp.crawl_delay else 0.0
         return st
 
     def robots_info(self, url: str) -> dict:
         st = self._robots(url)
         return {'status': st.robots_status, 'crawlDelay': st.crawl_delay,
-                'allowed': bool(st.robots and st.robots.can_fetch(ROBOTS_AGENT, url))}
+                'allowed': bool(st.robots and st.robots.allows(url))}
 
     def _pace(self, url: str, st: _HostState) -> None:
         interval = max(self.min_interval, st.crawl_delay)
@@ -226,8 +229,14 @@ class SafeFetcher:
                     raise FetchPolicyError('R4', f'request budget of this session is used up ({self.budget})')
                 self._count += 1
         current = url
-        for _ in range(MAX_REDIRECTS + 1):
-            self._check_address(current)
+        for hop in range(MAX_REDIRECTS + 1):
+            try:
+                self._check_address(current)
+            except FetchPolicyError as err:
+                if not hop:
+                    raise
+                raise FetchPolicyError(err.rule, f'{redact_url(url)} redirects to a refused address: {err.message}',
+                                       redirect=True) from None
             t0 = time.monotonic()
             with self._session.request(method, current, headers=headers or {}, timeout=TIMEOUT, stream=True,
                                        allow_redirects=False) as r:
@@ -256,7 +265,7 @@ class SafeFetcher:
             raise FetchPolicyError('R10', f'method {method} is not allowed')
         self._check_address(url)
         st = self._robots(url)
-        if not (st.robots and st.robots.can_fetch(ROBOTS_AGENT, url)):
+        if not (st.robots and st.robots.allows(url)):
             raise FetchPolicyError('R2', f'robots.txt of {host_of(url)} does not allow {redact_url(url)}')
         self._pace(url, st)
         headers = {'Accept': accept} if accept else {}
