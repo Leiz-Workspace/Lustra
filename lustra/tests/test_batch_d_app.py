@@ -136,6 +136,7 @@ class BuildCoreTests(TestCase):
         from lustra.denylist import denied_in_extension
         from lustra.downloaders import DOWNLOADERS_BY_PROC_MODULE
         from lustra.extensions import Extensions
+        from lustra.module import ProcModule
         from lustra.tagsdb import TagsDB
         loaded, downloaders, catalog_loaded = dict(Extensions.loaded), dict(DOWNLOADERS_BY_PROC_MODULE), Extensions._catalog_loaded
 
@@ -148,6 +149,10 @@ class BuildCoreTests(TestCase):
             TagsDB.clear()
 
         self.addCleanup(restore)
+        # the registry lives for the whole test process: an earlier test may have loaded the catalog's 1.0.2 (test_tag_sources), and
+        # the 1.0.1 installed below would then not register (Extensions._register keeps a loaded id)
+        if (stale := Extensions.loaded.pop('rule34hentai', None)) is not None:
+            DOWNLOADERS_BY_PROC_MODULE.pop(ProcModule.PROC_MODULES_BY_NAME.get(stale.abbr, -1), None)
         # the frozen core has no 2tags/rn_tags.json (tools/build_core.py bundles the aliases only): its tagsdb.py is elsewhere
         frozen_tagsdb = (data_dir.parent / 'core' / 'lustra' / 'tagsdb.py').as_posix()
         with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': data_dir.as_posix(), 'LUSTRA_CATALOG_DIR': catalog.as_posix()}), \
