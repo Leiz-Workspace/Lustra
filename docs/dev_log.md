@@ -874,11 +874,47 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   430 test qua (`unittest discover`, giới hạn 4 GB, RAM tối đa 267 MB). Hai nút ở Tags A–Z đã xem trên bản giả lập.
 
 ### 7as. Bản 2.0.7 — 2026-11-19
-- **Nội dung:** cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25).
+- **Nội dung:**
+  - cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25);
+  - extension mang danh sách tag và job cập nhật riêng, chỉ chạy khi người dùng bấm nút; SDK 1.1 (7at, PR #29, #31). Bản rc đầu `v2.0.7-rc.61` chưa có phần này. Chủ repo chọn gộp nó vào 2.0.7 trước khi lên `production`, nên develop được đưa lên `staging` lần nữa để có bản rc mới.
 - **Không có trong bản này:** PR #26 (nhịp request của extension, headers / cookies theo site) chưa merge khi chủ repo quyết định phát hành.
 - **Phát hành:** version 2.0.7 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r7`, ngày 19 Nov 2026), ghi chú `docs/releases/v2.0.7.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7as)
+### 7at. Extension mang job cập nhật tag của riêng nó — 2026-11-19
+- **Yêu cầu của chủ repo:** extension mang sẵn tag list và job cập nhật tag list của riêng nó. Lustra chỉ lấy danh sách đó và chạy job khi người dùng bấm nút; không chạy nền liên tục, chỉ chạy khi được yêu cầu.
+- **Đã chốt với chủ repo** (plan [ext-tag-jobs](plans/ext-tag-jobs.md)):
+  - job chạy trong app, trên máy người dùng, khi bấm nút; không có job phía server;
+  - bộ đọc theo engine của lõi được giữ làm dự phòng cho extension chưa có job;
+  - lịch hệ thống, việc tự cập nhật khi mở app và việc tải ngay sau khi cài không chạy job của extension.
+
+  Phương án đã gửi cho các session đang làm extension. Session "Các trang web tương tự R34" từng đề xuất job theo lịch trên Forgejo, và phương án này không theo hướng đó.
+- **Làm:**
+  - Manifest có `tagUpdate: {"entry": "tags.py:read_tags"}` (`lustra/modspec.py`): file ở thư mục gốc của extension, không có khoá nào khác; schema cập nhật.
+  - `lustra.sdk` lên 1.1, thêm `TagJob`. Lustra 2.0.6 trở về trước (và bản rc đầu của 2.0.7) từ chối field lạ, nên extension có job cần khai báo `minSdkVersion` 1.1. Template của trình tạo ghi `SDK_VERSION`, nên bản nháp mới cũng cần Lustra có SDK 1.1.
+  - `lustra/tags_updater.py`:
+    - nguồn `EXTENSION_JOB`, `TagSource.on_demand`;
+    - `_job_function` nạp hàm từ file của extension;
+    - `_iter_extension_job` kiểm từng tag: tên một từ (khoảng trắng thành `_`), không quá 200 ký tự, số post là số nguyên ≥ 0, loại lạ thành `general`. Job không cho tag nào thì báo lỗi, không ghi.
+    - `TagJob.get_text` / `get_json` đi qua `PoliteClient`: chỉ host của site, robots.txt áp chặt, nhịp, giới hạn khoá, ngân sách, không cookie.
+    - `auto` bỏ qua nguồn `on_demand`.
+  - Trình tạo (`lustra/extgen`):
+    - `bundle_tag_list` không chạy job của bản nháp (`source_for_manifest(m, jobs=False)`). Bản nháp có danh sách thì báo `bundled`, chưa có thì báo `later`.
+    - Luật tĩnh R10 kiểm cả file job (`check_source(..., downloader=False)`).
+    - `pack` đưa file job vào zip.
+  - App:
+    - `fetchNewTagList` (sau khi cài) và `scheduledTagModules` bỏ qua nguồn `onDemand`;
+    - Tags A–Z ghi rõ "chỉ chạy khi bạn bấm Cập nhật";
+    - bản giả lập có extension TBIB mang job riêng.
+- **Test** (`ExtensionJobTests`, 5 test):
+  - job là nguồn của module, `auto` bỏ qua nó, nêu tên module thì chạy;
+  - request của job đi đúng robots.txt rồi tới site;
+  - tag sai bị bỏ, tên có khoảng trắng và loại viết hoa được chuẩn hoá;
+  - job gọi host khác hoặc đường robots.txt cấm thì dừng, không ghi;
+  - job không cho tag nào thì không ghi;
+  - `entry` sai bị manifest từ chối;
+  - trình tạo không chạy job của bản nháp, nhưng R10 bắt `import requests` trong file job, và zip có file job.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7at)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.

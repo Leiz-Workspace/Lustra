@@ -90,6 +90,9 @@
     { id: 'fakebooru', name: 'Fakebooru', abbr: 'fb', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://fakebooru.example/',
       description: 'Fakebooru: Gelbooru 0.2 DAPI (XML)', auth: {}, syntax: { maxTags: 0 }, tagList: 'fb_tags.json',
       generator: { tool: 'lustra.extgen', engine: 'gelbooru_dapi', createdAt: '2026-11-18T08:00:00Z' } },
+    // ships its tag list and its own update (manifest tagUpdate): run only from the Tags A-Z button (tags.sources onDemand)
+    { id: 'tbib', name: 'TBIB', abbr: 'tb', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://tbib.org/',
+      description: 'TBIB: Gelbooru DAPI', auth: {}, syntax: { maxTags: 0 }, tagList: 'tb_tags.json', tagUpdate: { entry: 'tags.py:read_tags' }, minSdkVersion: '1.1' },
     // a site without a tag listing: its list is learned from the posts previewed and downloaded (tags.learn, learned: true)
     { id: 'htmlsite', name: 'Htmlsite', abbr: 'hs', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image'], site: 'https://htmlsite.example/',
       description: 'Htmlsite: custom HTML', auth: {}, syntax: { maxTags: 0 }, generator: { tool: 'lustra.aigen', engine: 'custom', createdAt: '2026-11-18T09:00:00Z' } },
@@ -245,10 +248,11 @@
           { module: 'rx', name: 'Rule34', engine: 'gelbooru_dapi', site: 'https://api.rule34.xxx/', key: 'required', keyFormat: 'KEY,USER_ID', robots: false, curated: true, tailUpdates: true, description: 'DAPI tag index, pages by number (pid)' },
           { module: 'db', name: 'Danbooru', engine: 'danbooru_json', site: 'https://danbooru.donmai.us/', key: 'optional', keyFormat: 'API_KEY,LOGIN', robots: false, curated: true, description: 'tags.json, id cursor' },
           { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, tailUpdates: false, description: 'DAPI tag index, pages by number (pid)' },
+          { module: 'tb', name: 'TBIB', engine: 'extension_job', site: 'https://tbib.org/', key: 'none', keyFormat: '', robots: true, curated: false, tailUpdates: false, onDemand: true, job: 'tags.py:read_tags', description: "the extension's own update (tags.py:read_tags), run only when asked" },
         ];
       }
       if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12 };
-      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }];
+      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;

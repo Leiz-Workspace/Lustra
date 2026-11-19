@@ -160,9 +160,10 @@ Schema: [`schemas/extension-manifest.schema.json`](schemas/extension-manifest.sc
 - `entry` trỏ tới class kế thừa `lustra.download.Downloader`;
 - khối `syntax` chỉ bắt buộc với site mà lõi chưa biết;
 - tuỳ chọn `genderRules` (file luật giới tính trong thư mục extension; module sẽ được thêm capability `gender_tags`) và `safetyTags` (chỉ thêm vào danh sách chặn);
-- tuỳ chọn `minSdkVersion` (`"MAJOR.MINOR"`): bản `lustra.sdk` tối thiểu extension cần. Lustra từ chối cài và nạp, kèm lời nhắn rõ, khi SDK của nó cũ hơn hoặc khác phiên bản chính. Template của trình tạo ghi `"1.0"`.
+- tuỳ chọn `minSdkVersion` (`"MAJOR.MINOR"`): bản `lustra.sdk` tối thiểu extension cần. Lustra từ chối cài và nạp, kèm lời nhắn rõ, khi SDK của nó cũ hơn hoặc khác phiên bản chính. Template của trình tạo ghi `"1.0"`;
+- tuỳ chọn `tagUpdate` (`{"entry": "tags.py:read_tags"}`, cần `minSdkVersion` `"1.1"`): job cập nhật danh sách tag của chính extension. File nằm ở thư mục gốc của extension, hàm nhận `lustra.sdk.TagJob`. Lustra chỉ chạy job khi người dùng yêu cầu (Tags A–Z, hoặc dòng lệnh nêu tên module), không chạy theo lịch. Xem [plan ext-tag-jobs](plans/ext-tag-jobs.md).
 
-`lustra.sdk` (`lustra/sdk.py`, `SDK_VERSION` = `1.0`) là API ổn định cho người viết extension: `Downloader`, `DownloaderGelbooru`, `DownloaderDb`, `DownloaderJsonApi` + `JsonPost`, `ItemInfo`, `Comment`, `DownloadModes`, `MediaKind`, `ModuleCaps`, hằng số ngày / đuôi file, regex item chung, `HTMLContent`, `thread_exit`, `DownloadInterruptException`, `LUSTRA_USER_AGENT`, `trace`, `as_date`, `format_score`. Bản MINOR chỉ thêm tên; bản MAJOR mới được bỏ / đổi tên, sau khi đã báo deprecated ít nhất một bản MINOR. Extension cũ import thẳng `lustra.defines`, `lustra.download`… vẫn chạy.
+`lustra.sdk` (`lustra/sdk.py`, `SDK_VERSION` = `1.1`) là API ổn định cho người viết extension: `Downloader`, `DownloaderGelbooru`, `DownloaderDb`, `DownloaderJsonApi` + `JsonPost`, `ItemInfo`, `Comment`, `DownloadModes`, `MediaKind`, `ModuleCaps`, hằng số ngày / đuôi file, regex item chung, `HTMLContent`, `thread_exit`, `DownloadInterruptException`, `LUSTRA_USER_AGENT`, `trace`, `as_date`, `format_score`; từ 1.1 có thêm `TagJob` (job cập nhật tag, `tagUpdate`). Bản MINOR chỉ thêm tên; bản MAJOR mới được bỏ / đổi tên, sau khi đã báo deprecated ít nhất một bản MINOR. Extension cũ import thẳng `lustra.defines`, `lustra.download`… vẫn chạy.
 
 Danh sách chặn tên miền: `lustra/safety_data/denied_domains.txt`, mỗi dòng `<tên miền | sha256:<hex>> <R6|R7|R8> [lý do]`; một mục chặn tên miền đó và mọi tên miền con.
 

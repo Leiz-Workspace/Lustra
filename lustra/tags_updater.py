@@ -2,8 +2,9 @@
 """
 Lustra: tag lists updater (autocompletion / A-Z browser data)
 Writes '<abbr>_tags.json' files in the same format as bundled lists: {"tag": "N posts (type)", ...}, one tag per line, sorted.
-Sources (TagSource): the five reviewed modules (CURATED) and every extension made from a known engine, read from the
-'$generator.engine' and 'site' of its manifest (lustra.extgen writes them), see ENGINE_TAG_SOURCES / tag_source.
+Sources (TagSource): the five reviewed modules (CURATED), every extension with its own tag update ('tagUpdate' in its manifest: a
+function of the extension run only when the user asks, see TagJob / EXTENSION_JOB) and every extension made from a known engine,
+read from the '$generator.engine' and 'site' of its manifest (lustra.extgen writes them), see ENGINE_TAG_SOURCES / tag_source.
 Politeness, every source (docs/operations.md §3): the delay between requests, robots.txt Crawl-delay, Retry-After, a request
 budget per list, no cookies, a stop on bot challenges, the user's own API key only (Lustra ships no shared key). robots.txt
 (RFC 9309, lustra/robots.py) is applied strictly to extension sources; the five reviewed modules use the sites' documented
@@ -22,6 +23,7 @@ import csv
 import datetime
 import gzip
 import html
+import importlib.util
 import io
 import ipaddress
 import json
@@ -33,7 +35,7 @@ import socket
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from http.cookiejar import DefaultCookiePolicy
 from typing import NamedTuple
@@ -52,9 +54,10 @@ from .network import (
     shared_rate_wait,
 )
 from .robots import ROBOTS_MAX_BYTES, RobotsRules
+from .tags import TAG_TYPES_BY_NAME
 
-__all__ = ('CURATED', 'ENGINE_TAG_SOURCES', 'TagSource', 'TagSourceError', 'UpdateResult', 'tag_source', 'tag_sources',
-           'update_tag_list', 'write_tag_list')
+__all__ = ('CURATED', 'ENGINE_TAG_SOURCES', 'EXTENSION_JOB', 'TagJob', 'TagSource', 'TagSourceError', 'UpdateResult', 'tag_source',
+           'tag_sources', 'update_tag_list', 'write_tag_list')
 
 USER_AGENT = f'{LUSTRA_USER_AGENT} (tag list updater)'
 ROBOTS_AGENT = 'Lustra'
@@ -124,6 +127,11 @@ ENGINE_TAG_SOURCES: dict[str, str] = {
     'shimmie_api': 'api/danbooru/find_tags, the whole list in one answer',
 }
 '''engines (lustra.extgen.engines) with a tag listing -> how the list is read'''
+EXTENSION_JOB = 'extension_job'
+'''engine of a source that is the extension's own tag update (manifest 'tagUpdate'): run only when the user asks for it'''
+JOB_TAG_MAX_LEN = 200
+JOB_TAG_TYPES = frozenset(str(k) for k in TAG_TYPES_BY_NAME)
+'''tag types an extension's update may give (others are written as 'general')'''
 
 
 class TagSourceError(RuntimeError):
@@ -153,15 +161,27 @@ class TagSource:
     tail_updates: bool = False
     '''the listing keeps its recently changed and new tags on the last pages (rule34.xxx: the tag index is in storage order, a row
     whose post count changes moves to the end): an update may read only the tail (TAIL_PAGES) and merge it, see update_tag_list'''
+    job: str = ''
+    '''the extension's own tag update, 'tags.py:read_tags' (manifest 'tagUpdate.entry'), engine EXTENSION_JOB'''
+    folder: str = ''
+    '''folder of the extension the job file is in'''
+
+    @property
+    def on_demand(self) -> bool:
+        """Run only when the user asks (Tags A-Z button, the command line naming the module): never by the app's system schedule
+        ('auto'), its update when it opens, or right after the install. The extension ships its list (manifest 'tagList')"""
+        return self.engine == EXTENSION_JOB
 
     @property
     def description(self) -> str:
+        if self.engine == EXTENSION_JOB:
+            return f'the extension\'s own update ({self.job}), run only when asked'
         return ENGINE_TAG_SOURCES.get(self.engine, '')
 
     def as_dict(self) -> dict:
         return {'module': self.module, 'name': self.name or self.module, 'engine': self.engine, 'site': self.site, 'key': self.key,
                 'keyFormat': self.key_format, 'robots': self.robots, 'curated': self.curated, 'description': self.description,
-                'tailUpdates': self.tail_updates}
+                'tailUpdates': self.tail_updates, 'onDemand': self.on_demand, 'job': self.job}
 
 
 CURATED: dict[str, TagSource] = {
@@ -200,12 +220,19 @@ def _manifests(installed_only: bool) -> list:
     return found
 
 
-def source_for_manifest(m) -> TagSource | None:
-    """Tag source of an extension: a reviewed one for the same site, else from its engine ('$generator.engine') and 'site'"""
+def source_for_manifest(m, jobs: bool = True) -> TagSource | None:
+    """Tag source of an extension: a reviewed one for the same site, else its own update ('tagUpdate', when jobs), else from its
+    engine ('$generator.engine') and 'site'. jobs=False: the extension generator, whose drafts' code runs only in its sandbox"""
     site = str(m.site or '')
     cur = CURATED.get(m.abbr)
     if cur and _base_domain(_host(cur.site)) == _base_domain(_host(site)):
         return cur
+    job = str((getattr(m, 'tagUpdate', None) or {}).get('entry', ''))
+    if job and jobs and m.path is not None and re_site.fullmatch(site) and not denied(site):
+        auth = m.auth if isinstance(m.auth, dict) else {}
+        key = 'required' if auth.get('apiKey') is True else 'none'
+        return TagSource(m.abbr, EXTENSION_JOB, site, m.name, key, str(auth.get('apiKeyFormat') or '') if key != 'none' else '',
+                         rate_limit=manifest_rate_limit(auth), job=job, folder=str(m.path))
     engine = str((m.generator or {}).get('engine', ''))
     if engine not in ENGINE_TAG_SOURCES or not re_site.fullmatch(site) or denied(site):
         return None
@@ -439,6 +466,82 @@ class PoliteClient:
 
 
 # ----- readers: (name, posts count, type name) -----
+
+class TagJob:
+    """What the tag update of an extension gets (manifest 'tagUpdate': 'tags.py:read_tags', called as read_tags(job)): the requests
+    of the core for its own site only, with the pacing, robots.txt, Retry-After, request budget and no cookies of every list.
+    read_tags yields (name, posts, type) for each tag of the site; the core checks each one, keeps those with min_posts or more and
+    writes the list. Exported by lustra.sdk (SDK 1.1)"""
+
+    def __init__(self, client: PoliteClient, api_key: str = '', min_posts: int = 1) -> None:
+        self._client = client
+        self.site = client.site
+        '''https://host/ of the extension (manifest 'site')'''
+        self.api_key = api_key
+        '''the user's own key for this module, '' without one'''
+        self.min_posts = min_posts
+
+    def get_text(self, url: str, accept: str = '') -> str:
+        """GET a page of the site (https, the site's host or a subdomain), its text. Raises when the site refuses or fails"""
+        return self._client.get(url, accept=accept or 'text/html').text
+
+    def get_json(self, url: str):
+        """GET an API answer of the site, its json (None when the body is not json)"""
+        return self._client.get(url, accept='application/json').json()
+
+    def log(self, text: str) -> None:
+        """A line of the update's progress (shown in the app; the update puts the module in front)"""
+        self._client._tell(redact(str(text))[:300])
+
+
+def _job_function(source: TagSource) -> Callable[[TagJob], Iterable]:
+    """The function named by 'tagUpdate.entry', from a .py file at the top of the extension folder"""
+    file_name, func_name = source.job.split(':', 1)
+    folder = pathlib.Path(source.folder).resolve()
+    path = (folder / file_name).resolve()
+    if path.parent != folder or path.suffix != '.py' or not path.is_file():
+        raise TagSourceError(f'{source.module}: tag update file \'{file_name}\' not found in the extension folder')
+    spec = importlib.util.spec_from_file_location(f'lustra_ext_tags_{source.module}', path)
+    if spec is None or spec.loader is None:
+        raise TagSourceError(f'{source.module}: unable to load \'{file_name}\'')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, func_name, None)
+    if not callable(func):
+        raise TagSourceError(f'{source.module}: \'{func_name}\' is not a function of \'{file_name}\'')
+    return func
+
+
+def _job_tag(item: object) -> tuple[str, int, str] | None:
+    """One (name, posts[, type]) of an extension's update, checked: names as one word (spaces as '_'), unknown types as general"""
+    if not isinstance(item, (tuple, list)) or len(item) not in (2, 3):
+        return None
+    name, posts = item[0], item[1]
+    kind = item[2] if len(item) == 3 else 'general'
+    if not isinstance(name, str) or isinstance(posts, bool) or not isinstance(posts, int) or posts < 0:
+        return None
+    name = '_'.join(name.split())
+    if not name or len(name) > JOB_TAG_MAX_LEN or not name.isprintable():
+        return None
+    kind = kind.strip().lower() if isinstance(kind, str) else ''
+    return name, posts, kind if kind in JOB_TAG_TYPES else 'general'
+
+
+def _iter_extension_job(source: TagSource, client: PoliteClient, api_key: str, min_posts: int) -> Iterator[tuple[str, int, str]]:
+    func = _job_function(source)
+    good = bad = 0
+    for item in func(TagJob(client, api_key, min_posts)) or ():
+        if (tag := _job_tag(item)) is None:
+            bad += 1
+            continue
+        good += 1
+        if tag[1] >= min_posts:
+            yield tag
+    if bad:
+        client._tell(f'{bad:d} of {good + bad:d} tags from {source.job} skipped: not (name, posts, type)')
+    if not good:
+        raise RuntimeError(f'{source.job} gave no tag (expected (name, posts, type) for each tag of the site)')
+
 
 def _int(value) -> int:
     try:
@@ -740,6 +843,8 @@ def _iter_source(source: TagSource, client: PoliteClient, api_key: str, min_post
         return _iter_szurubooru(client, min_posts, max_pages)
     if engine == 'shimmie_api':
         return _iter_shimmie(client, min_posts)
+    if engine == EXTENSION_JOB:
+        return _iter_extension_job(source, client, api_key, min_posts)
     raise ValueError(f'engine \'{engine}\' has no tag list source')
 
 
@@ -865,8 +970,8 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     from a full read less than FULL_EVERY ago (<out>/.meta/); full=True, or no such read, reads everything"""
     src = source or tag_source(module)
     if src is None:
-        raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions made from the engines '
-                         f'{", ".join(ENGINE_TAG_SOURCES)})')
+        raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions with their own '
+                         f'update (manifest tagUpdate); extensions made from the engines {", ".join(ENGINE_TAG_SOURCES)})')
     out_dir.mkdir(parents=True, exist_ok=True)
     res = UpdateResult(module, out_dir / f'{module}_tags.json')
     res.previous = max(_count_lines(res.path), _count_lines(reference) if reference else 0)
@@ -973,11 +1078,12 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
 
 
 def _modules_arg(value: str) -> list[str]:
-    """'auto': every installed module with a tag source that needs no key of the user (the app's system schedule)"""
+    """'auto': every installed module with a tag source that needs no key of the user (the app's system schedule), except the
+    extensions' own updates: those run only when asked (TagSource.on_demand), here when the module is named"""
     mods: list[str] = []
     for m in (x.strip() for x in value.split(',')):
         if m == 'auto':
-            mods += [s.module for s in tag_sources() if s.key != 'required']
+            mods += [s.module for s in tag_sources() if s.key != 'required' and not s.on_demand]
         elif m:
             mods.append(m)
     return list(dict.fromkeys(mods))
@@ -1004,7 +1110,8 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
     ap = argparse.ArgumentParser(prog='lustra-core tags',
                                  description='Update Lustra tag lists used for autocompletion and the A-Z tag browser')
     ap.add_argument('--modules', default='rx,db', help=f'comma separated module abbreviations (reviewed: {",".join(CURATED)}; '
-                    f'extensions made from a known engine), or \'auto\': every installed module that needs no API key')
+                    f'extensions with their own update or made from a known engine), or \'auto\': every installed module that '
+                    f'needs no API key, except the extensions\' own updates (run only when their module is named)')
     ap.add_argument('--out', default=str(default_out or data_dir() / 'tags'), help='output folder (default: <data dir>/tags)')
     ap.add_argument('--min-posts', type=int, default=1, help='skip tags with fewer posts (default 1)')
     ap.add_argument('--delay', type=float, default=0.5, help='delay between requests, seconds (be polite, default 0.5; a robots.txt '

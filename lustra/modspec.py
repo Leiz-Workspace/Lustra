@@ -26,6 +26,7 @@ re_abbr = re.compile(r'^[a-z][a-z\d]{1,3}$', re.ASCII)
 re_version = re.compile(r'^\d+\.\d+\.\d+(?:[-+][\w.]+)?$', re.ASCII)
 re_entry = re.compile(r'^(?:[\w.]+|[\w-]+\.py):[A-Za-z_]\w*$', re.ASCII)
 re_min_sdk = re.compile(r'^\d{1,3}\.\d{1,3}(?:\.\d{1,3})?$', re.ASCII)
+re_tag_update_entry = re.compile(r'^[A-Za-z_][\w-]*\.py:[A-Za-z_]\w*$', re.ASCII)
 
 
 class ManifestError(ValueError):
@@ -103,6 +104,9 @@ class ExtensionManifest:
     '''optional extra tags for the safety blacklist (can only add)'''
     minSdkVersion: str = ''
     '''lowest lustra.sdk version ('MAJOR.MINOR') the extension needs; checked when it is installed and loaded'''
+    tagUpdate: dict = field(default_factory=dict)
+    '''the extension's own tag list update, {"entry": "tags.py:read_tags"}: a function of a .py file at the top of the extension folder,
+    called with a lustra.sdk.TagJob (SDK 1.1) only when the user asks (lustra/tags_updater.py, EXTENSION_JOB)'''
     # runtime (not part of the file)
     generator: dict = field(default_factory=dict)
     '''origin of a generated extension, from the '$generator' key (lustra.extgen / lustra.aigen): shown as a badge (rule R13)'''
@@ -142,6 +146,8 @@ class ExtensionManifest:
                 raise ManifestError(f'\'{k}\' must be a list of strings')
         if 'auth' in raw and not isinstance(raw['auth'], dict):
             raise ManifestError('\'auth\' must be an object')
+        if 'tagUpdate' in raw and not isinstance(raw['tagUpdate'], dict):
+            raise ManifestError('\'tagUpdate\' must be an object')
 
     @staticmethod
     def _from_dict(raw: dict, path: pathlib.Path | None, source: str) -> ExtensionManifest:
@@ -181,6 +187,11 @@ class ExtensionManifest:
             raise ManifestError(f'unknown media type(s): {", ".join(bad)}')
         if self.minSdkVersion and not re_min_sdk.fullmatch(self.minSdkVersion):
             raise ManifestError(f'invalid minSdkVersion \'{self.minSdkVersion}\' (expected \'MAJOR.MINOR\', ex. \'1.0\')')
+        if self.tagUpdate:
+            if unknown := [k for k in self.tagUpdate if k != 'entry']:
+                raise ManifestError(f'unknown tagUpdate field(s): {", ".join(map(str, unknown))}')
+            if not isinstance(entry := self.tagUpdate.get('entry'), str) or not re_tag_update_entry.fullmatch(entry):
+                raise ManifestError('invalid tagUpdate.entry (expected \'tags.py:function_name\', a file at the top of the extension folder)')
 
     @property
     def is_file_entry(self) -> bool:

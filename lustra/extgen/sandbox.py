@@ -214,7 +214,20 @@ def _policy_checks(draft: pathlib.Path, m: ExtensionManifest | None) -> list[dic
     violations = check_source(src_path.read_text(encoding='utf-8'), allowed_hosts=hosts)
     out = [{'id': f'policy:{v.rule}', 'ok': v.severity != 'error', 'severity': v.severity, 'detail': f'line {v.line}: {v.message}'}
            for v in violations]
+    if job := _tag_update_file(draft, m):  # the extension's own tag update: the same rules, it runs in the app when asked
+        if not job.is_file():
+            out.append({'id': 'policy:tagUpdate', 'ok': False, 'severity': 'error', 'detail': f'{job.name} (tagUpdate) is missing'})
+        else:
+            out += [{'id': f'policy:{v.rule}', 'ok': v.severity != 'error', 'severity': v.severity,
+                     'detail': f'{job.name} line {v.line}: {v.message}'}
+                    for v in check_source(job.read_text(encoding='utf-8'), allowed_hosts=hosts, downloader=False)]
     return out or [{'id': 'policy', 'ok': True, 'severity': 'error', 'detail': 'no violation'}]
+
+
+def _tag_update_file(draft: pathlib.Path, m: ExtensionManifest | None) -> pathlib.Path | None:
+    """The .py file of the manifest's 'tagUpdate' (checked by the manifest: a file at the top of the folder)"""
+    entry = str((m.tagUpdate if m else {}).get('entry', ''))
+    return draft / entry.split(':', 1)[0] if entry else None
 
 
 def record(draft: pathlib.Path, *, query: list[str], limit: int = 3, fetcher: SafeFetcher) -> dict:
@@ -268,12 +281,14 @@ def check_draft(draft: pathlib.Path) -> dict:
 
 def pack(draft: pathlib.Path, dest: pathlib.Path) -> dict:
     """Deterministic zip (sorted names, fixed timestamps, no caches / reports) + sha256. The site's tag list (the manifest's
-    tagList, lustra/extgen/taglist.py) goes in too"""
+    tagList, lustra/extgen/taglist.py) and the extension's own tag update (tagUpdate) go in too"""
     draft = pathlib.Path(draft).resolve()
     m = ExtensionManifest.load(draft / 'manifest.json', 'user')
     files = [draft / f for f in PACK_FILES if (draft / f).is_file()]
     if (tag_list := draft_tag_list(draft)) is not None:
         files.append(tag_list)
+    if (job := _tag_update_file(draft, m)) is not None and job.is_file():
+        files.append(job)
     tests = draft / 'tests'
     if tests.is_dir():
         files += sorted(p for p in tests.rglob('*') if p.is_file() and '__pycache__' not in p.parts)

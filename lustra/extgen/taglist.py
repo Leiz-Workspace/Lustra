@@ -54,8 +54,15 @@ def bundle_tag_list(draft: pathlib.Path, *, session=None, allow_local=False, min
     asked to wait); learned: no tag listing, or robots.txt disallows it; failed: the site did not answer (the app tries again)"""
     draft = pathlib.Path(draft)
     m = ExtensionManifest.load(draft / 'manifest.json', 'user')
-    src = source_for_manifest(m)
+    src = source_for_manifest(m, jobs=False)  # a draft's own code runs only in the sandbox, never here
     engine = str((m.generator or {}).get('engine', ''))
+    job = str(m.tagUpdate.get('entry', ''))
+    if src is None and job and m.tagList == f'{m.abbr}_tags.json':
+        if (path := draft / m.tagList).is_file():
+            count = sum(1 for line in path.read_text(encoding='utf-8').splitlines() if line.strip() not in ('', '{', '}'))
+            return {'status': 'bundled', 'file': m.tagList, 'count': count, 'requests': 0, 'message': f'{count:d} tags, the extension\'s own list'}
+        return {'status': 'later', 'file': '', 'count': 0, 'requests': 0,
+                'message': f'{job} is the extension\'s own update: the app runs it only when you ask (Tags A-Z, Cập nhật)'}
     if src is None or m.tagList != f'{m.abbr}_tags.json':
         why = f'engine \'{engine or "?"}\' has no tag listing' if engine not in ENGINE_TAG_SOURCES else 'the manifest names no tag list'
         return {'status': 'learned', 'file': '', 'count': 0, 'requests': 0, 'message': f'{why}: {LEARNED}'}

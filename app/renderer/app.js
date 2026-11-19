@@ -2094,13 +2094,15 @@ function pruneJobGroups() {
 }
 
 // ---------------- tag lists status / update ----------------
-// sources come from the core (tags.sources, lustra/tags_updater.py): the reviewed modules (rx, db, xb, bb, en) and every installed
-// extension made from an engine with a tag listing (lustra.extgen writes '$generator.engine' and 'tagList' into its manifest)
+// sources come from the core (tags.sources, lustra/tags_updater.py): the reviewed modules (rx, db, xb, bb, en), every installed
+// extension with its own update (manifest 'tagUpdate', onDemand: run only from the button here) and every installed extension made
+// from an engine with a tag listing (lustra.extgen writes '$generator.engine' and 'tagList' into its manifest)
 const TAG_KEY_NOTE = { required: 'Cần API key của bạn', optional: 'Dùng API key của bạn nếu có' };
 const LEARNED_TITLE = 'Site không có danh sách tag dùng được (không có API, hoặc robots.txt cấm): Lustra học dần từ tag của các post '
   + 'đã xem trong Preview và đã tải, không gửi thêm request. Số post là số post đã thấy ở đây, không phải số trên site.';
+const ON_DEMAND_NOTE = 'Job cập nhật của chính extension: chỉ chạy khi bạn bấm Cập nhật, không chạy theo lịch, khi mở app hay khi cài.';
 function tagSourceTitle(src) {
-  const rule = src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.';
+  const rule = `${src.onDemand ? `${ON_DEMAND_NOTE} ` : ''}${src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.'}`;
   const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
   return `${src.site} — ${src.description}. ${rule}${key}`;
 }
@@ -2151,7 +2153,7 @@ async function refreshTagStatus() {
           ? h('span', { class: 'row' },
             h('button', { class: 'btn sm', title: 'Chỉ đọc các trang cuối, nơi có tag mới và tag vừa đổi số post (vài phút). Cứ 30 ngày tự đọc lại toàn bộ một lần', onclick: update(false) }, 'Cập nhật'),
             h('button', { class: 'btn sm ghost', title: 'Đọc lại cả danh sách (Rule34: khoảng 1,5–2 giờ; đóng app giữa chừng thì lần sau đọc tiếp)', onclick: update(true) }, 'Đọc lại toàn bộ'))
-          : h('button', { class: 'btn sm', onclick: update(false) }, 'Cập nhật');
+          : h('button', { class: 'btn sm', title: src.onDemand ? ON_DEMAND_NOTE : '', onclick: update(false) }, 'Cập nhật');
       }
       return h('tr', {},
         h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),
@@ -2185,8 +2187,8 @@ function showTagSchedule(st) {
       + `Lần chạy gần nhất: ${last}. Log: ${st.log}.`
       : st.enabled ? `Lịch đã bật nhưng không còn trong ${where} (bị xoá ngoài app?): tắt rồi bật lại để đặt lại.`
         : `Chưa đặt lịch. Khi bật, app thêm một mục vào ${where} cho ${mods}.`;
-  $('#tags-schedule-status').textContent = `${text} Extension cài sau cũng được cập nhật theo lịch. Module cần khoá (Rule34) không chạy theo lịch: `
-    + 'được cập nhật khi mở app (ô ở trên) hoặc bằng nút Cập nhật.';
+  $('#tags-schedule-status').textContent = `${text} Extension cài sau cũng được cập nhật theo lịch, trừ extension có job cập nhật riêng: `
+    + 'job đó chỉ chạy khi bạn bấm Cập nhật. Module cần khoá (Rule34) không chạy theo lịch: được cập nhật khi mở app (ô ở trên) hoặc bằng nút Cập nhật.';
 }
 async function renderTagSchedule() {
   if (typeof L.tags?.scheduleStatus !== 'function') { $('#tags-schedule').hidden = true; return; }

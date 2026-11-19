@@ -1749,6 +1749,7 @@ async function fetchNewTagList(abbr) {
   if ((Array.isArray(status) ? status : []).some((r) => r.module === abbr && r.size > 0 && !r.learned)) return; // shipped with it
   const src = ((await sidecar.call('tags.sources', {})) || []).find((x) => x.module === abbr);
   if (!src) return; // no tag listing: learned from the posts previewed and downloaded
+  if (src.onDemand) return; // the extension's own update (manifest tagUpdate) runs only when the user asks: Tags A-Z button
   const apiKey = await getSecret(abbr);
   if (src.key === 'required' && !apiKey) return; // read once the user saves a key (Tags A-Z button, auto update)
   await sidecar.call('tags.update', { module: abbr, apiKey });
@@ -1852,10 +1853,11 @@ function applyTagSchedule(enabled, frequency) {
 }
 
 async function scheduledTagModules() {
-  // what 'auto' covers now (shown in Tags A-Z): installed modules with a tag source that needs no key; [] while the core is not up
+  // what 'auto' covers now (shown in Tags A-Z): installed modules with a tag source that needs no key, except the extensions' own
+  // updates (onDemand: run only when the user asks); [] while the core is not up
   try {
     const rows = await sidecar.call('tags.sources', {}, 5000);
-    return (Array.isArray(rows) ? rows : []).filter((s) => s.key !== 'required').map((s) => ({ module: s.module, name: s.name }));
+    return (Array.isArray(rows) ? rows : []).filter((s) => s.key !== 'required' && !s.onDemand).map((s) => ({ module: s.module, name: s.name }));
   } catch { return []; }
 }
 
