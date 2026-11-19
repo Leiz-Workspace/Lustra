@@ -104,6 +104,9 @@ flowchart LR
 lustra/builtin_ext/rule34/manifest.json      entry: lustra.download_rx:DownloaderRx  (default)
 lustra/builtin_ext/danbooru/manifest.json    entry: lustra.download_db:DownloaderDb  (default)
 extensions/<id>/{manifest.json, downloader.py}   catalog cục bộ: rule34hentai, rule34us, paheal, e621, xbooru, bbooru
+extensions/<id>/{…, tags.py, specs.md}       kèm job riêng (tagUpdate): gelbooru, tbib, hypnohub, safebooru, yandere,
+                                             sakugabooru, realbooru, rule34xyz, rule34world, zerochan; tag list
+                                             <abbr>_tags.json chỉ nằm trong zip (không commit, docs/plans/ext-tag-jobs.md)
 <data dir>/extensions/<id>/                  extension người dùng đã cài
 ```
 
