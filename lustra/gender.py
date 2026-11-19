@@ -21,7 +21,7 @@ from .defines import UTF8
 __all__ = ('GENDER_LABELS', 'GenderConf', 'GenderLabel', 'GenderResult', 'GenderRules', 'decide', 'infer_from_tags')
 
 RULES_DIR = pathlib.Path(__file__).resolve().parent / 'gender_rules'
-RULESET_BY_MODULE = {'db': 'db', 'rx': 'rx', 'bb': 'rx', 'en': 'en', 'rs': 'gelbooru_generic', 'xb': 'gelbooru_generic'}
+RULESET_BY_MODULE = {'db': 'db', 'rx': 'rx', 'bb': 'bb', 'en': 'en', 'rs': 'gelbooru_generic', 'xb': 'gelbooru_generic'}
 GENERIC_RULESET = 'gelbooru_generic'
 UNMEASURED_COMPLETENESS = 0.5
 '''modules without a ruleset (paheal, rule34hentai, unknown extensions): free-form tags, absence of evidence means little'''

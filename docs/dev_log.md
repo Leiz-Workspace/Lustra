@@ -926,7 +926,21 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Lọc giới tính: `bb` vẫn dùng bảng `rx` (`RULESET_BY_MODULE` trong `lustra/gender.py`). Cả 47 tag của bảng `rx` đều có trên Bbooru, nhưng bảng thiếu các tag kiểu Danbooru `1girl` (7,3 triệu post) và `male_focus` (1,16 triệu). Chưa đổi code; đã ghi vào plan [gender-filter-model](plans/gender-filter-model.md).
 - Bản đóng gói không kèm `2tags/` (`tools/build_core.py` chỉ đóng file alias), nên người dùng app không thấy thay đổi. Họ lấy danh sách của Bbooru bằng nút "Cập nhật" ở Tags A–Z (khoảng 2 giờ).
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7au)
+### 7av. Lọc giới tính: bảng luật riêng cho Bbooru — 2026-11-19
+- **Vấn đề:** `bb` dùng bảng `rx`, vì danh sách tag của nó từng là bản sao của Rule34 (7au). Bbooru gom nội dung nhiều site, mà bảng `rx` không có các tag kiểu Danbooru (`1girl`, `male_focus`).
+- **Đo** (`python -m lustra.gender_eval sample --module bb`, chỉ metadata, không ảnh, 14 request cách nhau ≥ 1 giây):
+  - mẫu 4.095 post mới và 2.807 post cũ (`id:<…`), đã loại theo danh sách chặn và ảnh người thật;
+  - so 6 bảng trên cùng tag: `rx`, `gelbooru_generic`, `db`, `en`, `rx` + `db`, `rx` + `db` + `en`.
+- **Kết quả:**
+  - Bbooru tự gắn thêm tag kiểu Rule34 cho post kiểu Danbooru: chỉ 3/6.902 post có `1girl` mà thiếu cả `1girls` lẫn `female`. Vì vậy `rx` đã phủ 96,2 % post mới và 85,8 % post cũ ở mức ≥ medium.
+  - `rx` + tag đếm của `db` đổi nhãn 19 post (0,3 %), đều đi về nhãn đúng hơn (`1girl penis`: only_male → both; `furry_female`: unknown → only_female).
+  - Thêm luật `solo` của `en` nâng 17–25 % post từ medium lên high mà không đổi nhãn. Không làm, vì chưa có tập vàng để kiểm.
+  - `gelbooru_generic` kém `rx` trên Bbooru: thiếu `solo_female` / `solo_male`.
+- **Chủ repo chọn** bảng riêng `lustra/gender_rules/bb.json` = `rx` + tag đếm, cờ và tag `other` / `real` của `db`; completeness giữ 0,85. `RULESET_BY_MODULE['bb'] = 'bb'`.
+- **Test:** `test_gender` thêm 10 ca `bb` (lấy từ post đã đổi nhãn khi đo) và `test_bbooru_has_its_own_table` (bảng `bb` giữ mọi tag của `rx`; `1girl penis` là both với `bb`, only_male với `rx`).
+- Số đo và chi tiết bảng: plan [gender-filter-model](plans/gender-filter-model.md) §2.1.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7av)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
@@ -941,4 +955,3 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
   - danh sách tag: trình tạo (`lustra/extgen/fetch.py`) vẫn đọc robots.txt bằng `urllib.robotparser`, nên chuyển sang `lustra/robots.py` để trình tạo và updater đọc cùng một cách; chạy thử updater với một site thật cho mỗi engine mới.
-  - lọc giới tính của `bb`: đo lại bảng luật với post thật của Bbooru; bảng `rx` đang dùng thiếu `1girl` và `male_focus` (7au).
