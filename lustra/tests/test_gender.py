@@ -72,6 +72,17 @@ CASES = [
     ('rx', 'female penis futanari', F, M_, {'futa'}),
     ('rx', 'lesbian', F, M_, set()),
     ('rx', 'ambiguous_gender', N, M_, {'other'}),
+    # bbooru (aggregator: the rule34 table plus danbooru's count tags; posts measured on 2026-11-19)
+    ('bb', '1girls female solo', F, M_, set()),
+    ('bb', 'female_only 1girls', F, H, set()),
+    ('bb', '1girl penis', B, H, set()),
+    ('bb', '1girl solo', F, M_, set()),
+    ('bb', 'furry_female', F, M_, {'anthro'}),
+    ('bb', 'furry_female furry_male', B, H, {'anthro'}),
+    ('bb', '1boy male_focus', MA, M_, set()),
+    ('bb', '4girls futanari multiple_girls penis', F, M_, {'futa'}),
+    ('bb', '1other', N, M_, {'other'}),
+    ('bb', 'futa_with_male 1boy', B, H, {'futa'}),
     # e621 (completeness .92, pair tags, solo marker)
     ('en', 'male solo anthro', MA, H, {'anthro'}),
     ('en', 'female solo', F, H, set()),
@@ -98,6 +109,17 @@ class GenderRulesTests(TestCase):
                 self.assertEqual(label, res.label)
                 self.assertEqual(conf, res.conf)
                 self.assertTrue(flags.issubset(res.flags), f'flags {sorted(res.flags)} lack {sorted(flags)}')
+
+    def test_bbooru_has_its_own_table(self) -> None:
+        bb, rx = rules_for_module('bb'), rules_for_module('rx')
+        self.assertEqual('bb', bb.module)
+        self.assertEqual(rx.completeness, bb.completeness)
+        for name in ('female', 'male'):  # every rule34 count tag is kept
+            for conf in (H, M_):
+                self.assertLessEqual(getattr(rx, name)[conf], getattr(bb, name)[conf])
+        # danbooru-style post: rule34's table misses '1girl'
+        self.assertEqual(MA, infer_from_tags(['1girl', 'penis'], rx).label)
+        self.assertEqual(B, infer_from_tags(['1girl', 'penis'], bb).label)
 
     def test_evidence_and_case(self) -> None:
         res = infer_from_tags(['1Girl', '1BOY', 'hetero'], rules_for_module('db'))

@@ -127,7 +127,7 @@ Mức bằng chứng: **H** (mạnh), **m** (vừa). Khi so khớp, tag được
 | real | `photo_(medium)`, `cosplay_photo` |
 
 **Rule34.xxx (`rx`)**, completeness prior 0,85:
-- `bb` dùng chung bảng này vì `bb_tags.json` trùng hệt `rx_tags.json`.
+- `bb` (Bbooru) có bảng riêng `bb.json` từ 2026-11-19 (dev log 7av): bảng này cộng thêm các tag đếm kiểu Danbooru (xem mục Bbooru bên dưới). Trước đó `bb` dùng chung bảng `rx`, vì `2tags/bb_tags.json` từng là bản sao của `rx_tags.json`.
 - `rs` (rule34.us) và `xb` (xbooru) dùng bản `gelbooru_generic`, prior lần lượt 0,80 và 0,75. Bản này thêm `1girl` và `hetero`.
 
 | Bằng chứng | Tag |
@@ -144,6 +144,22 @@ Mức bằng chứng: **H** (mạnh), **m** (vừa). Khi so khớp, tag được
 | real | `real`, `photo`, `real_person` (tranh vẽ người thật có thể nhận diện; loại khỏi dataset) |
 
 Ghi chú cho rx: `female` (10,4M post) và `male` (6,5M) được gắn rất rộng. Chúng tốt để chứng minh *có mặt*, nhưng *vắng mặt* thì kém tin cậy hơn. Vì vậy một nhãn `only_*` dựa trên count tag mà không có marker exclusive chỉ đạt **medium** trên rx.
+
+**Bbooru (`bb`, extension)**, completeness prior 0,85 (như rx): bảng `rx` cộng các tag đếm của Danbooru.
+- Bbooru gom post của nhiều site, và tự gắn thêm tag kiểu Rule34 cho post kiểu Danbooru: trong mẫu đo, chỉ 3/6.902 post có `1girl` mà thiếu cả `1girls` lẫn `female`.
+- Thêm so với `rx`:
+  - F (H): `1girl`, `4girls`, `5girls`, `6+girls`, `furry_female`;
+  - M (H): `male_focus`, `4boys`, `5boys`, `6+boys`, `furry_male`;
+  - other: `1other`, `2others`, `multiple_others`, `6+others`;
+  - cờ futa: `futa_with_female`, `futa_with_male`, `futa_with_futa`; cờ trap nữ: `reverse_trap`;
+  - real: `photo_(medium)`, `cosplay_photo`.
+- **Đo 2026-11-19** (`gender_eval sample --module bb`, chỉ metadata, 14 request):
+  - Mẫu: 4.095 post mới (8 truy vấn: `solo`, `breasts`, `penis`, `1girl`, `1girls`, `anthro`, `highres`, `male`) và 2.807 post cũ (`id:<3000000`, `id:<10000000`, `id:<20000000`), sau khi loại theo danh sách chặn và ảnh người thật.
+  - Độ phủ ≥ medium: post mới 96,2 % với `rx`, 96,4 % với `bb`; post cũ 85,8 % và 86,0 %.
+  - `bb` đổi nhãn 19 post (0,3 %), mọi trường hợp đều đi về nhãn đúng hơn: `1girl penis` từ only_male thành both, `furry_female` từ unknown thành only_female, `1other` từ unknown thành none. `gelbooru_generic` kém hơn `rx`, vì thiếu `solo_female` / `solo_male`.
+  - Luật `solo` của e621 không được thêm: nó nâng 17–25 % post từ medium lên high, nhưng chưa có tập vàng để kiểm.
+  - Post còn `unknown` (3 % post mới, 14 % post cũ) phần lớn chỉ có tag cơ thể (`breasts`, `pussy`) hoặc `ai_generated`, không có tag đếm. Đây là phần việc của tầng 1.
+  - Đây là độ phủ và độ đồng ý giữa các bảng, chưa phải precision: chưa có nhãn của người.
 
 **e621 (`en`, extension)**, completeness prior 0,92:
 
@@ -194,7 +210,7 @@ Quyết định cuối cho từng post khi chạy `-gender S -gender_conf C [-ge
 | File | Thay đổi |
 |---|---|
 | `lustra/gender.py` (mới) | `GenderLabel` (StrEnum), `GenderConf` (IntEnum), `GenderResult` (dataclass, slots), `GenderRules.load(abbr)`, `infer_from_tags`. Thuần Python, không phụ thuộc mới. |
-| `lustra/gender_rules/{db,rx,en,gelbooru_generic}.json` (mới) | Gồm `schema`, `completeness`, `female`/`male` {high, medium}, `exclusive`, `other`, `none`, `flags`, `maleBodypart`. Extension khai báo `"genderRules": "gender_rules.json"` trong manifest (trường tuỳ chọn, `apiVersion` vẫn là 1). Module không có ruleset dùng `gelbooru_generic` với completeness 0,5. |
+| `lustra/gender_rules/{db,rx,bb,en,gelbooru_generic}.json` (mới; `bb` từ 2026-11-19) | Gồm `schema`, `completeness`, `female`/`male` {high, medium}, `exclusive`, `other`, `none`, `flags`, `maleBodypart`. Extension khai báo `"genderRules": "gender_rules.json"` trong manifest (trường tuỳ chọn, `apiVersion` vẫn là 1). Module không có ruleset dùng `gelbooru_generic` với completeness 0,5. |
 | `lustra/safety.py` (mới) | Blacklist cứng (§4.1). |
 | `lustra/defines.py` | Thêm `ModuleCaps.GENDER_TAGS = 'gender_tags'` (module có ruleset đã được đo). Thêm vào `CAPABILITIES` của `DownloaderDb` và `DownloaderRx`. Extension có `genderRules` được thêm tự động. |
 | `lustra/download_base.py` | Thuộc tính `gender_select: frozenset[GenderLabel]`, `gender_mode`, `gender_min_conf`, `gender_strict`, `gender_results: dict[str, GenderResult]`. Kết quả để ở dict riêng, keyed theo `idstring` giống `item_info_dict_per_task`, **không** thêm slot vào `ItemInfo`, nhờ vậy định dạng dump/merge không đổi. Thêm `_filter_items_safety(parents)` và `_filter_items_by_gender(parents)`. Cách xoá item giống `_filter_items_missing_required_tags`: xoá khỏi `item_info_dict_per_task` và `items_raw_per_task`, thêm vào `filtered_out_ids_cache`, gọi `parents.discard(item_id)`. |
@@ -282,7 +298,7 @@ Giả thuyết độ phủ (tỉ lệ post có nhãn khác `unknown` ở mức �
 |---|---|
 | db | 92–97 % |
 | en | 85–93 % |
-| rx/bb | 80–90 % |
+| rx/bb | 80–90 % (bb đo 2026-11-19: 86–96 %, xem §2.1) |
 | rs/xb | 70–85 % |
 | rp/rn | < 15 % |
 

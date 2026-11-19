@@ -3,7 +3,8 @@
 Lustra: robots.txt rules as RFC 9309 reads them (the tag list updater, lustra/tags_updater.py).
 urllib.robotparser takes the first matching rule and no wildcards: with 'Disallow: /*.json' after 'Allow: /' it would allow
 '/tags.json'. Here the most specific rule (the longest pattern) wins, '*' and a final '$' are understood, Allow wins a tie,
-groups for the same agent are merged and the '*' group is used only when no group names the agent.
+groups for the same agent are merged and the '*' group is used only when no group names the agent. A Crawl-delay before any
+user-agent line applies to every agent.
 """
 #########################################
 #
@@ -55,6 +56,9 @@ class RobotsRules:
         token = agent.split('/', maxsplit=1)[0].strip().lower()
         groups: list[tuple[list[str], list[tuple[bool, str]], list[float]]] = []
         agents: list[str] = []
+        leading: list[float] = []
+        '''Crawl-delay lines before any user-agent line (www.zerochan.net: 'Crawl-delay: 10' on the first line). RFC 9309 has no
+        Crawl-delay and puts such lines in no group; a polite reader (R4) applies them to every agent'''
         in_rules = True  # a 'user-agent' line after rules starts a new group
         for raw in text[:ROBOTS_MAX_BYTES].splitlines():
             line = raw.split('#', 1)[0].strip()
@@ -70,6 +74,11 @@ class RobotsRules:
                 agents.append(value.split('/')[0].strip().lower())
                 continue
             if not groups:
+                if key == 'crawl-delay':
+                    try:
+                        leading.append(max(0.0, float(value)))
+                    except ValueError:
+                        pass
                 continue  # rules before any user-agent line belong to no group
             in_rules = True
             if key in ('allow', 'disallow'):
@@ -81,7 +90,7 @@ class RobotsRules:
                     continue
         mine = [g for g in groups if token in g[0]] or [g for g in groups if '*' in g[0]]
         rules = [r for g in mine for r in g[1]]
-        delays = [d for g in mine for d in g[2]]
+        delays = [d for g in mine for d in g[2]] + leading
         return RobotsRules(rules, max(delays, default=0.0))
 
     def allows(self, url: str) -> bool:

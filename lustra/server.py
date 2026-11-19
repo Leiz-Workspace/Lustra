@@ -822,12 +822,15 @@ def m_index_clean(p: dict) -> dict:
     def run() -> None:
         try:
             res = clean_index(include_missing_dirs=missing_folders, dry_run=dry_run, progress=progress, cancel=cancel)
-            notify('index.cleanDone', {'job': job, 'ok': True, **res.as_dict(), 'message': ''})
+            done = {'job': job, 'ok': True, **res.as_dict(), 'message': ''}
         except Exception as err:
-            notify('index.cleanDone', {'job': job, 'ok': False, 'cancelled': False, 'message': _redact(f'{type(err).__name__}: {err}')})
+            done = {'job': job, 'ok': False, 'cancelled': False, 'message': _redact(f'{type(err).__name__}: {err}')}
         finally:
             with _index_clean_lock:
                 _index_clean.clear()
+        # only now: a client may start the next clean as soon as it reads cleanDone (a dry run, then the real clean), and
+        # that one would be refused with -32004 while this job is still registered
+        notify('index.cleanDone', done)
 
     threading.Thread(target=run, daemon=True, name=job).start()
     return {'job': job, 'missingFolders': missing_folders, 'dryRun': dry_run}

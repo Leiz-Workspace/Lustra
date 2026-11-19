@@ -80,6 +80,9 @@ const DEFAULT_SETTINGS = {
   },
   connection: {
     proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
+    // abbr -> {name: value}: sent to that website only, over the maps above for the same name (a browser User-Agent and the
+    // cf_clearance cookie of a bot challenge the user passed in a browser must not reach other websites, see connectionArgs)
+    siteHeaders: {}, siteCookies: {},
     // abbr -> requests a minute the site gave the user's API key (0 / missing: the limit the site publishes, manifest auth.rateLimit);
     // written to <data dir>/ratelimit/limits.json, read by every core process (see syncKeyRateLimits)
     keyRateLimits: {},
@@ -450,6 +453,32 @@ function normalizeHttpMap(map, kind, strict) {
   return out;
 }
 
+function normalizeSiteHttpMaps(obj, kind, strict) {
+  // per-website headers / cookies {abbr: {name: value}}; an abbr with no valid entry is dropped
+  if (obj === null || obj === undefined) return {};
+  if (!isPlainObject(obj)) {
+    if (strict) throw new Error(`${kind} theo site: phải là JSON object {"mã site": {...}}`);
+    return {};
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const abbr = String(k).trim();
+    if (!RE_ABBR.test(abbr)) {
+      if (strict) throw new Error(`${kind} theo site: "${abbr.slice(0, 20)}" không phải mã site (2-4 chữ thường hoặc số, ví dụ rn)`);
+      continue;
+    }
+    const map = normalizeHttpMap(v, `${kind} của ${abbr}`, strict);
+    if (Object.keys(map).length) out[abbr] = map;
+  }
+  return out;
+}
+
+function mergeHttpMaps(base, own) {
+  // own (a website's entries) replaces base entries of the same name, letter case aside: the core's maps ignore it
+  const names = new Set(Object.keys(own).map((k) => k.toLowerCase()));
+  return { ...Object.fromEntries(Object.entries(base).filter(([k]) => !names.has(k.toLowerCase()))), ...own };
+}
+
 function sanitizeSettings() {
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) if (isPlainObject(v) && !isPlainObject(settings[k])) settings[k] = structuredClone(v);
   if (!isPlainObject(settings.appearance.background)) settings.appearance.background = structuredClone(DEFAULT_SETTINGS.appearance.background);
@@ -462,6 +491,8 @@ function sanitizeSettings() {
   settings.connection.keyRateLimits = sanitizeKeyRateLimits(settings.connection.keyRateLimits) || {};
   settings.connection.headers = normalizeHttpMap(settings.connection.headers, 'Header', false);
   settings.connection.cookies = normalizeHttpMap(settings.connection.cookies, 'Cookie', false);
+  settings.connection.siteHeaders = normalizeSiteHttpMaps(settings.connection.siteHeaders, 'Header', false);
+  settings.connection.siteCookies = normalizeSiteHttpMaps(settings.connection.siteCookies, 'Cookie', false);
   if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
   settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
   settings.genderModel.url = sanitizeModelUrl(settings.genderModel.url) ?? DEFAULT_SETTINGS.genderModel.url;
@@ -1026,6 +1057,21 @@ function toCliDate(iso) {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
 }
 
+function siteHttpMap(module, kind) {
+  // the headers or cookies of one website (siteHeaders / siteCookies), {} for none
+  const all = kind === 'Header' ? settings.connection.siteHeaders : settings.connection.siteCookies;
+  return RE_ABBR.test(module || '') && isPlainObject(all) ? normalizeHttpMap(all[module], kind, false) : {};
+}
+
+function siteHttpArgs(module) {
+  // '-header' / '-cookie' arguments of one website only (library import: the shared ones are in its common arguments)
+  const a = [];
+  for (const [opt, kind] of [['-header', 'Header'], ['-cookie', 'Cookie']]) {
+    for (const [name, value] of Object.entries(siteHttpMap(module, kind))) a.push(opt, `${name}=${value}`);
+  }
+  return a;
+}
+
 async function connectionArgs(module) {
   const c = settings.connection;
   const a = [];
@@ -1035,9 +1081,11 @@ async function connectionArgs(module) {
   if (c.timeout > 0) a.push('-timeout', String(c.timeout));
   if (c.retries > 0) a.push('-retries', String(c.retries));
   // one '-header name=value' per entry, not '-headers <json>': the core's JSON option strips every backslash (values with
-  // '"' or '\' broke); name=value is split at the first '=' and token names never contain one
+  // '"' or '\' broke); name=value is split at the first '=' and token names never contain one. The website of this run gets
+  // its own entries too (siteHeaders / siteCookies), no other website does
   for (const [opt, kind, map] of [['-header', 'Header', c.headers], ['-cookie', 'Cookie', c.cookies]]) {
-    for (const [name, value] of Object.entries(normalizeHttpMap(map, kind, false))) a.push(opt, `${name}=${value}`);
+    const merged = mergeHttpMaps(normalizeHttpMap(map, kind, false), siteHttpMap(module, kind));
+    for (const [name, value] of Object.entries(merged)) a.push(opt, `${name}=${value}`);
   }
   const key = await getSecret(module);
   if (key) a.push('-api_key', key);
@@ -1227,6 +1275,10 @@ class Jobs {
     for (const abbr of Object.keys(secrets).filter((k) => RE_ABBR.test(k))) {
       const key = await getSecret(abbr);
       if (key) moduleSecretArgs[abbr] = ['-api_key', key];
+    }
+    for (const abbr of new Set([...Object.keys(settings.connection.siteHeaders || {}), ...Object.keys(settings.connection.siteCookies || {})])) {
+      const own = siteHttpArgs(abbr); // a website's own headers / cookies, after the shared ones: the core lets the later win
+      if (own.length) moduleSecretArgs[abbr] = [...(moduleSecretArgs[abbr] || []), ...own];
     }
     const job = {
       id: `job-${Date.now()}-${++this.seq}`, kind: 'import', coreKind: 'index', module: module || '*', tags: folder, dest: folder,
@@ -1986,6 +2038,11 @@ function registerIpc() {
         replaceMaps[key] = normalizeHttpMap(patch.connection[key], kind, true);
         delete patch.connection[key];
       }
+      for (const [key, kind] of [['siteHeaders', 'Header'], ['siteCookies', 'Cookie']]) {
+        if (patch.connection[key] === undefined) continue;
+        replaceMaps[key] = normalizeSiteHttpMaps(patch.connection[key], kind, true);
+        delete patch.connection[key];
+      }
       if (patch.connection.keyRateLimits !== undefined) {
         const v = sanitizeKeyRateLimits(patch.connection.keyRateLimits);
         if (v === null) delete patch.connection.keyRateLimits;
@@ -2486,6 +2543,9 @@ async function selfTestContract(js, quick) {
     r.headersSave = await window.lustra.settings.set({ connection: { headers: ${JSON.stringify({ 'X-Test': 'a"b\\c' })}, cookies: ${JSON.stringify({ sid: '"q\\z"' })} } })
       .then(() => 'saved', (e) => e.message);
     r.badHeaderName = await window.lustra.settings.set({ connection: { headers: { 'bad name': 'v' } } }).then(() => 'ACCEPTED', () => 'rejected');
+    r.siteHttpSave = await window.lustra.settings.set({ connection: { siteHeaders: { zz: { 'user-agent': 'UA-site' } }, siteCookies: { zz: { cf_clearance: 'cf1' } } } })
+      .then(() => 'saved', (e) => e.message);
+    r.badSiteKey = await window.lustra.settings.set({ connection: { siteCookies: { 'RN!': { a: 'b' } } } }).then(() => 'ACCEPTED', () => 'rejected');
     // a higher limit the site gave the user's key (Settings > API keys): main restores the previous value after checking the file
     const prevKeyLimits = (await window.lustra.settings.get()).settings.connection.keyRateLimits || {};
     const kv = (await window.lustra.settings.set({ connection: { keyRateLimits: { rx: 120, 'bad key': 3, xb: -1, bb: 'x' } } })).settings.connection.keyRateLimits;
@@ -2497,6 +2557,21 @@ async function selfTestContract(js, quick) {
   const args = await connectionArgs('zz');
   out.httpArgs = args.filter((_a, i) => args[i - 1] === '-header' || args[i - 1] === '-cookie');
   out.httpArgsOk = out.httpArgs.includes('X-Test=a"b\\c') && out.httpArgs.includes('sid="q\\z"');
+  {
+    // per-website maps: the website of the run gets its entries over the shared ones of the same name (any letter case),
+    // no other website sees them; a library import passes them as that module's arguments
+    settings.connection.headers = { ...settings.connection.headers, 'User-Agent': 'UA-shared' };
+    const http = (a) => a.filter((_x, i) => a[i - 1] === '-header' || a[i - 1] === '-cookie');
+    const own = http(await connectionArgs('zz'));
+    const other = http(await connectionArgs('yy'));
+    out.siteHttp = { saved: out.siteHttpSave, badKey: out.badSiteKey, own, other, importArgs: siteHttpArgs('zz') };
+    out.siteHttp.ok = out.siteHttpSave === 'saved' && out.badSiteKey === 'rejected' && own.includes('user-agent=UA-site')
+      && !own.includes('User-Agent=UA-shared') && own.includes('cf_clearance=cf1') && own.includes('X-Test=a"b\\c')
+      && other.includes('User-Agent=UA-shared') && !other.some((x) => /UA-site|cf_clearance/.test(x))
+      && out.siteHttp.importArgs.join(' ') === '-header user-agent=UA-site -cookie cf_clearance=cf1';
+    settings.connection.siteHeaders = {};
+    settings.connection.siteCookies = {};
+  }
   settings.connection.headers = {};
   settings.connection.cookies = {};
   const limits = settings.search.tagLimits;
@@ -2801,6 +2876,7 @@ async function selfTestIndexTools(js, shot) {
     out.importUnpicked = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)} }).then(() => 'STARTED', (e) => e.message)`);
     approvedImportFolders.add(dir); // what index:pickFolder does after the native dialog
     out.importBadModule = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)}, module: 'DB!' }).then(() => 'STARTED', (e) => e.message)`);
+    const startedAt = Date.now();
     const job = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)}, dryRun: true })`);
     let j = jobs.jobs.get(job.id);
     for (let i = 0; i < 120 && j && !['done', 'failed', 'cancelled'].includes(j.status); i++) {
@@ -2809,20 +2885,31 @@ async function selfTestIndexTools(js, shot) {
     }
     const p = j?.progress || {};
     out.importJob = { kind: job.kind, publicHidesSecrets: !('moduleSecretArgs' in job) && !('importQuery' in job), status: j?.status,
-      exit: j?.exitCode, scanned: p.scanned, totalAll: p.totalAll, unknown: p.unknown, unknownNames: p.unknownNames, error: j?.error };
-    // the job card: import texts, the lists of names (renderer)
+      exit: j?.exitCode, scanned: p.scanned, totalAll: p.totalAll, unknown: p.unknown, unknownNames: p.unknownNames, error: j?.error,
+      stateName: p.stateName, ms: Date.now() - startedAt };
+    // the job card: import texts, the lists of names (renderer). Cards are drawn on the next animation frame after each update:
+    // wait for the card's final state (the "Danh sách" button of an ended import), not only for the card, which a slow machine
+    // may still show as running
     await js(`document.querySelector('[data-page="downloads"]').click()`);
+    const cardFrom = Date.now();
     out.importCard = await js(`(async () => {
-      for (let i = 0; i < 20 && !document.querySelector('.job[data-id="${job.id}"]'); i++) await new Promise((r) => setTimeout(r, 100));
-      const card = document.querySelector('.job[data-id="${job.id}"]');
+      const listsOf = (card) => [...card.querySelectorAll('.job-actions .btn')].find((b) => b.textContent === 'Danh sách');
+      let card = null;
+      for (let i = 0; i < 100; i++) {
+        card = document.querySelector('.job[data-id="${job.id}"]');
+        const lists = card && listsOf(card);
+        if (lists && !lists.hidden) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
       if (!card) return { card: false };
-      const lists = [...card.querySelectorAll('.job-actions .btn')].find((b) => b.textContent === 'Danh sách');
+      const lists = listsOf(card);
       const text = card.textContent;
       if (lists && !lists.hidden) lists.click();
-      await new Promise((r) => setTimeout(r, 200));
+      for (let i = 0; i < 20 && !document.querySelector('#modal-card .import-list'); i++) await new Promise((r) => setTimeout(r, 100));
       const modal = document.querySelector('#modal-card').textContent;
       return { card: true, text, listsShown: Boolean(lists && !lists.hidden), modal };
     })()`);
+    out.importCard.ms = Date.now() - cardFrom;
     await shot('24-import-job-lists');
     await js('closeModal()');
     out.importCardOk = out.importCard.card && /Nhập thư viện/.test(out.importCard.text) && /2 file sẽ được tra/.test(out.importCard.text)

@@ -4,6 +4,7 @@ Lustra: regression tests for audit batch D, desktop app side (docs/reports/audit
 - frozen core entry (lustra/frozen_main.py): 'server' / 'cli' dispatch used by the packaged app
 - headers / cookies with '"' or '\\' as the app passes them ('-header name=value' / '-cookie name=value', see app/main.js connectionArgs)
 - tools/build_core.py data staging: everything the frozen core needs at run time
+- tools/check_selftest.py: a failed step names its false checks and shows each value on a line of its own
 Run: python -m unittest lustra.tests.test_batch_d_app
 """
 #########################################
@@ -35,11 +36,15 @@ def _run_frozen_main(*args: str, stdin: str = '') -> subprocess.CompletedProcess
                               capture_output=True, text=True, encoding='utf-8', timeout=120)
 
 
-def _load_build_core():
-    spec = importlib.util.spec_from_file_location('lustra_build_core', ROOT / 'tools' / 'build_core.py')
+def _load_tool(name: str):
+    spec = importlib.util.spec_from_file_location(f'lustra_{name}', ROOT / 'tools' / f'{name}.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_build_core():
+    return _load_tool('build_core')
 
 
 class FrozenMainTests(TestCase):
@@ -104,6 +109,31 @@ class BuildCoreTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data = dict((dest, src) for src, dest in bc._stage_data(pathlib.Path(tmp), 'none'))
             self.assertNotIn('2tags', data)
+
+
+
+class CheckSelftestTests(TestCase):
+    """tools/check_selftest.py reads the app's self-test report in the release workflow"""
+
+    def test_failed_step_names_its_false_checks(self) -> None:
+        tool = _load_tool('check_selftest')
+        report = {'core': {'ok': True}, 'contract': {'ok': True, 'notAllowed': {'ok': False}},
+                  'indexTools': {'ok': False, 'cleanOk': True, 'importOk': False, 'importJob': {'status': 'done', 'totalAll': 0},
+                                 'importCard': {'text': 'x' * 5000}, 'ui': {'ok': True, 'page': 'y' * 5000}}}
+        self.assertEqual(['indexTools'], tool.failed_steps(report))  # contract.notAllowed is false on purpose
+        lines = tool.describe('indexTools', report['indexTools'])
+        self.assertEqual('  indexTools: false: importOk', lines[0])
+        self.assertIn('    importJob: {"status": "done", "totalAll": 0}', lines)  # not hidden behind the long card text
+        self.assertTrue(all(len(x) <= tool.VALUE_MAX + 40 for x in lines))
+        self.assertFalse(any(x.startswith('    ui:') for x in lines))  # a nested step that passed is left out
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / 'report.json'
+            path.write_text(json.dumps(report), encoding='utf-8')
+            out = subprocess.run((sys.executable, str(ROOT / 'tools' / 'check_selftest.py'), str(path)), capture_output=True, text=True,
+                                 timeout=60)
+        self.assertEqual(1, out.returncode)
+        self.assertIn('self-test failed: indexTools', out.stderr)
+        self.assertIn('indexTools: false: importOk', out.stderr)
 
 
 #

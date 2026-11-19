@@ -320,7 +320,10 @@
             <div class="setting"><span>Timeout (giây, 0 = mặc định)</span><input type="number" id="c-timeout" min="0" class="tiny"></div>
             <div class="setting"><span>Số lần thử lại (0 = mặc định)</span><input type="number" id="c-retries" min="0" class="tiny"></div>
             <div class="setting col"><span>Headers (JSON)</span><textarea id="c-headers" rows="3" spellcheck="false" placeholder='{"User-Agent": "…"}'></textarea></div>
-            <div class="setting col"><span>Cookies (JSON)</span><textarea id="c-cookies" rows="3" spellcheck="false" placeholder='{"cf_clearance": "…"}'></textarea></div>
+            <div class="setting col"><span>Cookies (JSON)</span><textarea id="c-cookies" rows="3" spellcheck="false" placeholder='{"name": "…"}'></textarea></div>
+            <p class="muted">Headers và cookies ở trên gửi tới <b>mọi</b> site. Cookie <code>cf_clearance</code> của bot challenge và User-Agent của trình duyệt thì ghi theo site, chỉ site đó nhận được (mã site như <code>rn</code>, ghi đè mục cùng tên ở trên).</p>
+            <div class="setting col"><span>Headers theo site (JSON)</span><textarea id="c-site-headers" rows="3" spellcheck="false" placeholder='{"rn": {"User-Agent": "…"}}'></textarea></div>
+            <div class="setting col"><span>Cookies theo site (JSON)</span><textarea id="c-site-cookies" rows="3" spellcheck="false" placeholder='{"rn": {"cf_clearance": "…"}}'></textarea></div>
             <div class="setting"><span></span><button class="btn sm" id="c-save">Lưu kết nối</button></div>
             <h3>API key theo module</h3>
             <p class="muted" id="keys-note"></p>

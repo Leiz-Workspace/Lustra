@@ -97,6 +97,9 @@ class DownloaderRs(Downloader):
     def _get_sitename(self) -> str:
         return SITENAME
 
+    def _get_min_request_interval(self) -> float:
+        return 1.0  # html site; no robots.txt Crawl-delay (>= 1 s for html)
+
     def _get_module_abbr(self) -> str:
         return MODULE_ABBR_RS
 

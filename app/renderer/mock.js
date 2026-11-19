@@ -22,7 +22,8 @@
       safetyBlacklist: false,
       appendInfo: false, reverse: false, limit: 0, parchi: false, preserveDate: false, skipKnown: false, subfolderPerQuery: false, dumpTags: false,
       dumpSources: false, dumpComments: false, dumpHashes: false, infoMode: 'run', warnNonEmpty: false, maxConcurrentJobs: 1 },
-    connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {}, keyRateLimits: {} },
+    connection: { proxy: '', ignoreProxy: false, proxyNoDownload: false, timeout: 0, retries: 0, headers: {}, cookies: {},
+      siteHeaders: {}, siteCookies: {}, keyRateLimits: {} },
     tags: { autoUpdate: false, autoUpdateDays: 7, schedule: { enabled: false, frequency: 'weekly' } },
     advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
     ai: { model: 'claude-opus-5-5', maxUsd: 2 },
@@ -328,8 +329,8 @@
         // like main's deepMerge: objects merge, arrays and scalars replace
         const merge = (a, b) => { for (const [k, v] of Object.entries(b)) { if (v && typeof v === 'object' && !Array.isArray(v)) { a[k] = a[k] || {}; merge(a[k], v); } else a[k] = v; } };
         const copy = JSON.parse(JSON.stringify(patch));
-        const maps = {}; // headers / cookies are replaced as a whole, like main does
-        for (const k of ['headers', 'cookies']) if (copy.connection && k in copy.connection) { maps[k] = copy.connection[k] || {}; delete copy.connection[k]; }
+        const maps = {}; // headers / cookies (shared and per website) are replaced as a whole, like main does
+        for (const k of ['headers', 'cookies', 'siteHeaders', 'siteCookies']) if (copy.connection && k in copy.connection) { maps[k] = copy.connection[k] || {}; delete copy.connection[k]; }
         merge(settings, copy);
         Object.assign(settings.connection, maps);
         if (patch.appearance) emit('appearance:changed', appearance());
@@ -480,7 +481,7 @@
     },
     appearance: { setBackgroundImage: async () => appearance() },
     app: {
-      info: async () => ({ version: '2.0.7', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
+      info: async () => ({ version: '2.0.8', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
       relaunch: async () => location.reload(), installLauncher: async () => ({ ok: false, message: 'mock' }), openPath: async () => '', openExternal: async () => false,
     },
     thumbUrl: (url) => url,

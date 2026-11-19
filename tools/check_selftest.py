@@ -15,6 +15,8 @@ import pathlib
 import sys
 
 EXPECTED_FALSE = {'contract.notAllowed'}
+VALUE_MAX = 400
+'''characters of one value of a failed step in the log'''
 
 
 def failed_steps(report: dict) -> list[str]:
@@ -28,6 +30,20 @@ def failed_steps(report: dict) -> list[str]:
                 walk(v, f'{path}.{k}' if path else k)
     walk(report, '')
     return out
+
+
+def describe(name: str, node) -> list[str]:
+    """A failed step: the checks of it that are false (ex. 'importOk'), then each of its values on a line of its own, so a long
+    value (a page text) does not hide the others. Steps nested in it with their own 'ok' are reported on their own when they fail"""
+    if not isinstance(node, dict):
+        return [f'  {name}: {json.dumps(node, ensure_ascii=False)[:VALUE_MAX]}']
+    false = [k for k, v in node.items() if v is False and k != 'ok']
+    lines = [f'  {name}: false: {", ".join(false) or "(only ok)"}']
+    for k, v in node.items():
+        if k == 'ok' or (isinstance(v, dict) and 'ok' in v and v['ok'] is not False):
+            continue
+        lines.append(f'    {k}: {json.dumps(v, ensure_ascii=False)[:VALUE_MAX]}')
+    return lines
 
 
 def main(argv: list[str]) -> int:
@@ -47,7 +63,8 @@ def main(argv: list[str]) -> int:
             node = report
             for part in name.split('.'):
                 node = node.get(part, {}) if isinstance(node, dict) else {}
-            print(f'  {name}: {json.dumps(node, ensure_ascii=False)[:600]}', file=sys.stderr)
+            for line in describe(name, node):
+                print(line, file=sys.stderr)
         return 1
     print('self-test passed')
     return 0
