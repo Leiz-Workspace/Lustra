@@ -69,15 +69,16 @@ def _host_ok(host: str, allowed: set[str]) -> bool:
     return any(host == h or host.endswith(f'.{h}') for h in allowed)
 
 
-def check_source(source: str, *, allowed_hosts: set[str] | None = None) -> list[Violation]:
-    """allowed_hosts: site host (+ cdn hosts) of the manifest; urls in string constants outside them are warnings"""
+def check_source(source: str, *, allowed_hosts: set[str] | None = None, downloader: bool = True) -> list[Violation]:
+    """allowed_hosts: site host (+ cdn hosts) of the manifest; urls in string constants outside them are warnings.
+    downloader=False: the extension's tag update file (manifest 'tagUpdate'), same rules without the Downloader class"""
     out: list[Violation] = []
 
     def err(rule: str, node: ast.AST | None, msg: str, severity: str = 'error') -> None:
         out.append(Violation(rule, severity, getattr(node, 'lineno', 0), msg))
 
     if len(source.encode()) > MAX_SOURCE_BYTES:
-        err('R10', None, f'downloader.py is larger than {MAX_SOURCE_BYTES // 1024} KB')
+        err('R10', None, f'{"downloader.py" if downloader else "the tag update file"} is larger than {MAX_SOURCE_BYTES // 1024} KB')
         return out
     try:
         tree = ast.parse(source)
@@ -160,7 +161,7 @@ def check_source(source: str, *, allowed_hosts: set[str] | None = None) -> list[
                         err('R10', node, f'url host \'{host}\' is not the site (or its cdn hosts)', 'warning')
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             err('R10', node, 'global / nonlocal statements are not allowed', 'warning')
-    if not has_downloader_class:
+    if downloader and not has_downloader_class:
         err('R10', None, 'no class derived from Downloader / DownloaderGelbooru / DownloaderDb / DownloaderJsonApi')
     return out
 

@@ -918,6 +918,113 @@ class LearnedTagListTests(_DataDirTest):
             server._learn_from_preview('rp', [{'id': '1', 'tags': ['a']}])
             thread.assert_not_called()
 
+
+JOB_FILE = '''# coding=UTF-8
+import re
+from html import unescape
+
+
+def read_tags(job):
+    \"\"\"the whole list in one answer (Shimmie's find_tags), plus what the checks of the core must clean up\"\"\"
+    text = job.get_text(f'{job.site}api/danbooru/find_tags', accept='text/xml')
+    job.log(f'{len(text)} bytes')
+    for count, name in re.findall(r"counts='(\\d+)' name='([^']*)'", text):
+        yield unescape(name), int(count), 'general'
+    yield 'two  words', 5, 'Character'
+    yield '', 3
+    yield 'bad_count', '7'
+'''
+
+
+class ExtensionJobTests(_DataDirTest):
+    """an extension ships its list and its own update (manifest tagUpdate): run only when asked, its requests through the core"""
+
+    def _install(self, ext_id: str = 'jobsite', abbr: str = 'jq', job: str = JOB_FILE, engine: str = 'custom',
+                 where: pathlib.Path | None = None) -> pathlib.Path:
+        m = make_manifest(ext_id=ext_id, abbr=abbr, name=ext_id.title(), site=SITE, engine=engine, media=['image'])
+        m.update({'tagList': f'{abbr}_tags.json', 'tagUpdate': {'entry': 'tags.py:read_tags'}, 'minSdkVersion': '1.1'})
+        folder = (where or self.data / 'extensions') / ext_id
+        folder.mkdir(parents=True)
+        (folder / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+        (folder / 'downloader.py').write_text('# test\n', encoding='utf-8')
+        (folder / 'tags.py').write_text(job, encoding='utf-8')
+        return folder
+
+    def _update(self, module: str, site=None, **kw):
+        session = FakeSession(site or FakeTagSite())
+        notes: list[str] = []
+        res = update_tag_list(module, self.data / 'tags', session=session, allow_local=True, min_interval=0.0,
+                              progress=lambda msg, _n: notes.append(msg), **kw)
+        return res, session, notes
+
+    def test_the_extensions_own_update_is_its_source_and_runs_only_when_asked(self) -> None:
+        self._install()
+        _install_engine = make_manifest(ext_id='fakebooru', abbr='fq', name='Fakebooru', site=SITE, engine='gelbooru_dapi', media=['image'])
+        (self.data / 'extensions' / 'fakebooru').mkdir(parents=True)
+        (self.data / 'extensions' / 'fakebooru' / 'manifest.json').write_text(json.dumps(_install_engine), encoding='utf-8')
+        src = tag_source('jq')
+        self.assertEqual((tags_updater.EXTENSION_JOB, 'tags.py:read_tags', True, True), (src.engine, src.job, src.on_demand, src.robots))
+        self.assertTrue(src.as_dict()['onDemand'])
+        self.assertFalse(tag_source('fq').on_demand)
+        self.assertIn('jq', [s.module for s in tag_sources()])
+        # the app's system schedule ('auto') leaves it out; naming the module runs it
+        auto = tags_updater._modules_arg('auto')
+        self.assertIn('fq', auto)
+        self.assertNotIn('jq', auto)
+        self.assertEqual([*auto, 'jq'], tags_updater._modules_arg('auto,jq'))
+        res, session, _ = self._update('jq')
+        self.assertTrue(res.written, res.message)
+        self.assertEqual([f'{SITE}robots.txt', f'{SITE}api/danbooru/find_tags'], [c[0] for c in session.calls])
+        got = _read_list(self.data / 'tags' / 'jq_tags.json')
+        self.assertEqual({**EXPECTED, 'two_words': 5}, {k: int(v.split()[0]) for k, v in got.items()})
+        self.assertEqual('5 posts (character)', got['two_words'])
+
+    def test_the_job_reaches_only_its_site_and_follows_robots_txt(self) -> None:
+        self._install(job="def read_tags(job):\n    job.get_text('https://other.test/tags')\n    yield 'x', 1\n")
+        with self.assertRaises(TagSourceError) as ctx:
+            self._update('jq')
+        self.assertIn('not the site of this tag list', str(ctx.exception))
+        shutil.rmtree(self.data / 'extensions' / 'jobsite')
+        self._install()
+        with self.assertRaises(TagSourceError) as ctx:
+            self._update('jq', site=FakeTagSite(robots='User-agent: *\nDisallow: /api/\n'))
+        self.assertEqual('robots', ctx.exception.kind)
+        self.assertFalse((self.data / 'tags' / 'jq_tags.json').exists())
+
+    def test_a_job_that_gives_nothing_writes_nothing(self) -> None:
+        self._install(job="def read_tags(job):\n    yield ('only', 'bad')\n")
+        with self.assertRaises(RuntimeError) as ctx:
+            self._update('jq')
+        self.assertIn('gave no tag', str(ctx.exception))
+        self.assertFalse((self.data / 'tags' / 'jq_tags.json').exists())
+
+    def test_the_manifest_entry_is_checked(self) -> None:
+        base = make_manifest(ext_id='jobsite', abbr='jq', name='Jobsite', site=SITE, engine='custom', media=['image'])
+        ExtensionManifest.from_dict({**base, 'tagUpdate': {'entry': 'tags.py:read_tags'}}, None, 'user')
+        for bad in ({'entry': 'sub/tags.py:read_tags'}, {'entry': '../tags.py:read_tags'}, {'entry': 'tags:read_tags'},
+                    {'entry': 'tags.py:read_tags', 'every': 7}, {'entry': 5}, 'tags.py:read_tags'):
+            with self.assertRaises(Exception, msg=str(bad)):
+                ExtensionManifest.from_dict({**base, 'tagUpdate': bad}, None, 'user')
+
+    def test_the_generator_never_runs_a_drafts_job_but_checks_and_packs_it(self) -> None:
+        from lustra.extgen.sandbox import _policy_checks
+        marker = self.root / 'ran'
+        draft = self._install(ext_id='fakebooru', abbr='fq', where=self.root / 'drafts',
+                              job=f"import requests\n\n\ndef read_tags(job):\n    open({str(marker)!r}, 'w').close()\n    yield 'x', 1\n")
+        res = bundle_tag_list(draft, session=FakeSession(FakeTagSite()), allow_local=True, min_interval=0.0)
+        self.assertEqual('later', res['status'], res)
+        self.assertIn('only when you ask', res['message'])
+        self.assertFalse(marker.exists())
+        (draft / 'fq_tags.json').write_text('{\n"scenery": "900 posts (general)",\n"sky": "700 posts (general)"\n}\n', encoding='utf-8')
+        res = bundle_tag_list(draft, session=FakeSession(FakeTagSite()), allow_local=True, min_interval=0.0)
+        self.assertEqual(('bundled', 2), (res['status'], res['count']), res)
+        m = ExtensionManifest.load(draft / 'manifest.json', 'user')
+        bad = [c for c in _policy_checks(draft, m) if not c['ok']]
+        self.assertTrue(any(c['detail'].startswith('tags.py line 1') for c in bad), bad)
+        with zipfile.ZipFile(pack(draft, self.root / 'fakebooru.zip')['path']) as zf:
+            self.assertTrue({'fakebooru/tags.py', 'fakebooru/fq_tags.json'} <= set(zf.namelist()))
+        self.assertFalse(marker.exists())
+
 #
 #
 #########################################

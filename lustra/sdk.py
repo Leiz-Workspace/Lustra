@@ -5,6 +5,10 @@ A downloader.py imports what it needs from here instead of the core modules:
 
     from lustra.sdk import DownloaderJsonApi, JsonPost, ModuleCaps
 
+An extension may also ship its own tag list update (manifest "tagUpdate": {"entry": "tags.py:read_tags"}, "minSdkVersion": "1.1"):
+read_tags(job: TagJob) yields (name, posts, type) for each tag of the site, its requests go through job.get_text / job.get_json.
+Lustra runs it only when the user asks (Tags A-Z), never on a schedule.
+
 Versioning (SDK_VERSION, 'MAJOR.MINOR'): a MINOR release only adds names; a MAJOR release may remove or change one, after the
 name was marked deprecated for at least one MINOR release. An extension that needs names added in a later release declares
 "minSdkVersion": "MAJOR.MINOR" in its manifest.json: Lustra refuses to load it with a clear message when its SDK is older
@@ -52,6 +56,7 @@ from .rex import (
     re_tags_exclude_rx,
     re_tags_to_process_rx,
 )
+from .tags_updater import TagJob
 from .utils import as_date, format_score
 
 __all__ = (
@@ -76,6 +81,7 @@ __all__ = (
     'JsonPost',
     'MediaKind',
     'ModuleCaps',
+    'TagJob',
     'as_date',
     'format_score',
     'media_kind_by_ext',
@@ -91,9 +97,10 @@ __all__ = (
     'trace',
 )
 
-SDK_VERSION = '1.0'
+SDK_VERSION = '1.1'
 '''1.0 (2026-11-17): downloader bases (Downloader, DownloaderGelbooru, DownloaderDb, DownloaderJsonApi + JsonPost), item / media
-types and constants, generic item regexes, network helpers allowed to extensions, trace, as_date, format_score'''
+types and constants, generic item regexes, network helpers allowed to extensions, trace, as_date, format_score.
+1.1 (2026-11-19): TagJob, for the extension's own tag list update (manifest 'tagUpdate')'''
 re_sdk_version = re.compile(r'^(\d{1,3})\.(\d{1,3})(?:\.\d{1,3})?$')
 
 

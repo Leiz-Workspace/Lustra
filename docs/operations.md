@@ -51,6 +51,11 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 ## 3. Cập nhật danh sách tag (autocomplete, Tags A–Z)
 **Nguồn danh sách** (`lustra/tags_updater.py`, lệnh `lustra-core tags` / `python -m lustra.tags_updater`):
 - 5 module đã duyệt: Rule34 (`rx`, cần khoá của bạn), Danbooru (`db`, dùng khoá nếu có), Xbooru (`xb`), Bbooru (`bb`), e621 (`en`).
+- Extension mang job cập nhật của riêng nó (manifest `"tagUpdate": {"entry": "tags.py:read_tags"}`, `"minSdkVersion": "1.1"`; plan [ext-tag-jobs](plans/ext-tag-jobs.md), chốt với chủ repo ngày 2026-11-19):
+  - Extension mang sẵn danh sách (`tagList`, file cạnh `manifest.json`). Job chỉ chạy khi người dùng yêu cầu: nút "Cập nhật" ở Tags A–Z, hoặc `lustra-core tags --modules <abbr>`. Lịch hệ thống (`auto`), việc tự cập nhật khi mở app và việc tải ngay sau khi cài không chạy job.
+  - `read_tags(job)` nhận `lustra.sdk.TagJob` (`site`, `api_key`, `min_posts`, `get_text`, `get_json`, `log`) và yield `(tên, số post, loại)`. Request của job đi qua cùng `PoliteClient` với các nguồn khác: chỉ https tới site của extension, nhịp tối thiểu 1 giây, robots.txt áp chặt, Retry-After, giới hạn của khoá, ngân sách request, không cookie.
+  - Lõi đổi khoảng trắng trong tên thành `_`, bỏ dòng sai, đưa loại lạ về `general`, lọc theo `--min-posts`. Job không cho tag nào thì không ghi gì.
+  - Job thay cho bộ đọc theo engine; extension chưa có `tagUpdate` vẫn dùng bộ đọc theo engine (bảng dưới). Trình tạo extension không chạy `tags.py` của bản nháp (code bản nháp chỉ chạy trong sandbox), nhưng kiểm nó bằng luật tĩnh R10 và đóng gói nó vào zip.
 - Mọi extension tạo từ một engine có danh sách tag. Updater đọc `$generator.engine` và `site` trong manifest; trình tạo extension (`lustra.extgen`) ghi sẵn hai trường này, kèm `tagList: "<abbr>_tags.json"`.
 
 | Engine | Cách đọc danh sách | Khoá |
@@ -124,17 +129,17 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 
 **Trong app** (Tags A–Z → Danh sách tag):
 - Bảng liệt kê mọi extension đã cài, có cột "Nguồn" (rê chuột để xem site, cách đọc, có tuân thủ robots.txt không).
-  - Module có nguồn: có nút "Cập nhật".
+  - Module có nguồn: có nút "Cập nhật". Với extension có job riêng, nút này là cách duy nhất để chạy job.
   - Module bắt buộc khoá mà chưa có khoá: ghi "cần API key" (nhập ở Cài đặt → API key).
   - Module không có nguồn: cột "Nguồn" ghi "học từ post đã xem / đã tải", có nút "Học từ file đã tải"; cột dung lượng ghi "(đã học)" khi danh sách là danh sách học được. Module không có nguồn nhưng có danh sách đi kèm (ví dụ `2tags/` của repo) ghi "không có nguồn".
-  - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay.
+  - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay. Extension có job riêng thì không: job chỉ chạy khi bấm nút.
 - "Tự cập nhật mỗi N ngày khi mở app": Rule34 và Danbooru, bằng khoá đã lưu; Rule34 bị bỏ qua khi chưa có khoá.
 - "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" (mỗi tuần vào thứ Hai, hoặc mỗi ngày, lúc khoảng 4 giờ sáng):
   - Linux và macOS: app thêm hoặc xoá một khối có đánh dấu `# BEGIN lustra-tags` … `# END lustra-tags` trong crontab của người dùng, không đụng các dòng khác.
   - Windows: tác vụ `Lustra tag lists` của Task Scheduler.
   - Bản AppImage không hỗ trợ, vì lõi chỉ tồn tại khi app chạy.
 - Lịch chạy `lustra-core tags --modules auto --out <thư mục dữ liệu>/tags --min-posts 2 --log <thư mục dữ liệu>/logs/tags-schedule.log`; bản phát triển chạy `python -m lustra.tags_updater`.
-  - `auto` là mọi module đã cài có nguồn tag và không bắt buộc khoá: db, xb, bb, en (nếu đã cài) và các extension tạo từ engine.
+  - `auto` là mọi module đã cài có nguồn tag và không bắt buộc khoá: db, xb, bb, en (nếu đã cài) và các extension tạo từ engine. Extension có job riêng (`tagUpdate`) không nằm trong `auto`.
   - Danh sách module được tính lúc lịch chạy, nên extension cài sau cũng được cập nhật mà không cần ghi lại mục lịch.
 - Lịch không đọc được khoá đã mã hoá của app, nên module bắt buộc khoá (Rule34, extension Gelbooru cần khoá) không chạy theo lịch.
 - App ghi lại mục lịch mỗi lần mở, nên đường dẫn lõi luôn đúng sau khi cập nhật app.
