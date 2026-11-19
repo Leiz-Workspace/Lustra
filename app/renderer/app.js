@@ -878,6 +878,41 @@ function onQueryChanged() {
   S.countSeq++; // a count still running belongs to the previous query
   validate();
   markRelatedStale();
+  if (!queryString()) clearPreview(); // no tag left: the posts of the previous query must not stay on screen
+  else markPreviewStale();
+}
+
+// ----- preview of another query: emptied when the query is, marked stale when it changed (until the next Preview) -----
+const RESULTS_HINT = $('#results-info').innerHTML;
+function previewStale() {
+  const P = S.preview;
+  return P.items.length > 0 && (P.tags !== queryString() || P.module !== S.module);
+}
+function markPreviewStale() {
+  if (!S.preview.items.length) return;
+  $('#grid').classList.toggle('stale', previewStale());
+  if (previewStale() && !$('#results-info').dataset.stale) {
+    $('#results-info').dataset.stale = '1';
+    $('#results-info').append(h('span', { class: 'stale-note' }, ' · kết quả của truy vấn trước: bấm Preview để xem truy vấn mới'));
+  } else if (!previewStale() && $('#results-info').dataset.stale) renderGrid();
+}
+function clearPreview() {
+  const P = S.preview;
+  P.seq++; // an answer still on its way belongs to the cleared query
+  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', required: [], tasks: [], hasMore: true });
+  P.selected.clear();
+  gridCards.clear();
+  $('#grid').replaceChildren();
+  $('#grid').classList.remove('stale');
+  $('#grid-empty').hidden = true;
+  $('#kind-filter').hidden = true;
+  $('#results-tools').hidden = true;
+  delete $('#results-info').dataset.stale;
+  $('#results-info').innerHTML = RESULTS_HINT;
+  const btn = $('#btn-preview');
+  btn.disabled = false;
+  btn.textContent = 'Preview';
+  updateSelButton();
 }
 
 function currentQuery() {
@@ -898,7 +933,7 @@ function filtersSummary() {
   const parts = [
     media.length ? media.join(' + ') : 'không tải loại nào',
     q.dateMin || q.dateMax ? `${q.dateMin ? fmt(q.dateMin) : '…'} → ${q.dateMax ? fmt(q.dateMax) : '…'}` : '',
-    o.limit ? `tối đa ${o.limit} post` : '',
+    o.limit ? `${o.limit} post ${o.reverse ? 'mới' : 'cũ'} nhất` : '', // the limit keeps the first posts in the chosen order
     `${o.threads} luồng`,
     g.select.length ? `giới tính ${g.op === 'exclude' ? 'bỏ' : 'giữ'}: ${genderPicked(g)}` : '',
     g.select.length && g.mode === 'model' && g.verifyMedia && gmOn() ? 'xem lại video sau khi tải' : '',
@@ -1037,6 +1072,9 @@ function renderGrid() {
   }
   if (!P.hasMore) parts.push('trang cuối');
   $('#results-info').textContent = parts.join(' · ');
+  delete $('#results-info').dataset.stale;
+  $('#grid').classList.remove('stale');
+  markPreviewStale(); // the query may have changed since these posts were fetched
   $('#results-tools').hidden = false;
   $('#pg-num').textContent = String(P.page + 1);
   $('#pg-prev').disabled = P.page === 0;
