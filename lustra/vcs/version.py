@@ -9,7 +9,7 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 APP_NAME = 'Lustra'
 APP_VER_MAJOR = '2'
 APP_VER_SUB = '0'
-APP_REVISION = '7'
+APP_REVISION = '8'
 APP_IS_BETA = False
 APP_IS_BETA_TEXT = 'b' * APP_IS_BETA
 APP_REV_DATE = '19 Nov 2026'
