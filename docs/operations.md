@@ -206,7 +206,9 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
     .venv/bin/python -m lustra.dlindex_tools trash purge --days 30
     ```
     `--days 0` hoặc `--all`: xoá mọi file trong thùng rác; `--json`. Exit code `3` khi có file không xoá được (đang mở). Sidecar: `index.trash`, `index.restore`, `index.purgeTrash`, `index.forget` (app chỉ gọi từ tiến trình chính, renderer không gọi trực tiếp được), `index.search` với `"trash": true`.
-  - Schema index lên 2 (thêm cột `trashed_at`, `orig_path`): index cũ được nâng cấp tại chỗ ở lần mở đầu tiên, dòng cũ giữ nguyên. Bản app cũ vẫn đọc được index mới, nhưng hiện file trong thùng rác như file thường.
+  - Schema index lên 3 (thêm cột `trashed_at`, `orig_path`, `moving_to`): index cũ được nâng cấp tại chỗ ở lần mở đầu tiên, dòng cũ giữ nguyên. Bản app cũ vẫn đọc được index mới, nhưng hiện file trong thùng rác như file thường.
+  - Mỗi lượt chuyển (tối đa 200 file) ghi chỗ đến của từng file vào `moving_to` trước khi đổi tên, rồi đổi tên và cập nhật dòng trong cùng một giao dịch giữ khoá ghi (dọn, quên dòng, lượt chuyển khác chờ tới khi xong). App tắt hay lõi bị dừng giữa chừng: lần sau mở trang Đã tải (hoặc xoá, khôi phục, dọn thùng rác), dòng đi theo file đã tới chỗ mới, file chưa đi thì giữ nguyên.
+  - Thư mục thùng rác không truy cập được (ổ ngoài đã rút, ổ mạng chưa gắn): dọn thùng rác không bỏ dòng của các file trong đó (báo "không xoá được"), cắm lại thì lần dọn sau xoá như thường; "Xoá khỏi thư viện" cũng không bỏ các dòng đó.
 - **Tải nhiều site**: Tìm kiếm → Bộ lọc & tuỳ chọn tải → **Tải thêm từ site khác**, chọn thêm site rồi bấm **Tải xuống (N site)**. Mỗi site một job, chạy lần lượt, luôn bỏ qua file đã tải và đặt tiền tố module cho tên file; post trùng md5 với file site trước đã tải thì không tải lại. Thử truy vấn trên từng site bằng Preview trước: tên tag, metatag và alias khác nhau giữa các site.
 
 ## 3c. Model nhận diện giới tính (`-gender_mode model`)

@@ -14,7 +14,8 @@ Lustra: local index of downloaded files, <data dir>/index/downloads.sqlite
   trash_folders), restore() puts them back, purge_trash() deletes them for good, forget() drops rows whose file is gone. A trashed row
   keeps its metadata: path is where the file is now (in the trash), orig_path where it was, trashed_at when. Readers that mean "files
   of the library" (find_known, search, stats, rows_for_posts, posts_after) leave trashed rows out: a post whose file is in the trash
-  or was purged can be downloaded again
+  or was purged can be downloaded again. A move writes where the file goes (moving_to) before the rename: recover_moves() finishes
+  or drops the moves a stopped process left half done
 """
 #########################################
 #
@@ -25,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import errno
+import json
 import os
 import pathlib
 import queue
@@ -48,7 +50,7 @@ ENV_DLINDEX = 'LUSTRA_DLINDEX'
 '''0: finished downloads are not recorded (the index stays readable, -skip_known keeps working)'''
 INDEX_DIR_NAME = 'index'
 INDEX_FILE_NAME = 'downloads.sqlite'
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT = 10.0
 '''seconds a connection waits while another process holds the write lock'''
 WRITE_ATTEMPTS = 3
@@ -75,6 +77,7 @@ TRASH_HIDDEN_NAME = '.lustra-trash'
 TRASH_BATCH = 200
 '''files moved per write transaction of trash() / restore()'''
 TRASH_NAME_TRIES = 1000
+TRASH_UNREACHABLE = 'the trash folder is not reachable (drive unplugged?)'
 DAY_SECONDS = 86400
 
 re_md5 = re.compile(r'[0-9a-f]{32}')
@@ -119,9 +122,13 @@ MIGRATIONS = {
         'ALTER TABLE files ADD COLUMN orig_path TEXT',
         'CREATE INDEX IF NOT EXISTS files_trashed_at ON files(trashed_at) WHERE trashed_at IS NOT NULL',
     ),
+    3: (
+        'ALTER TABLE files ADD COLUMN moving_to TEXT',
+        'CREATE INDEX IF NOT EXISTS files_moving_to ON files(moving_to) WHERE moving_to IS NOT NULL',
+    ),
 }
 '''schema N-1 -> N. A new index runs them after SCHEMA too, so both ways give the same tables. Rows already there are untouched
-(trashed_at NULL: not in the trash)'''
+(trashed_at NULL: not in the trash; moving_to NULL: no move under way)'''
 
 UPSERT_FILE = (
     'INSERT INTO files (module, post_id, md5, path, ext, size, tags, score, rating, post_date, downloaded_at) '
@@ -253,6 +260,22 @@ def in_trash_folder(path: str) -> bool:
 
 def _os_error(err: OSError) -> str:
     return f'{type(err).__name__}: {err.strerror or err}'
+
+
+def _rename_first(src: str, targets: Sequence[str]) -> tuple[str, str]:
+    """Renames src to the first of targets that takes it: (target, ''), or ('', why). Never over an existing file"""
+    why = ''
+    for target in targets:
+        try:
+            if os.path.lexists(target):
+                raise FileExistsError(errno.EEXIST, 'the name was taken meanwhile', target)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.replace(src, target)
+            return target, ''
+        except OSError as err:  # EXDEV: another drive after all, the next folder is nearer to the file
+            if not why or err.errno != errno.EXDEV:
+                why = _os_error(err)
+    return '', why or 'no trash folder on the drive of the file'
 
 
 @dataclass(slots=True)
@@ -638,6 +661,8 @@ class DownloadIndex:
         conn = self._connection()
         if conn is None:
             return res
+        if not dry_run:
+            self.recover_moves()  # a row whose file reached the trash before a crash is not missing
         batch = max(1, int(batch))
         res.total = conn.execute('SELECT COUNT(*) FROM files').fetchone()[0]
         dirs: dict[str, bool] = {}
@@ -714,86 +739,163 @@ class DownloadIndex:
         return list(dict.fromkeys(out))
 
     @staticmethod
-    def _free_path(conn: sqlite3.Connection, folder: str, name: str) -> str:
-        """folder/name, else folder/<stem>_1<ext>, _2, ... when a file or a row of the index has that path already"""
+    def _free_path(conn: sqlite3.Connection, folder: str, name: str, taken: set[str] | None = None) -> str:
+        """folder/name, else folder/<stem>_1<ext>, _2, ... when a file, a row of the index or another file of the batch (taken) has
+        that path already"""
         stem, ext = os.path.splitext(name)
         for n in range(TRASH_NAME_TRIES):
             target = os.path.join(folder, f'{stem}_{n:d}{ext}' if n else name)
-            if not os.path.lexists(target) and conn.execute('SELECT 1 FROM files WHERE path = ?', (target,)).fetchone() is None:
+            if (target not in (taken or ()) and not os.path.lexists(target)
+                    and conn.execute('SELECT 1 FROM files WHERE path = ?', (target,)).fetchone() is None):
                 return target
         raise FileExistsError(errno.EEXIST, 'no free name', os.path.join(folder, name))
 
-    def _rename_into(self, conn: sqlite3.Connection, src: str, folders: Sequence[str], name: str) -> tuple[str, str]:
-        """Renames src into the first of folders that takes it: (new path, ''), or ('', why) when none did"""
-        why = ''
-        for folder in folders:
-            try:
-                os.makedirs(folder, exist_ok=True)
-                target = self._free_path(conn, folder, name)
-                os.replace(src, target)
-                return target, ''
-            except OSError as err:  # EXDEV: another drive after all, the next folder is nearer to the file
-                if not why or err.errno != errno.EXDEV:
-                    why = _os_error(err)
-        return '', why or 'no trash folder on the drive of the file'
-
-    @staticmethod
-    def _commit_moves(conn: sqlite3.Connection, moved: list[tuple[int, str, str]], sql: str,
-                      args: Callable[[tuple[int, str, str]], tuple]) -> list[tuple[int, str, str]]:
-        """The rows of files just renamed (row id, old path, new path) follow them in one transaction. A file whose row changed
-        meanwhile (no match), and every file of a transaction that fails, is renamed back. Returns the moves kept"""
-        if not moved:
-            return []
-        kept: list[tuple[int, str, str]] = []
-        undo: list[tuple[int, str, str]] = []
+    def _plan_moves(self, conn: sqlite3.Connection, chunk: Sequence[str], restoring: bool, roots: Sequence[str | os.PathLike],
+                    res: dict) -> list[tuple[int, str, list[str]]]:
+        """First step of trash() / restore(), one transaction: the rows of chunk that may move and where to, best first (trash: a
+        free '<row id>_<name>' in each trash folder of the file; restore: its old path, else <stem>_1<ext>, ...), written to their
+        moving_to before any file is renamed: a process stopped between the renames and the commit leaves where the files went
+        (recover_moves). Paths refused or failed go to res. Returns [(row id, path, targets)]"""
+        plans: list[tuple[int, str, list[str]]] = []
+        taken: set[str] = set()
         conn.execute('BEGIN IMMEDIATE')
         try:
-            for m in moved:
-                (kept if conn.execute(sql, args(m)).rowcount else undo).append(m)
+            rows = {p: (i, orig) for i, p, orig in conn.execute(
+                f'SELECT id, path, orig_path FROM files WHERE path IN ({_qs(len(chunk))}) '
+                f'AND trashed_at IS {"NOT NULL" if restoring else "NULL"}', chunk)}
+            for path in chunk:
+                row_id, orig = rows.get(path, (None, ''))
+                if row_id is None or (restoring and not orig) or (not restoring and not file_present(path)):
+                    res['refused'].append(path)
+                    continue
+                if restoring and not file_present(path):
+                    res['failed'].append({'path': path, 'error': 'the file is no longer in the trash'})
+                    continue
+                targets: list[str] = []
+                why = 'no trash folder on the drive of the file'
+                folders = [os.path.dirname(orig)] if restoring else self.trash_folders(path, roots)
+                name = os.path.basename(orig) if restoring else f'{row_id:d}_{os.path.basename(path)}'
+                for folder in folders:
+                    try:
+                        targets.append(self._free_path(conn, folder, name, taken))
+                    except OSError as err:
+                        why = _os_error(err)
+                if not targets:
+                    res['failed'].append({'path': path, 'error': why})
+                    continue
+                taken.update(targets)
+                conn.execute('UPDATE files SET moving_to = ? WHERE id = ?', (json.dumps(targets), row_id))
+                plans.append((row_id, path, targets))
             conn.execute('COMMIT')
         except BaseException:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute('ROLLBACK')
-            undo = moved
             raise
-        finally:
-            for _, old, new in undo:
+        return plans
+
+    @staticmethod
+    def _move_planned(conn: sqlite3.Connection, plans: list[tuple[int, str, list[str]]], restoring: bool,
+                      when: float) -> tuple[list[tuple[int, str, str]], list[dict]]:
+        """Second step of trash() / restore(), one transaction that holds the write lock from the first rename to the commit (a purge,
+        forget or other move that finds a file gone meanwhile waits for the commit, then finds its row changed and leaves it alone;
+        recover_moves waits too): each file whose row did not change since the first step
+        is renamed to the first of its targets that takes it (EXDEV: another drive after all, the next folder is nearer to the
+        file; never copied) and its row follows. A failure renames back every file of the batch before the rollback; a process
+        stopped here leaves moving_to (recover_moves). Returns (moves kept: (row id, old path, new path), failed: [{path, error}])"""
+        moved: list[tuple[int, str, str]] = []
+        failed: list[dict] = []
+        if not plans:
+            return moved, failed
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            for row_id, old, targets in plans:
+                row = conn.execute('SELECT path, trashed_at IS NOT NULL FROM files WHERE id = ?', (row_id,)).fetchone()
+                new, why = '', ''
+                if row is None or row[0] != old or bool(row[1]) != restoring:
+                    why = 'changed meanwhile'
+                elif not file_present(old):
+                    why = 'the file is no longer in the trash' if restoring else 'the file is no longer there'
+                else:
+                    new, why = _rename_first(old, targets)
+                if not new:
+                    failed.append({'path': old, 'error': why})
+                    conn.execute('UPDATE files SET moving_to = NULL WHERE id = ?', (row_id,))
+                    continue
+                moved.append((row_id, old, new))
+                if restoring:
+                    conn.execute('UPDATE files SET path = ?, orig_path = NULL, trashed_at = NULL, moving_to = NULL WHERE id = ?',
+                                 (new, row_id))
+                else:
+                    conn.execute('UPDATE files SET path = ?, orig_path = ?, trashed_at = ?, moving_to = NULL WHERE id = ?',
+                                 (new, old, when, row_id))
+            conn.execute('COMMIT')
+        except BaseException:
+            for _, old, new in moved:  # back while the write lock is still held (BEGIN failed: nothing was moved)
                 if not os.path.lexists(old):
                     with contextlib.suppress(OSError):
                         os.replace(new, old)
-        return kept
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute('ROLLBACK')
+            with contextlib.suppress(sqlite3.Error):  # the files back where they were need no recovery
+                back = [(row_id,) for row_id, old, _ in plans if os.path.lexists(old)]
+                conn.executemany('UPDATE files SET moving_to = NULL WHERE id = ?', back)
+            raise
+        return moved, failed
+
+    def recover_moves(self) -> int:
+        """Moves of trash() / restore() a stopped process left half done (crash, power loss, the app quitting while files moved):
+        a row whose file is gone from its path and sits at one of its moving_to targets follows the file (into the trash, or back
+        to the library); any other mark is dropped (the file never moved). Under the write lock: a move under way holds it from its
+        first rename to its commit. Cheap when there is nothing to do (one indexed query). Returns the rows fixed"""
+        conn = self._connection()
+        if conn is None or conn.execute('SELECT 1 FROM files WHERE moving_to IS NOT NULL LIMIT 1').fetchone() is None:
+            return 0
+        fixed = 0
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            for row_id, path, trashed_at, moving_to in conn.execute(
+                    'SELECT id, path, trashed_at, moving_to FROM files WHERE moving_to IS NOT NULL').fetchall():
+                try:
+                    targets = [str(t) for t in json.loads(moving_to)]
+                except (TypeError, ValueError):
+                    targets = []
+                landed = '' if os.path.lexists(path) else next((t for t in targets if file_present(t)), '')
+                if not landed or conn.execute('SELECT 1 FROM files WHERE path = ?', (landed,)).fetchone() is not None:
+                    conn.execute('UPDATE files SET moving_to = NULL WHERE id = ?', (row_id,))
+                elif trashed_at is None:  # trash(): the file reached the trash
+                    conn.execute('UPDATE files SET path = ?, orig_path = ?, trashed_at = ?, moving_to = NULL WHERE id = ?',
+                                 (landed, path, time.time(), row_id))
+                    fixed += 1
+                else:  # restore(): the file is back in the library
+                    conn.execute('UPDATE files SET path = ?, orig_path = NULL, trashed_at = NULL, moving_to = NULL WHERE id = ?',
+                                 (landed, row_id))
+                    fixed += 1
+            conn.execute('COMMIT')
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute('ROLLBACK')
+            raise
+        if fixed:
+            trace(f'Download index: {fixed:d} file move(s) left unfinished were completed')
+        return fixed
 
     def trash(self, paths: Iterable[str], *, roots: Sequence[str | os.PathLike] = (), now: float | None = None) -> dict:
         """Moves files of the library into the trash (see trash_folders; named '<row id>_<name>') and marks their rows: path = where
         the file is now, orig_path = where it was, trashed_at. Only rows of the library whose file is on disk: a path the index does
-        not know, or already in the trash, is refused and never touched.
-        {trashed: [{path, trashPath}], failed: [{path, error}], refused: [path]}"""
+        not know, or already in the trash, is refused and never touched. TRASH_BATCH files at a time, each batch in two steps
+        (_plan_moves, _move_planned). {trashed: [{path, trashPath}], failed: [{path, error}], refused: [path]}"""
         wanted = list(dict.fromkeys(str(p) for p in paths))
         res: dict = {'trashed': [], 'failed': [], 'refused': []}
         conn = self._connection()
         if conn is None:
             res['refused'] = wanted
             return res
+        self.recover_moves()
         when = time.time() if now is None else float(now)
         for chunk in _chunks(wanted, TRASH_BATCH):
-            ids = {p: i for i, p in conn.execute(
-                f'SELECT id, path FROM files WHERE path IN ({_qs(len(chunk))}) AND trashed_at IS NULL', chunk)}
-            moved: list[tuple[int, str, str]] = []
-            for path in chunk:
-                row_id = ids.get(path)
-                if row_id is None or not file_present(path):
-                    res['refused'].append(path)
-                    continue
-                target, why = self._rename_into(conn, path, self.trash_folders(path, roots), f'{row_id:d}_{os.path.basename(path)}')
-                if target:
-                    moved.append((row_id, path, target))
-                else:
-                    res['failed'].append({'path': path, 'error': why})
-            kept = self._commit_moves(conn, moved, 'UPDATE files SET path = ?, orig_path = ?, trashed_at = ? '
-                                                   'WHERE id = ? AND path = ? AND trashed_at IS NULL',
-                                      lambda m: (m[2], m[1], when, m[0], m[1]))
+            kept, failed = self._move_planned(conn, self._plan_moves(conn, chunk, False, roots, res), False, when)
             res['trashed'] += [{'path': old, 'trashPath': new} for _, old, new in kept]
-            res['failed'] += [{'path': m[1], 'error': 'changed meanwhile'} for m in moved if m not in kept]
+            res['failed'] += failed
         return res
 
     def restore(self, paths: Iterable[str]) -> dict:
@@ -807,56 +909,38 @@ class DownloadIndex:
         if conn is None:
             res['refused'] = wanted
             return res
+        self.recover_moves()
         for chunk in _chunks(wanted, TRASH_BATCH):
-            rows = {p: (i, orig) for i, p, orig in conn.execute(
-                f'SELECT id, path, orig_path FROM files WHERE path IN ({_qs(len(chunk))}) AND trashed_at IS NOT NULL', chunk)}
-            moved: list[tuple[int, str, str]] = []
-            for path in chunk:
-                row_id, orig = rows.get(path, (None, ''))
-                if row_id is None or not orig:
-                    res['refused'].append(path)
-                    continue
-                if not file_present(path):
-                    res['failed'].append({'path': path, 'error': 'the file is no longer in the trash'})
-                    continue
-                folder, name = os.path.split(orig)
-                try:
-                    os.makedirs(folder, exist_ok=True)
-                    target = self._free_path(conn, folder, name)
-                    os.replace(path, target)
-                except OSError as err:
-                    res['failed'].append({'path': path, 'error': _os_error(err)})
-                    continue
-                moved.append((row_id, path, target))
-            kept = self._commit_moves(conn, moved, 'UPDATE files SET path = ?, orig_path = NULL, trashed_at = NULL '
-                                                   'WHERE id = ? AND path = ? AND trashed_at IS NOT NULL',
-                                      lambda m: (m[2], m[0], m[1]))
+            kept, failed = self._move_planned(conn, self._plan_moves(conn, chunk, True, (), res), True, 0.0)
             res['restored'] += [{'path': old, 'restoredPath': new} for _, old, new in kept]
-            res['failed'] += [{'path': m[1], 'error': 'changed meanwhile'} for m in moved if m not in kept]
+            res['failed'] += failed
         return res
 
     def purge_trash(self, *, older_than_days: float | None = None, paths: Iterable[str] | None = None, all: bool = False,  # noqa: A002
                     now: float | None = None, batch: int = CLEAN_BATCH) -> dict:
         """Deletes files of the trash for good, then their rows and tags, a batch at a time (one short transaction each): rows
         trashed more than older_than_days ago, the given paths (rows in the trash only), or all of them; one of the three. A file
-        already gone only loses its row; a file that cannot be deleted (in use) keeps it. Only files directly inside a trash folder
-        are deleted: a row of the trash that points anywhere else loses its row, its file stays (kept). Empty '.lustra-trash'
-        folders are removed. {purged: rows removed, files: files deleted, bytes, failed: [{path, error}], kept}"""
+        already gone only loses its row; a file that cannot be deleted (in use) keeps it, and so does a file whose trash folder is
+        gone (an unplugged drive or an unmounted share looks the same: failed, purged when it is back). Only files directly inside a
+        trash folder are deleted: a row of the trash that points anywhere else loses its row, its file stays (kept). A row being
+        restored (moving_to) is left alone. Empty '.lustra-trash' folders are removed.
+        {purged: rows removed, files: files deleted, bytes, failed: [{path, error}], kept}"""
         if (older_than_days is not None) + (paths is not None) + bool(all) != 1:
             raise ValueError('purge_trash: older_than_days, paths or all, one of them')
         res: dict = {'purged': 0, 'files': 0, 'bytes': 0, 'failed': [], 'kept': 0}
         conn = self._connection()
         if conn is None:
             return res
+        self.recover_moves()
         batch = max(1, int(batch))
 
         def steps() -> Iterator[list[tuple[int, str, float]]]:
             if paths is not None:
                 for chunk in _chunks(list(dict.fromkeys(str(p) for p in paths)), min(batch, SQL_CHUNK)):
                     yield conn.execute(f'SELECT id, path, downloaded_at FROM files WHERE path IN ({_qs(len(chunk))}) '
-                                       'AND trashed_at IS NOT NULL', chunk).fetchall()
+                                       'AND trashed_at IS NOT NULL AND moving_to IS NULL', chunk).fetchall()
                 return
-            where, args = 'trashed_at IS NOT NULL', []
+            where, args = 'trashed_at IS NOT NULL AND moving_to IS NULL', []
             if older_than_days is not None:
                 where += ' AND trashed_at < ?'
                 args.append((time.time() if now is None else float(now)) - float(older_than_days) * DAY_SECONDS)
@@ -881,7 +965,9 @@ class DownloadIndex:
                         res['bytes'] += size
                         folders.add(os.path.dirname(path))
                     except FileNotFoundError:
-                        pass
+                        if not os.path.isdir(os.path.dirname(path)):
+                            res['failed'].append({'path': path, 'error': TRASH_UNREACHABLE})
+                            continue
                     except OSError as err:
                         res['failed'].append({'path': path, 'error': _os_error(err)})
                         continue
@@ -896,22 +982,25 @@ class DownloadIndex:
 
     def forget(self, paths: Iterable[str]) -> dict:
         """Drops the rows (and tags) of files that are no longer on disk, in the library or the trash. Rows only: a path whose file
-        is still there, or that the index does not know, is refused. {removed, refused: [path]}"""
+        is still there, or that the index does not know, is refused, and so is a row of the trash whose trash folder is gone (an
+        unplugged drive: its file would stay there with no row). {removed, refused: [path]}"""
         wanted = list(dict.fromkeys(str(p) for p in paths))
         res: dict = {'removed': 0, 'refused': []}
         conn = self._connection()
         if conn is None:
             res['refused'] = wanted
             return res
+        self.recover_moves()
         for chunk in _chunks(wanted, SQL_CHUNK):
-            rows = {r[1]: r for r in conn.execute(f'SELECT id, path, downloaded_at FROM files WHERE path IN ({_qs(len(chunk))})', chunk)}
+            rows = {r[1]: r for r in conn.execute(f'SELECT id, path, downloaded_at, trashed_at FROM files WHERE path IN ({_qs(len(chunk))}) '
+                                                  'AND moving_to IS NULL', chunk)}
             gone = []
             for path in chunk:
                 row = rows.get(path)
-                if row is None or file_present(path):
+                if row is None or file_present(path) or (row[3] is not None and not os.path.isdir(os.path.dirname(path))):
                     res['refused'].append(path)
                 else:
-                    gone.append(row)
+                    gone.append(row[:3])
             if gone:
                 res['removed'] += self._delete_rows(conn, gone)
         return res

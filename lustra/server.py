@@ -753,6 +753,16 @@ def _int_param(p: dict, key: str, default: int) -> int:
         raise RpcError(-32602, f'invalid \'{key}\'') from None
 
 
+def _recover_moves(index) -> None:
+    """Trash moves a stopped core left half done are finished before the library or the trash is shown (recover_moves: one
+    indexed query when there is nothing to do). A locked or broken index still shows what it has"""
+    import sqlite3
+    try:
+        index.recover_moves()
+    except sqlite3.Error:
+        pass
+
+
 def m_index_search(p: dict) -> dict:
     """{tags, module, dateFrom, dateTo, page, pageSize, order, trash} -> {total, page, pageSize, items: [...], terms}.
     tags: 'tag -tag pre* rating:e md5:<hash> id:<n>' (all must match); dates: post date 'YYYY-MM-DD' (inclusive); pages from 0.
@@ -765,6 +775,7 @@ def m_index_search(p: dict) -> dict:
     if module and not re_index_module.fullmatch(module):
         raise RpcError(-32602, 'invalid module')
     with DownloadIndex() as index:
+        _recover_moves(index)
         return index.search(tags[:INDEX_QUERY_MAX_LEN], module=module, date_from=str(p.get('dateFrom') or ''),
                             date_to=str(p.get('dateTo') or ''), page=_int_param(p, 'page', 0), page_size=_int_param(p, 'pageSize', 50),
                             order=str(p.get('order') or 'downloaded'), trash=p.get('trash') is True)
@@ -809,6 +820,7 @@ def m_index_stats(_: dict) -> dict:
     """Totals of the download index (files, posts, tags, sizes, per module), exists: False until the first file is recorded"""
     from .dlindex import DownloadIndex
     with DownloadIndex() as index:
+        _recover_moves(index)
         return index.stats()
 
 

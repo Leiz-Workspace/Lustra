@@ -7,9 +7,11 @@ Lustra: local download index (lustra/dlindex.py, docs/plans/search-engine.md pha
 - download pipeline: finished files are recorded from the scan's post info; '-skip_known' (off by default) skips posts known by
   module + id or by md5 (any module) whose file is still on disk
 - sidecar methods index.search / index.stats, desktop app wiring (allowlist, -skip_known)
-- schema 2 (a schema 1 index is migrated, rows kept) and the trash of the "Đã tải" page: trash / restore / purge_trash / forget,
+- schema 3 (a schema 1 index is migrated, rows kept) and the trash of the "Đã tải" page: trash / restore / purge_trash / forget,
   trashed rows left out of the library (find_known, search, stats, rows_for_posts, posts_after), trash folders on the file's drive
   (EXDEV goes on to the next one), the sidecar methods and their desktop wiring (main only, confirmations, trashDays)
+- moves that cannot finish (a locked index, an error, a process killed between the renames and the commit: recover_moves), a
+  purge while a restore runs, a trash folder on an unplugged drive
 Run: python -m unittest lustra.tests.test_dlindex
 """
 #########################################
@@ -512,13 +514,13 @@ class TrashTests(_TempDir):
         self.assertEqual([(str(f), '1', None, '', True)], [(x['path'], x['id'], x['trashedAt'], x['origPath'], x['exists']) for x in items])
         conn = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(2, conn.execute('PRAGMA user_version').fetchone()[0])
-            self.assertIn('files_trashed_at', [r[1] for r in conn.execute('PRAGMA index_list(files)')])
-            self.assertEqual([(1, None, None)], conn.execute('SELECT id, trashed_at, orig_path FROM files').fetchall())
+            self.assertEqual(dlindex.SCHEMA_VERSION, conn.execute('PRAGMA user_version').fetchone()[0])
+            self.assertLessEqual({'files_trashed_at', 'files_moving_to'}, {r[1] for r in conn.execute('PRAGMA index_list(files)')})
+            self.assertEqual([(1, None, None, None)], conn.execute('SELECT id, trashed_at, orig_path, moving_to FROM files').fetchall())
         finally:
             conn.close()
         migrated = self._table(self.db_path)
-        self.assertEqual(['trashed_at', 'orig_path'], [c[0] for c in migrated[-2:]])
+        self.assertEqual(['trashed_at', 'orig_path', 'moving_to'], [c[0] for c in migrated[-3:]])
         new = self.tmp / 'new' / dlindex.INDEX_FILE_NAME  # a new index: the same table
         with dlindex.DownloadIndex(new, create=True) as index:
             index.add_many([_rec('rx', 1, f)])
@@ -718,6 +720,192 @@ class TrashTests(_TempDir):
             self.assertEqual(1, index.forget([tb])['removed'])
             self.assertEqual(0, index.stats()['trash']['files'])
         self.assertTrue(a.exists())
+
+    def _moving(self) -> list[tuple]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute('SELECT id, moving_to FROM files WHERE moving_to IS NOT NULL').fetchall()
+        finally:
+            conn.close()
+
+    def test_a_locked_index_moves_nothing(self) -> None:
+        # another writer holds the lock longer than BUSY_TIMEOUT: the error reaches the caller, and no file has left its place
+        a, b = self._fill(2)
+        other = sqlite3.connect(self.db_path, isolation_level=None)
+        try:
+            other.execute('BEGIN IMMEDIATE')
+            with mock.patch.object(dlindex, 'BUSY_TIMEOUT', 0.2), self._index() as index:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    index.trash([str(a), str(b)])
+        finally:
+            other.execute('ROLLBACK')
+        # the lock is taken between the two steps: the rows are marked, the renames cannot start
+        real_plan = dlindex.DownloadIndex._plan_moves
+
+        def plan_then_lock(index, *args):
+            plans = real_plan(index, *args)
+            other.execute('BEGIN IMMEDIATE')
+            return plans
+        try:
+            with mock.patch.object(dlindex, 'BUSY_TIMEOUT', 0.2), mock.patch.object(dlindex.DownloadIndex, '_plan_moves', plan_then_lock), \
+                    self._index() as index:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    index.trash([str(a), str(b)])
+        finally:
+            other.execute('ROLLBACK')
+            other.close()
+        self.assertTrue(a.exists() and b.exists())
+        self.assertFalse(self.trash_dir.exists() and any(self.trash_dir.iterdir()))
+        self.assertEqual(2, len(self._moving()), 'the marks could not be dropped either: the next call drops them')
+        with self._index() as index:
+            self.assertEqual(0, index.recover_moves())
+            self.assertEqual([], self._moving())
+            self.assertEqual((None, None), (self._row(a)['trashedAt'], self._row(b)['trashedAt']))
+            self.assertEqual(2, len(index.trash([str(a), str(b)])['trashed']))
+
+    def test_an_error_while_moving_puts_the_files_back(self) -> None:
+        a, b, c = self._fill(3)
+        real = dlindex._rename_first
+        calls = []
+
+        def rename(src, targets):
+            calls.append(src)
+            if len(calls) == 3:
+                raise RuntimeError('disk gone')
+            return real(src, targets)
+        with self._index() as index, mock.patch.object(dlindex, '_rename_first', rename):
+            with self.assertRaisesRegex(RuntimeError, 'disk gone'):
+                index.trash([str(a), str(b), str(c)])
+        self.assertTrue(a.exists() and b.exists() and c.exists())
+        self.assertEqual([], list(self.trash_dir.iterdir()))
+        self.assertEqual([], self._moving())
+        self.assertTrue(all(self._row(f)['trashedAt'] is None for f in (a, b, c)))
+
+    def _killed_during(self, method: str, paths: list[str], renames: int) -> None:
+        """index.<method>(paths) in another process killed (no cleanup) right after its renames-th rename"""
+        code = ('import json, os, sys\n'
+                'from lustra import dlindex\n'
+                'real, done = os.replace, []\n'
+                'def replace(src, dst):\n'
+                '    real(src, dst)\n'
+                '    done.append(dst)\n'
+                f'    if len(done) == {renames:d}:\n'
+                '        os._exit(3)\n'
+                'os.replace = replace\n'
+                'index = dlindex.DownloadIndex(sys.argv[1])\n'
+                f'getattr(index, {method!r})(json.loads(sys.argv[2]))\n')
+        import json
+        r = subprocess.run((sys.executable, '-c', code, str(self.db_path), json.dumps(paths)), cwd=ROOT, capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(3, r.returncode, r.stderr)
+
+    def test_a_killed_trash_is_finished_later(self) -> None:
+        # the app quits (or crashes) while files move: they reached the trash, their rows did not follow
+        files = self._fill(5)
+        self._killed_during('trash', [str(f) for f in files], 3)
+        moved = sorted(self.trash_dir.iterdir())
+        self.assertEqual([f'{i}_rx_{i}.jpg' for i in (1, 2, 3)], [m.name for m in moved])
+        self.assertEqual(5, len(self._moving()))
+        with self._index() as index:
+            # until recovered: the rows say the files are in the library (3 of them gone), the trash looks empty
+            self.assertEqual(3, sum(not x['exists'] for x in index.search('common')['items']))
+            self.assertEqual(0, index.search('common', trash=True)['total'])
+            self.assertEqual(3, index.recover_moves())
+            self.assertEqual([], self._moving())
+            trashed = index.search('common', trash=True)['items']
+            self.assertEqual(sorted(str(m) for m in moved), sorted(x['path'] for x in trashed))
+            self.assertEqual(sorted(str(f) for f in files[:3]), sorted(x['origPath'] for x in trashed))
+            self.assertTrue(all(x['exists'] for x in trashed))
+            self.assertEqual([str(f) for f in files[3:]], sorted(x['path'] for x in index.search('common')['items']))
+            restored = index.restore([str(m) for m in moved])['restored']  # the trash works with them as usual
+        self.assertEqual(3, len(restored))
+        self.assertTrue(all(f.exists() for f in files))
+
+    def test_a_killed_restore_is_finished_later(self) -> None:
+        files = self._fill(3)
+        with self._index() as index:
+            moved = [x['trashPath'] for x in index.trash([str(f) for f in files])['trashed']]
+        self._killed_during('restore', moved, 2)
+        self.assertEqual([True, True, False], [f.exists() for f in files])
+        with mock.patch.object(dlindex.DownloadIndex, 'recover_moves', return_value=0), self._index() as index:
+            # without recovery a purge would drop the rows of the files already back: they are left alone while marked
+            self.assertEqual((0, 0), (index.purge_trash(all=True)['purged'], index.forget(moved[:2])['removed']))
+        from lustra import server
+        with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': str(self.tmp)}):
+            self.assertEqual(2, server.METHODS['index.stats']({})['files'], 'the library page finishes the moves first')
+        self.assertEqual([], self._moving())
+        with self._index() as index:
+            self.assertEqual(sorted(str(f) for f in files[:2]), sorted(x['path'] for x in index.search('common')['items']))
+            self.assertEqual([moved[2]], [x['path'] for x in index.search('common', trash=True)['items']])
+
+    def test_marks_without_a_move_are_dropped(self) -> None:
+        # stopped after the rows were marked, before any rename: nothing moved, nothing to finish
+        a, b = self._fill(2)
+        with self._index() as index:
+            conn = index._connection()
+            res = {'refused': [], 'failed': []}
+            self.assertEqual(2, len(index._plan_moves(conn, [str(a), str(b)], False, (), res)))
+            self.assertEqual(2, len(self._moving()))
+            self.assertEqual(0, index.recover_moves())
+        self.assertEqual([], self._moving())
+        self.assertTrue(a.exists() and b.exists())
+        self.assertIsNone(self._row(a)['trashedAt'])
+
+    def test_a_purge_while_a_restore_runs(self) -> None:
+        # the automatic purge (another rpc thread) meets a file a restore has just renamed out of the trash: the purge must not
+        # drop its row, or the restore puts the file back into the trash with no row (never shown, never purged)
+        a, = self._fill(1)
+        now = time.time()
+        with self._index() as index:
+            trash_a = index.trash([str(a)], now=now - 40 * dlindex.DAY_SECONDS)['trashed'][0]['trashPath']
+        real = os.replace
+        purges: list[dict] = []
+        threads: list[threading.Thread] = []
+
+        def purge() -> None:
+            with self._index() as other:
+                purges.append(other.purge_trash(older_than_days=30))
+
+        def replace(src, dst) -> None:
+            real(src, dst)
+            if src == trash_a and not threads:
+                threads.append(threading.Thread(target=purge))
+                threads[0].start()
+                time.sleep(0.3)  # the purge finds the file gone meanwhile
+        with self._index() as index, mock.patch('lustra.dlindex.os.replace', replace):
+            res = index.restore([trash_a])
+        threads[0].join(15)
+        self.assertEqual(([str(a)], []), ([x['restoredPath'] for x in res['restored']], res['failed']))
+        self.assertEqual(0, purges[0]['purged'])
+        self.assertTrue(a.exists())
+        self.assertFalse(os.path.exists(trash_a))
+        self.assertEqual((str(a), None), (self._row(a)['path'], self._row(a)['trashedAt']))
+
+    def test_a_trash_folder_on_an_unplugged_drive(self) -> None:
+        # the download folder is on another drive than the data dir: its own '.lustra-trash'. Unplugged when the trash is purged:
+        # the rows stay (the files would stay on the drive with no row: never shown, never purged again)
+        drive = self.tmp / 'files'
+        a, = self._fill(1)
+        real = dlindex._device
+        now = time.time()
+        with self._index() as index, mock.patch.object(dlindex, '_device', lambda p: -1 if p == str(self.trash_dir) else real(p)):
+            trash_a = index.trash([str(a)], roots=[str(drive)], now=now - 40 * dlindex.DAY_SECONDS)['trashed'][0]['trashPath']
+        self.assertEqual(drive / dlindex.TRASH_HIDDEN_NAME, pathlib.Path(trash_a).parent)
+        away = self.tmp / 'unplugged'
+        drive.rename(away)
+        try:
+            with self._index() as index:
+                for res in (index.purge_trash(older_than_days=30), index.purge_trash(all=True), index.purge_trash(paths=[trash_a])):
+                    self.assertEqual((0, 0, [(trash_a, dlindex.TRASH_UNREACHABLE)]),
+                                     (res['purged'], res['files'], [(x['path'], x['error']) for x in res['failed']]))
+                self.assertEqual([trash_a], index.forget([trash_a])['refused'])
+                self.assertEqual(1, index.stats()['trash']['files'])
+        finally:
+            away.rename(drive)
+        with self._index() as index:
+            res = index.purge_trash(older_than_days=30)  # plugged in again: purged
+            self.assertEqual((1, 1, []), (res['purged'], res['files'], res['failed']))
+        self.assertFalse(os.path.exists(trash_a))
 
     def test_no_index(self) -> None:
         f = self._file('x.jpg')
