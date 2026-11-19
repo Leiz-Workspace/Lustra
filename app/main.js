@@ -2876,6 +2876,7 @@ async function selfTestIndexTools(js, shot) {
     out.importUnpicked = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)} }).then(() => 'STARTED', (e) => e.message)`);
     approvedImportFolders.add(dir); // what index:pickFolder does after the native dialog
     out.importBadModule = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)}, module: 'DB!' }).then(() => 'STARTED', (e) => e.message)`);
+    const startedAt = Date.now();
     const job = await js(`window.lustra.index.importLibrary({ folder: ${JSON.stringify(dir)}, dryRun: true })`);
     let j = jobs.jobs.get(job.id);
     for (let i = 0; i < 120 && j && !['done', 'failed', 'cancelled'].includes(j.status); i++) {
@@ -2884,20 +2885,31 @@ async function selfTestIndexTools(js, shot) {
     }
     const p = j?.progress || {};
     out.importJob = { kind: job.kind, publicHidesSecrets: !('moduleSecretArgs' in job) && !('importQuery' in job), status: j?.status,
-      exit: j?.exitCode, scanned: p.scanned, totalAll: p.totalAll, unknown: p.unknown, unknownNames: p.unknownNames, error: j?.error };
-    // the job card: import texts, the lists of names (renderer)
+      exit: j?.exitCode, scanned: p.scanned, totalAll: p.totalAll, unknown: p.unknown, unknownNames: p.unknownNames, error: j?.error,
+      stateName: p.stateName, ms: Date.now() - startedAt };
+    // the job card: import texts, the lists of names (renderer). Cards are drawn on the next animation frame after each update:
+    // wait for the card's final state (the "Danh sách" button of an ended import), not only for the card, which a slow machine
+    // may still show as running
     await js(`document.querySelector('[data-page="downloads"]').click()`);
+    const cardFrom = Date.now();
     out.importCard = await js(`(async () => {
-      for (let i = 0; i < 20 && !document.querySelector('.job[data-id="${job.id}"]'); i++) await new Promise((r) => setTimeout(r, 100));
-      const card = document.querySelector('.job[data-id="${job.id}"]');
+      const listsOf = (card) => [...card.querySelectorAll('.job-actions .btn')].find((b) => b.textContent === 'Danh sách');
+      let card = null;
+      for (let i = 0; i < 100; i++) {
+        card = document.querySelector('.job[data-id="${job.id}"]');
+        const lists = card && listsOf(card);
+        if (lists && !lists.hidden) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
       if (!card) return { card: false };
-      const lists = [...card.querySelectorAll('.job-actions .btn')].find((b) => b.textContent === 'Danh sách');
+      const lists = listsOf(card);
       const text = card.textContent;
       if (lists && !lists.hidden) lists.click();
-      await new Promise((r) => setTimeout(r, 200));
+      for (let i = 0; i < 20 && !document.querySelector('#modal-card .import-list'); i++) await new Promise((r) => setTimeout(r, 100));
       const modal = document.querySelector('#modal-card').textContent;
       return { card: true, text, listsShown: Boolean(lists && !lists.hidden), modal };
     })()`);
+    out.importCard.ms = Date.now() - cardFrom;
     await shot('24-import-job-lists');
     await js('closeModal()');
     out.importCardOk = out.importCard.card && /Nhập thư viện/.test(out.importCard.text) && /2 file sẽ được tra/.test(out.importCard.text)

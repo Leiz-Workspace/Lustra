@@ -944,13 +944,29 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 - **Nội dung:**
   - 6 extension của catalog theo luật từng site: nhịp request (paheal 3 giây, các extension khác 1 giây), Bbooru / Xbooru chỉ dùng API, headers / cookies theo site, trình tạo bỏ qua phần dò API bị chuyển hướng sang http; extension lên 1.0.1 (PR #26);
   - trình tạo đọc robots.txt theo RFC 9309 bằng `lustra/robots.py`, như updater; `Crawl-delay` đứng trước mọi nhóm được áp dụng (PR #30);
-  - danh sách tag thật của Bbooru trong `2tags/` (7au, PR #34) và bảng luật giới tính riêng cho Bbooru (7av, PR #36).
+  - danh sách tag thật của Bbooru trong `2tags/` (7au, PR #34) và bảng luật giới tính riêng cho Bbooru (7av, PR #36);
+  - hai lỗi chạy đua của index: tiến độ nhập thư viện, `index.clean`; phép tự kiểm và báo cáo của nó (7ax, PR #40). Bản rc đầu `v2.0.8-rc.77` chưa có phần này. Chủ repo chọn gộp nó vào 2.0.8 trước khi lên `production`, nên develop được đưa lên `staging` lần nữa để có bản rc mới.
 - **Không có trong bản này:** PR #37 (10 extension mới cho catalog). Chủ repo giữ PR này ở dạng bản nháp, để tự thử cài các extension từ file zip (`.extgen-drafts/`, `SHA256SUMS.txt`) trước khi đưa chúng vào catalog đi kèm app.
 - **Kiểm:** gộp thử 4 PR trên `develop`: không xung đột; danh sách unittest của CI 384 test OK (1 bỏ qua), `npm run check`, ruff sạch.
 - **Phát hành:** version 2.0.8 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r8`), ghi chú `docs/releases/v2.0.8.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
 - **Sau khi merge:** build và ký lại catalog chính thức (`docs/operations.md`, "Cập nhật catalog chính thức"), để bản đã cài nhận 6 extension 1.0.1.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7aw)
+### 7ax. Tự kiểm `indexTools` lỗi thất thường trên linux-arm64 — 2026-11-19
+- **Hiện tượng:**
+  - Job "Package (linux-arm64)" của workflow Release lỗi ở bước tự kiểm `indexTools` 2 lần trong ngày: bản rc của 2.0.7 (lượt 44448803292) và của 2.0.8 (lượt 44481452435). Chạy lại thì qua.
+  - Log không cho biết kiểm tra con nào sai: `tools/check_selftest.py` cắt cả bước ở 600 ký tự, và các kiểm tra con (`cleanOk`, `importOk`…) là giá trị boolean, không phải bước có `ok`.
+  - Mốc thời gian trong log: phần nhập thư viện mất 2,8 và 4,9 giây ở hai lượt lỗi, so với khoảng 0,8 giây ở các lượt qua (cả x64 lẫn arm64).
+- **Hai lỗi chạy đua trong lõi**, mỗi lỗi có test lỗi với code cũ và qua với code mới:
+  - **`index import` của app** (`lustra/dlindex_tools.py`): luồng gửi tiến độ (mỗi 0,4 giây) có thể đọc trạng thái, mất CPU tới khi lần nhập kết thúc, rồi in trạng thái cũ đó *sau* dòng DONE. App gộp các dòng theo thứ tự, nên số đếm cuối bị ghi đè. Test `test_ipc_final_line_is_last` ép đúng thứ tự này: code cũ cho dòng cuối là `IMPORT_SCAN`, 0 file. Nay lõi chờ luồng tiến độ dừng hẳn rồi mới in dòng DONE. Máy chậm (arm64, khi lõi đóng gói khởi động lâu) dễ gặp lỗi này nhất. Lỗi này làm sai `importOk` của phép tự kiểm, và số liệu trên thẻ job của người dùng.
+  - **`index.clean`** (`lustra/server.py`): `index.cleanDone` được gửi trước khi job dọn được gỡ khỏi danh sách đang chạy. Lần dọn bắt đầu ngay khi nhận cleanDone (chạy thử rồi dọn thật, như phép tự kiểm và trang Cài đặt) có thể bị từ chối `-32004`. Nay job được gỡ trước khi gửi cleanDone (test `test_next_clean_can_start_on_done`). Hai lượt lỗi không có dòng `already running`, nên đây không phải nguyên nhân của chúng.
+- **Phép tự kiểm:**
+  - chờ thẻ job nhập thư viện ở trạng thái cuối (nút "Danh sách" hiện) tới 10 giây, thay vì chỉ chờ thẻ xuất hiện trong 2 giây;
+  - chờ hộp danh sách có nội dung, thay vì ngủ 200 ms;
+  - ghi thời gian của job và của thẻ (`importJob.ms`, `importCard.ms`).
+- **`tools/check_selftest.py`:** in tên các kiểm tra con sai (`indexTools: false: importOk`), rồi in mỗi giá trị một dòng (tối đa 400 ký tự). Workflow Release giữ báo cáo và ảnh chụp của lần tự kiểm lỗi làm artifact `selftest-<nền tảng>` trong 7 ngày.
+- **Kiểm:** danh sách unittest của CI 387 test OK (1 bỏ qua), `npm run check`, ruff. Tự kiểm của app chạy từ mã nguồn dưới xvfb đạt, cả khi CPU bị giới hạn 5%. Lỗi trên CI chưa tái hiện được trên máy, nên chỉ lượt build arm64 tiếp theo mới cho biết chắc.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ax)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.

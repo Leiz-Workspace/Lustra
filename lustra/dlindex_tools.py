@@ -566,6 +566,7 @@ def _run_import(ns: argparse.Namespace) -> int:
             print(f'{IPC_PROGRESS_PREFIX}{json.dumps(state, separators=(",", ":"))}', flush=True)
 
     done = threading.Event()
+    reporter: threading.Thread | None = None
     if ipc:
         def report() -> None:
             last = ''
@@ -584,11 +585,16 @@ def _run_import(ns: argparse.Namespace) -> int:
                     current_process().killed = True  # a request in progress stops too
                     break
 
-        threading.Thread(target=report, daemon=True, name='ipc-progress').start()
+        reporter = threading.Thread(target=report, daemon=True, name='ipc-progress')
+        reporter.start()
         threading.Thread(target=watch_stdin, daemon=True, name='ipc-stdin').start()
     trace(f'Import: scanning {imp.folder}{"" if imp.recursive else " (no subfolders)"}', True)
     res = imp.run()
     done.set()
+    if reporter:
+        # a state the reporter read before the end must not be printed after the final DONE line: the app merges the lines in
+        # order, an older one would overwrite the final counts
+        reporter.join(10)
     _print_names('Not recognized', res.unknown_names, res.unknown)
     _print_names('Not found on the website', res.not_found_names, res.not_found)
     _print_names('Failed', res.failed_names, res.failed)
