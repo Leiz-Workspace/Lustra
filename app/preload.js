@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('lustra', {
   rpc: (method, params) => invoke('rpc', method, params || {}),
   sidecarStatus: () => invoke('sidecar:getStatus'),
   tags: {
-    update: (module) => invoke('tags:update', module),
+    update: (module, opts) => invoke('tags:update', module, opts), // opts: { full: true } reads the whole list
     scheduleStatus: () => invoke('tags:scheduleStatus'),
     schedule: (options) => invoke('tags:schedule', options), // {enabled, frequency: 'daily' | 'weekly'}: modules 'auto' (main.js)
   },

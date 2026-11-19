@@ -556,6 +556,165 @@ class _DataDirTest(TestCase):
         self.tmp.cleanup()
 
 
+class StorageOrderSite:
+    """A Gelbooru tag index in storage order, like rule34.xxx: a tag whose post count changes, and every new tag, goes to the end"""
+
+    def __init__(self, n: int = 20) -> None:
+        self.rows = [[i, f'tag{i:02d}', 100 + i] for i in range(1, n + 1)]
+        self.next_id = n + 1
+        self.pids: list[int] = []
+        self.fail_at: int | None = None  # answer 500 for this pid, once
+
+    def bump(self, name: str, count: int) -> None:
+        row = next(r for r in self.rows if r[1] == name)
+        self.rows.remove(row)
+        self.rows.append([row[0], name, count])
+
+    def add(self, name: str, count: int) -> None:
+        self.rows.append([self.next_id, name, count])
+        self.next_id += 1
+
+    def __call__(self, url: str, headers: dict) -> tuple[int, bytes, dict]:
+        p = url_parse.urlsplit(url)
+        if p.path == '/robots.txt':
+            return 404, b'none', {'content-type': 'text/html'}
+        qs = {k: v[0] for k, v in url_parse.parse_qs(p.query).items()}
+        pid, limit = int(qs['pid']), tags_updater.PAGE_LIMIT
+        if pid == self.fail_at:
+            self.fail_at = None
+            return 500, b'oops', {'content-type': 'text/plain'}
+        self.pids.append(pid)
+        rows = self.rows[pid * limit:(pid + 1) * limit]
+        if not rows:
+            return _xml('<?xml version="1.0" encoding="UTF-8"?><tag type="array"/>')
+        return _xml('<?xml version="1.0" encoding="UTF-8"?><tags type="array">' + ''.join(
+            f'<tag type="0" count="{n}" name="{name}" ambiguous="false" id="{i}"/>' for i, name, n in rows) + '</tags>')
+
+
+class TailUpdateTests(TestCase):
+    """Rule34: a weekly update reads only the last pages (new tags and tags whose count changed are there) and merges them"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = pathlib.Path(self.tmp.name)
+        self.patches = [mock.patch.object(tags_updater, 'PAGE_LIMIT', 3), mock.patch.object(tags_updater, 'TAIL_QUIET_PAGES', 2),
+                        mock.patch.object(tags_updater, 'TAIL_MIN_PAGES', 1), mock.patch.object(tags_updater, 'ENGINE_MIN_INTERVAL', 0.0)]
+        for x in self.patches:
+            x.start()
+        self.src = TagSource('zq', 'gelbooru_dapi', SITE, 'Fake', tail_updates=True)
+        self.site = StorageOrderSite()
+
+    def tearDown(self) -> None:
+        for x in self.patches:
+            x.stop()
+        self.tmp.cleanup()
+
+    def _update(self, **kw):
+        self.site.pids.clear()
+        notes: list[str] = []
+        src = kw.pop('source', self.src)
+        res = update_tag_list('zq', self.out, source=src, delay=0, allow_local=True, session=FakeSession(self.site),
+                              progress=lambda msg, _n: notes.append(msg), **kw)
+        return res, notes
+
+    def _meta(self) -> dict:
+        return json.loads((self.out / tags_updater.META_DIR / 'zq_tags.json').read_text(encoding='utf-8'))
+
+    def test_first_update_reads_everything_then_the_tail_only(self) -> None:
+        res, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual(list(range(8)), self.site.pids)  # 20 tags, 3 a page: 7 pages and the empty one
+        self.assertIn('full read of 7 pages', res.message)
+        self.assertEqual(7, self._meta()['pages'])
+        full_at = self._meta()['fullAt']
+        self.site.bump('tag03', 999)  # its count changed: its row moves to the end
+        self.site.add('newtag', 5)
+        res, notes = self._update()
+        self.assertTrue(res.written, res.message)
+        # back from the last read's end while pages change (6: tag03 moved there), 2 quiet pages (5, 4), then on to the empty page
+        self.assertEqual([6, 5, 4, 7], self.site.pids)
+        got = _read_list(res.path)
+        self.assertEqual(21, len(got))  # every tag of the full read is kept
+        self.assertEqual('999 posts (general)', got['tag03'])
+        self.assertEqual('5 posts (general)', got['newtag'])
+        self.assertEqual('101 posts (general)', got['tag01'])  # not in the tail: kept as it was
+        self.assertIn('the end of the list only: pages 4-6 of 7, 1 new, 1 updated', res.message)
+        self.assertTrue(any('reading the end of the list only' in n for n in notes), notes)
+        self.assertEqual(7, self._meta()['pages'])
+        self.assertEqual(full_at, self._meta()['fullAt'])  # a tail is not a full read
+
+    def test_the_tail_reads_back_as_far_as_the_counts_changed(self) -> None:
+        self._update()
+        changed = [f'tag{i:02d}' for i in range(5, 14)]  # 9 rows: 3 pages at the end
+        for i, name in enumerate(changed):
+            self.site.bump(name, 500 + i)
+        res, _ = self._update()
+        self.assertEqual([6, 5, 4, 3, 2, 1, 7], self.site.pids)  # 4 pages with changed rows (3 holds tag05), 2 quiet, the end
+        got = _read_list(res.path)
+        self.assertEqual({f'{500 + i} posts (general)' for i in range(9)}, {got[n] for n in changed})
+        with mock.patch.object(tags_updater, 'TAIL_MAX_PAGES', 2):  # never longer than TAIL_MAX_PAGES back
+            for name in changed:
+                self.site.bump(name, 1)
+            self._update()
+        self.assertEqual([6, 5, 7], self.site.pids)
+
+    def test_full_read_when_asked_too_old_or_unknown(self) -> None:
+        self._update()
+        res, _ = self._update(full=True)
+        self.assertEqual(0, self.site.pids[0])
+        self.assertIn('full read', res.message)
+        meta_path = self.out / tags_updater.META_DIR / 'zq_tags.json'
+        meta = self._meta()
+        meta['fullAt'] -= tags_updater.FULL_EVERY + 60
+        meta_path.write_text(json.dumps(meta), encoding='utf-8')
+        self._update()
+        self.assertEqual(0, self.site.pids[0])  # the last full read is too old
+        meta_path.unlink()
+        self._update(source=TagSource('zq', 'gelbooru_dapi', SITE, 'Fake'))
+        self.assertEqual(0, self.site.pids[0])  # a source without tail updates always reads everything
+        self.assertFalse(meta_path.exists())  # and keeps no read state
+        self._update()
+        self.assertEqual(0, self.site.pids[0])  # how the list was read is unknown
+        (self.out / 'zq_tags.json').unlink()
+        self._update()
+        self.assertEqual(0, self.site.pids[0])  # nothing to merge into
+
+    def test_a_stopped_full_read_continues_before_any_tail(self) -> None:
+        self._update()
+        self.site.fail_at = 3
+        with self.assertRaises(RuntimeError):
+            self._update(full=True)
+        res, notes = self._update()  # auto: the stopped full read goes on, it is not replaced by a tail
+        self.assertTrue(res.written, res.message)
+        self.assertEqual(3, self.site.pids[0])
+        self.assertIn('full read', res.message)
+        self.assertTrue(any('continuing a stopped update' in n for n in notes), notes)
+
+    def test_a_stopped_tail_continues_as_a_tail(self) -> None:
+        self._update()
+        self.site.add('late', 7)
+        self.site.bump('tag20', 1)
+        self.site.fail_at = 5
+        with self.assertRaises(RuntimeError):
+            self._update()
+        kept = json.loads((self.out / tags_updater.PARTIAL_DIR / 'zq_tags.json').read_text(encoding='utf-8'))
+        self.assertEqual('tail', kept['mode'])
+        self.assertLess(len(kept['tags']), 10)  # only the tail's tags, not the whole list
+        res, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual(5, self.site.pids[0])  # where it stopped, not the end of the list
+        got = _read_list(res.path)
+        self.assertEqual(21, len(got))
+        self.assertEqual('7 posts (general)', got['late'])
+        self.assertEqual('1 posts (general)', got['tag20'])
+
+    def test_read_tag_list_reads_what_write_tag_list_wrote(self) -> None:
+        tags = {'plain': (5, 'general'), 'say_"hi"': (3, 'artist'), 'back\\slash': (2, 'character'), 'ünïcode': (1, 'metadata')}
+        path = self.out / 'zz_tags.json'
+        tags_updater.write_tag_list(path, tags)
+        self.assertEqual(tags, tags_updater.read_tag_list(path))
+
+
 class KeyRateLimitTests(_DataDirTest):
     """A limit per API key (rule34.xxx: 60 requests every 60 s) that the site's admins may raise for the user's key: the app writes the
     new limit to <data dir>/ratelimit/limits.json, every core process paces the key with it, together (shared_rate_wait)"""

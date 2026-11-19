@@ -99,6 +99,16 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Bộ đọc chỉ dừng ở trang rỗng: trang có ít hơn 1.000 tag (ví dụ có tag tên rỗng) không phải trang cuối.
   - Trang càng sâu site trả càng chậm (trang 5: 0,5 giây, trang 1.200: 4 giây, trang 1.600: 6–7 giây). Một lần cập nhật đầy đủ mất khoảng 1,5–2 giờ. Giới hạn của khoá chỉ là nút thắt ở khoảng 100 trang đầu (site trả nhanh hơn 1 giây), nên khoá được cấp thêm request gần như không làm việc này nhanh hơn; nó giúp nhiều hơn cho việc tải ảnh.
   - Đóng app giữa chừng không sao: lần sau tải tiếp từ trang đã dừng.
+- **Rule34: chỉ đọc phần cuối danh sách** (bản sau 2.0.6; `TagSource.tail_updates`):
+  - Các lần cập nhật sau một lần đọc đầy đủ chỉ đọc **phần cuối danh sách**. Lý do: tag vừa đổi số post bị dời xuống cuối và nằm liền thành một khối. Đo ngày 2026-11-19, 4 giờ sau một lần đọc đầy đủ: 8.867 trong 8.870 tag đổi số post nằm ở 10 trang cuối, mỗi trang khoảng 960/1.000 dòng đổi; các trang trước đó gần như không đổi.
+  - **Đọc lùi:** bắt đầu từ trang cuối của lần đọc trước, dừng khi gặp 3 trang liền "yên" (tối đa 1% tag đổi số post). Ít nhất 5 trang, nhiều nhất 800 trang.
+  - **Đọc tiếp phần mới:** sau đó đọc từ trang cuối cũ tới trang rỗng, để lấy các dòng mới thêm, kể cả các dòng bị dời xuống cuối trong lúc đang đọc.
+  - **Gộp:** số post đọc được thay số cũ; tag mới được thêm; tag không thấy giữ nguyên tới lần đọc đầy đủ sau.
+  - **Đọc đầy đủ** khi: chưa từng đọc đầy đủ (cần `<thư mục tags>/.meta/rx_tags.json`), lần đọc đầy đủ đã quá 30 ngày, có một lần đọc đầy đủ đang dở, hoặc khi người dùng yêu cầu. Yêu cầu từ app: Tags A–Z → **Đọc lại toàn bộ**; từ dòng lệnh: `--full`.
+  - **Chỉ lần đọc đầy đủ thấy được:**
+    - tag mới tạo giữa danh sách (đo được 12 tag mới trong 4 giờ, có cái không nằm ở cuối);
+    - tag mà lần đọc đầy đủ trước đã sót. Đọc hơn 1 giờ thì các dòng bị dời chỗ trong lúc đọc, nên lần đọc ngày 18/11 sót khoảng 1 tag mỗi trang;
+    - tag giảm về 0 post.
 - **Tải tiếp sau khi dừng giữa chừng** (Gelbooru: theo số trang `pid`; Danbooru: theo con trỏ id):
   - tiến độ được lưu ở `<thư mục tags>/.partial/<module>_tags.json` sau mỗi 20 trang và ngay khi dừng (429, mạng, đóng app);
   - lần cập nhật sau, trong vòng 3 ngày, tải tiếp từ con trỏ đó; xong thì xoá file tiến độ;

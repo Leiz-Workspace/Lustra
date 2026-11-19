@@ -242,9 +242,9 @@
       if (method === 'tags.validate') return { valid: !/[\s]{2,}|\(\)/.test(p.tags), tags: p.tags.split(' ') };
       if (method === 'tags.sources') {
         return [
-          { module: 'rx', name: 'Rule34', engine: 'gelbooru_dapi', site: 'https://api.rule34.xxx/', key: 'required', keyFormat: 'KEY,USER_ID', robots: false, curated: true, description: 'DAPI tag index, after_id cursor' },
+          { module: 'rx', name: 'Rule34', engine: 'gelbooru_dapi', site: 'https://api.rule34.xxx/', key: 'required', keyFormat: 'KEY,USER_ID', robots: false, curated: true, tailUpdates: true, description: 'DAPI tag index, pages by number (pid)' },
           { module: 'db', name: 'Danbooru', engine: 'danbooru_json', site: 'https://danbooru.donmai.us/', key: 'optional', keyFormat: 'API_KEY,LOGIN', robots: false, curated: true, description: 'tags.json, id cursor' },
-          { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, description: 'DAPI tag index, after_id cursor' },
+          { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, tailUpdates: false, description: 'DAPI tag index, pages by number (pid)' },
         ];
       }
       if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12 };
@@ -272,7 +272,7 @@
       throw new Error(`mock: ${method}`);
     },
     tags: {
-      update: async (m) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; },
+      update: async (m, _opts) => { setTimeout(() => emit('sidecar:notify', { method: 'tags.updateDone', params: { module: m, written: true, message: 'written 1234 tags (mock)' } }), 800); return { job: `tags-${m}` }; },
       scheduleStatus: async () => ({ ...mockSchedule }),
       schedule: async (o) => { Object.assign(mockSchedule, { enabled: !!o.enabled, installed: !!o.enabled, frequency: o.frequency || 'weekly' }); return { ...mockSchedule }; },
     },
@@ -476,7 +476,7 @@
     },
     appearance: { setBackgroundImage: async () => appearance() },
     app: {
-      info: async () => ({ version: '2.0.6', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
+      info: async () => ({ version: '2.0.7', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
       relaunch: async () => location.reload(), installLauncher: async () => ({ ok: false, message: 'mock' }), openPath: async () => '', openExternal: async () => false,
     },
     thumbUrl: (url) => url,

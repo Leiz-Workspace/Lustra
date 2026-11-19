@@ -844,7 +844,41 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - minimatch 11 cho công cụ build (7ao, PR #20; cảnh báo Dependabot #1 đóng khi bản này lên `production`).
 - **Phát hành:** version 2.0.6 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r6`), ghi chú `docs/releases/v2.0.6.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-18, sau 7x–7aq)
+### 7ar. Rule34: cập nhật chỉ đọc phần cuối danh sách — 2026-11-19
+- **Vấn đề:** cập nhật đầy đủ danh sách Rule34 mất khoảng 1.620 request và 1–2 giờ, vì trang sâu chậm (4–7 giây) chứ không phải vì giới hạn request. Cập nhật hằng tuần mà đọc lại cả danh sách thì quá nặng.
+- **Đo thật** (khoá của chủ repo, 4 giờ sau lần đọc đầy đủ 20:50 ngày 18): đọc 200 trang cuối (1417–1616, 210 request, 25 phút) rồi so với danh sách đầy đủ.
+  - **8.870 tag đổi số post, 8.867 trong số đó nằm ở trang 1607–1616.** Mỗi trang này có khoảng 960/1.000 dòng đổi; từ trang 1606 trở về trước gần như không đổi (0–1 dòng mỗi trang). Ranh giới rất sắc.
+  - Tag hay dùng nhất nằm trong 100 trang cuối: 96% của top 100, 98,8% của top 1.000, 99% của top 10.000.
+  - **232 tag "mới" rải khắp 200 trang**, nhưng chỉ 12 tag có id mới. Số còn lại (id trung vị 2,3 triệu) là tag cũ mà lần đọc đầy đủ đã sót: các dòng bị dời chỗ trong lúc đọc hơn 1 giờ.
+  - **Kết luận:** số trang cần đọc tuỳ khoảng thời gian từ lần trước (sau 4 giờ là 10 trang, sau một tuần sẽ nhiều hơn), nên một số trang cố định không đủ an toàn.
+- **Làm (`lustra/tags_updater.py`):**
+  - `TagSource.tail_updates` (rx).
+  - `<thư mục tags>/.meta/rx_tags.json` ghi số trang và thời điểm của lần đọc đầy đủ.
+  - `_iter_gelbooru_tail` đọc lùi từ cuối lần đọc trước tới khi gặp 3 trang liền yên (≤ 1% tag đổi số post; ít nhất 5, nhiều nhất 800 trang). Sau đó đọc tiếp từ cuối cũ tới trang rỗng.
+  - Kết quả được gộp vào danh sách hiện có: số mới thay số cũ, tag mới được thêm, tag không thấy giữ nguyên.
+  - Đọc đầy đủ khi: chưa có `.meta`, lần đầy đủ quá 30 ngày, có lần đầy đủ đang dở, hoặc khi được yêu cầu (`--full`, RPC `tags.update` `full`, nút **Đọc lại toàn bộ** ở Tags A–Z).
+  - Một lần đọc phần cuối bị dừng cũng tải tiếp được: trạng thái nằm trong file tiến độ, chỉ chứa tag của lần đọc đó.
+  - `read_tag_list` đọc lại file danh sách, dùng `TagsDB._parse_line`.
+- **Chạy thật bằng code mới** (bản sao của danh sách ngày 18 với `.meta` của lần đọc đó):
+  - 15 request, 86 giây, so với khoảng 1.620 request và 1 giờ.
+  - Đọc trang 1604–1616 (10 trang đổi, 3 trang yên) và một trang rỗng.
+  - 8.962 tag cập nhật số post, 25 tag mới, tổng 1.588.044. `female`, `breasts`, `1girls` có số mới.
+- **Test:** site giả lưu theo thứ tự lưu trữ (tag đổi bị dời xuống cuối):
+  - đọc đầy đủ rồi chỉ đọc phần cuối;
+  - vùng đổi dài thì đọc lùi xa hơn, có trần;
+  - các trường hợp phải đọc đầy đủ;
+  - lần đọc đầy đủ đang dở được ưu tiên tải tiếp;
+  - lần đọc phần cuối đang dở tải tiếp được;
+  - `read_tag_list` đọc đúng tên có dấu ngoặc kép và gạch chéo ngược.
+  
+  430 test qua (`unittest discover`, giới hạn 4 GB, RAM tối đa 267 MB). Hai nút ở Tags A–Z đã xem trên bản giả lập.
+
+### 7as. Bản 2.0.7 — 2026-11-19
+- **Nội dung:** cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25).
+- **Không có trong bản này:** PR #26 (nhịp request của extension, headers / cookies theo site) chưa merge khi chủ repo quyết định phát hành.
+- **Phát hành:** version 2.0.7 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r7`, ngày 19 Nov 2026), ghi chú `docs/releases/v2.0.7.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7as)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.

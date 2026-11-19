@@ -1922,7 +1922,8 @@ function registerIpc() {
     if (!ok) throw new Error('cancelled');
     return installExtension({ catalogUrl, remoteId: id, sha256: entry.sha256 });
   });
-  handle('tags:update', async (_e, module) => sidecar.call('tags.update', { module, apiKey: await getSecret(module) }));
+  // opts.full: read the whole list where the last pages would do (Rule34, lustra/tags_updater.py update_tag_list)
+  handle('tags:update', async (_e, module, opts) => sidecar.call('tags.update', { module, apiKey: await getSecret(module), full: opts?.full === true }));
   handle('tags:scheduleStatus', async () => ({ ...tagScheduleStatus(), modules: await scheduledTagModules() }));
   handle('tags:schedule', async (_e, o) => ({ ...applyTagSchedule(o?.enabled === true, o?.frequency), modules: await scheduledTagModules() }));
   handle('search:count', async (_e, q) => sidecar.call('search.count', {
