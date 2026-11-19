@@ -375,6 +375,54 @@ class BuildCatalogTests(TestCase):
                                                 expect_id=entry['id'])
         self.assertEqual((entry['id'], entry['version']), (m.id, m.version))
 
+    def test_tag_lists_come_from_the_lists_folder(self) -> None:
+        # tag lists stay out of the repository (docs/plans/ext-tag-jobs.md): --lists puts each one into its extension's zip
+        exts = self.root / 'ext'
+        shutil.copytree(ROOT / 'extensions' / 'bbooru', exts / 'bbooru', ignore=shutil.ignore_patterns('__pycache__'))
+        lists = self.root / 'lists'
+        lists.mkdir()
+        (lists / 'bb_tags.json').write_text('{"blue_sky": "12 posts (general)"}\n', encoding='utf-8')
+        names = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            for run in ('a', 'b'):
+                self.assertEqual(0, self.tool.main(['--out', str(self.root / run), '--extensions', str(exts), '--lists', str(lists)]))
+                entry = json.loads((self.root / run / 'index.json').read_text(encoding='utf-8'))['extensions'][0]
+                names[run] = zipfile_names(self.root / run / f"{entry['id']}-{entry['version']}.zip")
+        data = (self.root / 'a' / f"{entry['id']}-{entry['version']}.zip").read_bytes()
+        self.assertEqual(data, (self.root / 'b' / f"{entry['id']}-{entry['version']}.zip").read_bytes())  # still deterministic
+        self.assertIn('bb_tags.json', names['a'])
+        with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': str(self.root / 'data')}):
+            Extensions.install_from_archive(data, entry['sha256'], expect_id='bbooru')
+            self.assertTrue((Extensions.user_dir() / 'bbooru' / 'bb_tags.json').is_file())  # the app uses it as soon as installed
+        # a list that is not in the folder: built without it, and said so
+        err = io.StringIO()
+        (lists / 'bb_tags.json').unlink()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(0, self.tool.main(['--out', str(self.root / 'c'), '--extensions', str(exts), '--lists', str(lists)]))
+        self.assertNotIn('bb_tags.json', zipfile_names(self.root / 'c' / f"{entry['id']}-{entry['version']}.zip"))
+        self.assertIn('bbooru: no bb_tags.json', err.getvalue())
+        # not a tag list, or a zip the installer would refuse: no catalog
+        (lists / 'bb_tags.json').write_text('[]', encoding='utf-8')
+        with self.assertRaises(SystemExit):
+            self.tool.build(exts, self.root / 'd', self.tool.OFFICIAL_BASE_URL, lists)
+        (lists / 'bb_tags.json').write_text('{"blue_sky": "12 posts (general)"}', encoding='utf-8')
+        with mock.patch.object(self.tool, 'ARCHIVE_SIZE_MAX', 100), self.assertRaises(SystemExit) as ctx:
+            self.tool.build(exts, self.root / 'e', self.tool.OFFICIAL_BASE_URL, lists)
+        self.assertIn('over the installer limits', str(ctx.exception))
+
+    def test_repository_extensions_carry_no_tag_list(self) -> None:
+        # a list is data, not code: it goes into the catalog zips (--lists), not into the repository, which the app also bundles
+        # (tools/build_core.py copies extensions/ into the frozen core)
+        big = [str(p.relative_to(ROOT)) for p in (ROOT / 'extensions').rglob('*') if p.is_file()
+               and (p.name.endswith('_tags.json') or p.stat().st_size > 1024 * 1024)]
+        self.assertEqual([], big, 'tag lists belong in the catalog zips: tools/build_catalog.py --lists (docs/plans/ext-tag-jobs.md)')
+
+
+def zipfile_names(path: pathlib.Path) -> list[str]:
+    import zipfile
+    with zipfile.ZipFile(path) as zf:
+        return zf.namelist()
+
 
 if __name__ == '__main__':
     sys.exit(unittest.main())
