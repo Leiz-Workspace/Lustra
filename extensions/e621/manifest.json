@@ -3,7 +3,7 @@
   "id": "e621",
   "name": "e621",
   "abbr": "en",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,

@@ -45,6 +45,8 @@ from lustra.rex import (
 __all__ = ('DownloaderRn',)
 
 SITENAME = base64.b64decode(SITENAME_B_RN).decode()
+INFO_TEXT_FIELDS = dict.fromkeys((name for name in ItemInfo.__slots__ if name != 'comments'), '')
+'''every text field of ItemInfo, empty: fields are set by name without setattr() (static checks, R10)'''
 ITEMS_PER_PAGE = ITEMS_PER_PAGE_RN
 
 MAX_SEARCH_DEPTH = 0
@@ -85,6 +87,9 @@ class DownloaderRn(Downloader):
 
     def _get_sitename(self) -> str:
         return SITENAME
+
+    def _get_min_request_interval(self) -> float:
+        return 1.0  # html site (shimmie); no robots.txt Crawl-delay (>= 1 s for html)
 
     def _get_module_abbr(self) -> str:
         return MODULE_ABBR_RN
@@ -197,6 +202,7 @@ class DownloaderRn(Downloader):
             item_info = ItemInfo()
             if self.is_killed():
                 return item_info
+            fields: dict[str, str] = {}
             for part in re_item_info_part_rn.findall(item):
                 name, value = tuple(str(part).split('=', 1))
                 if name in ('id', 'width', 'height'):  # special case id, height, width (thumb_..., data_...): skip
@@ -204,9 +210,9 @@ class DownloaderRn(Downloader):
                 name = ITEM_INFO_FIELDS.get(name, name)
                 if name == 'ext':  # special case: title -> ext -> extract ext
                     value = value[value.rfind(' ') + 1:]
-                if name in item_info.__slots__:
-                    setattr(item_info, name, value.replace('\n', ' ').replace('"', '').strip())
-            return item_info
+                if name in INFO_TEXT_FIELDS:
+                    fields[name] = value.replace('\n', ' ').replace('"', '').strip()
+            return ItemInfo.from_dict({**INFO_TEXT_FIELDS, **fields, 'comments': []})
         except Exception:
             self._on_thread_exception(current_process().name)
             raise

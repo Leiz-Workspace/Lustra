@@ -69,6 +69,11 @@ def detect_engine(fetcher: SafeFetcher, site: str) -> EngineGuess:
             if err.rule in ('R2',):  # this probe is not allowed by robots.txt: skip it, keep probing
                 notes.append(f'skipped {path}: {err.message}')
                 return None
+            if err.rule == 'R10' and err.redirect and path:
+                # an api probe the site sends to plain http or another host (never contacted): no such api here, keep probing.
+                # The home page ('') redirected away still stops the survey: the site itself is not usable over https
+                notes.append(f'redirected {path}: {err.message}')
+                return None
             raise
         evidence.append(_evidence(res))
         return res

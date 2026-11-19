@@ -326,6 +326,18 @@ class DownloaderBaseTests(TestCase):
         print(f'{self._testMethodName} passed')
 
     @test_prepare()
+    def test_bb_xb_refuse_html_searches(self) -> None:
+        # the terms of bbooru / xbooru allow automated access through the API only: favorites and pools are html pages
+        for module in (ProcModule.BB, ProcModule.XB):
+            for tag in ('favorited_by:25000', 'pool:689'):
+                with self.subTest(module=module, tag=tag), _make_downloader(module) as dwn:
+                    with self.assertRaises(ThreadInterruptException) as ctx:
+                        dwn._parse_args(prepare_arglist((tag, '-path', CUR_PATH)), False)
+                    self.assertIn('API only', str(ctx.exception))
+                    self.assertEqual(('', ''), (dwn.favorites_search_user, dwn.pool_search_str))
+        print(f'{self._testMethodName} passed')
+
+    @test_prepare()
     def test_cmdline01(self) -> None:
         args = args_argparse_str01
         arglist = prepare_arglist(args.split())
@@ -817,42 +829,6 @@ class RealDownloadTests(TestCase):
             tempfile = pathlib.Path(tdirname) / f'{tempfile_id}.{tempfile_ext}'
             #                  tag               flag      v      flag            v           flag      v
             argslist = (f'id:={tempfile_id}', '-threads', '1', '-headers', DEFAULT_HEADERS, '-path', tempfile.parent.as_posix())
-            arglist = prepare_arglist(argslist)
-            with _make_downloader(ProcModule.XB) as dwn:
-                dwn.launch_download(arglist)
-                self.assertTrue(tempfile.is_file())
-        print(f'{self._testMethodName} passed')
-
-    @test_prepare()
-    def test_down_xb03_fav1(self) -> None:
-        if not RUN_CONN_TESTS:
-            return
-        # this test actually performs a download
-        fav_user_id = '87266'
-        tempfile_id = '845348'
-        tempfile_ext = 'jpeg'
-        with TemporaryDirectory(prefix=f'{APP_NAME}_{self._testMethodName}_') as tdirname:
-            tempfile = pathlib.Path(tdirname) / f'{tempfile_id}.{tempfile_ext}'
-            #                 tag                          flag      v      flag            v           flag      v
-            argslist = (f'favorited_by:{fav_user_id}', '-threads', '1', '-headers', DEFAULT_HEADERS, '-path', tempfile.parent.as_posix())
-            arglist = prepare_arglist(argslist)
-            with _make_downloader(ProcModule.XB) as dwn:
-                dwn.launch_download(arglist)
-                self.assertTrue(tempfile.is_file())
-        print(f'{self._testMethodName} passed')
-
-    @test_prepare()
-    def test_down_xb04_pool1(self) -> None:
-        if not RUN_CONN_TESTS:
-            return
-        # this test actually performs a download
-        pool_id = '689'
-        tempfile_id = '733305'
-        tempfile_ext = 'jpeg'
-        with TemporaryDirectory(prefix=f'{APP_NAME}_{self._testMethodName}_') as tdirname:
-            tempfile = pathlib.Path(tdirname) / f'{tempfile_id}.{tempfile_ext}'
-            #                 tag                          flag      v      flag            v           flag      v
-            argslist = (f'pool:{pool_id}', '-threads', '1', '-headers', DEFAULT_HEADERS, '-path', tempfile.parent.as_posix())
             arglist = prepare_arglist(argslist)
             with _make_downloader(ProcModule.XB) as dwn:
                 dwn.launch_download(arglist)

@@ -45,6 +45,8 @@ from lustra.rex import (
 __all__ = ('DownloaderRp',)
 
 SITENAME = base64.b64decode(SITENAME_B_RP).decode()
+INFO_TEXT_FIELDS = dict.fromkeys((name for name in ItemInfo.__slots__ if name != 'comments'), '')
+'''every text field of ItemInfo, empty: fields are set by name without setattr() (static checks, R10)'''
 ITEMS_PER_PAGE = ITEMS_PER_PAGE_RP
 
 MAX_SEARCH_DEPTH = 0
@@ -109,6 +111,9 @@ class DownloaderRp(Downloader):
 
     def _get_sitename(self) -> str:
         return SITENAME
+
+    def _get_min_request_interval(self) -> float:
+        return 3.0  # robots.txt: Crawl-delay 3
 
     def _get_module_abbr(self) -> str:
         return MODULE_ABBR_RP
@@ -215,6 +220,7 @@ class DownloaderRp(Downloader):
                     break
                 oq, dq = "'", '"'
                 item = f'{item[:qidx]}"{item[qidx + 1:qend_idx].replace(dq, oq)}"{item[qend_idx + 1:]}'
+            fields: dict[str, str] = {}
             for part in re_item_info_part_xml.findall(item):
                 name, value = tuple(str(part).split('=', 1))
                 name = ITEM_INFO_FIELDS.get(name, name)
@@ -222,11 +228,11 @@ class DownloaderRp(Downloader):
                     value = self.extract_file_url(item)[1]
                 elif name == 'date':
                     value = self._extract_post_date(item)
-                if name in item_info.__slots__:
+                if name in INFO_TEXT_FIELDS:
                     while name == 'id' and not value[0].isnumeric():  # id=p1234567
                         value = value[1:]
-                    setattr(item_info, name, value.replace('\n', ' ').replace('"', '').strip())
-            return item_info
+                    fields[name] = value.replace('\n', ' ').replace('"', '').strip()
+            return ItemInfo.from_dict({**INFO_TEXT_FIELDS, **fields, 'comments': []})
         except Exception:
             self._on_thread_exception(current_process().name)
             raise

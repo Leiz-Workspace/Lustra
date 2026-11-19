@@ -39,12 +39,14 @@ re_secret_param = re.compile(r'([?&](?:api_key|login|user_id|password|pass_hash|
 
 
 class FetchPolicyError(Exception):
-    """A request refused by a hard rule: rule is the plan rule id (R2 robots, R4 rate/budget, R5 challenge, R10 address)"""
+    """A request refused by a hard rule: rule is the plan rule id (R2 robots, R4 rate/budget, R5 challenge, R10 address).
+    redirect: the refused address is where the site redirected the request (never contacted), not the address asked for"""
 
-    def __init__(self, rule: str, message: str) -> None:
+    def __init__(self, rule: str, message: str, *, redirect: bool = False) -> None:
         super().__init__(f'[{rule}] {message}')
         self.rule = rule
         self.message = message
+        self.redirect = redirect
 
 
 @dataclass
@@ -227,8 +229,14 @@ class SafeFetcher:
                     raise FetchPolicyError('R4', f'request budget of this session is used up ({self.budget})')
                 self._count += 1
         current = url
-        for _ in range(MAX_REDIRECTS + 1):
-            self._check_address(current)
+        for hop in range(MAX_REDIRECTS + 1):
+            try:
+                self._check_address(current)
+            except FetchPolicyError as err:
+                if not hop:
+                    raise
+                raise FetchPolicyError(err.rule, f'{redact_url(url)} redirects to a refused address: {err.message}',
+                                       redirect=True) from None
             t0 = time.monotonic()
             with self._session.request(method, current, headers=headers or {}, timeout=TIMEOUT, stream=True,
                                        allow_redirects=False) as r:

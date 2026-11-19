@@ -165,6 +165,7 @@ Lustra doesn't provide a method of authentication natively on either of supporte
     - XB: `cf_clearance`, `user_id`, `pass_hash`
   - Notes:
     - RN `cf_clearance` cookie duration is **15 minutes**
+- Desktop app: Settings → Kết nối → "Headers theo site (JSON)" / "Cookies theo site (JSON)", keyed by module abbreviation, for example `{"rn": {"User-Agent": "…"}}` and `{"rn": {"cf_clearance": "…"}}`. Only that website gets them; they replace shared entries of the same name. The shared "Headers (JSON)" / "Cookies (JSON)" go to every website: a browser `User-Agent` there would also replace the one e621 requires
 
 ## API authentication
 Some modules (RX only actually) require authentication info provided in order to use their download API (dapi).  
@@ -173,18 +174,19 @@ It's strongly recommended to use your own API key and not rely on a default one.
 ## Favorites
 Downloading user's favorites using native tags search functionality is only available with RN, RP and EN (see meta tags above), other websites don't implement that neither through tags nor through API. In order to enable users to download one's favorites Lustra implements `favorited_by` tag for other modules as well
 - Syntax: `favorited_by:X`. `X` = `<user ID>`. User ID you can get from user's favorites page, it's a part of its web address. Note: this syntax is not invalid as RN / RP / EN tag either but it won't do anything there
-- Downloading from RX / XB / BB favorites pages requires `cf_clearance` cookie (see above) as it isn't a part of dapi
+- Downloading from RX favorites pages requires `cf_clearance` cookie (see above) as it isn't a part of dapi
+- XB / BB refuse `favorited_by`: favorites are html pages, and the terms of these sites allow automated access through the API only
 - While searching favorites you can use normal filtering as well. Date filter, additional required / excluded tags, etc.
 - Downloading favorites isn't particulary fast, Lustra will need to fetch info for every item in the list in order to enable filtering
 
 ## Pools
-Downloading post pool using native tags search functionality is not possible and only RX, EN, XB and BB implement pool functionality.  
+Downloading post pool using native tags search functionality is not possible and only RX and EN implement pool functionality (XB and BB refuse `pool`: pools are html pages, and their terms allow the API only).  
 To download a pool use special `pool` tag:
 - Syntax: `pool:X`. `X` = `<pool ID>`. Pool ID you can get from pool page, it's a part of its web address
 - EN module also supports pool name syntax: `pool:Y`. `Y` = `<pool name>`. Pool name must be in lower case and have all spaces replaced with underscores, ex. `'Long Night' -> 'pool:long_night'`
-- Downloading RX / XB / BB pool pages requires `cf_clearance` cookie (see above) as it isn't a part of dapi
+- Downloading RX pool pages requires `cf_clearance` cookie (see above) as it isn't a part of dapi
 - Pool posts can be filtered as well. Date filter, additional required / excluded tags, etc.
-- Same as favorites, downloading using custom tags isn't particulary fast (RX / XB / BB), Lustra will need to fetch info for every item in the list in order to enable filtering
+- Same as favorites, downloading using custom tags isn't particulary fast (RX), Lustra will need to fetch info for every item in the list in order to enable filtering
 
 ##### Sets
 EN module also allows creating post sets. Essentially they are no different from pools:
