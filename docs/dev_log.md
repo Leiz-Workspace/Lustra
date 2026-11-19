@@ -873,7 +873,12 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   
   430 test qua (`unittest discover`, giới hạn 4 GB, RAM tối đa 267 MB). Hai nút ở Tags A–Z đã xem trên bản giả lập.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ar)
+### 7as. Bản 2.0.7 — 2026-11-19
+- **Nội dung:** cập nhật danh sách tag Rule34 chỉ đọc phần cuối danh sách, đọc toàn bộ mỗi 30 ngày hoặc khi được yêu cầu (7ar, PR #25).
+- **Không có trong bản này:** PR #26 (nhịp request của extension, headers / cookies theo site) chưa merge khi chủ repo quyết định phát hành.
+- **Phát hành:** version 2.0.7 (`app/package.json`, lock file, `pyproject.toml`, `mock.js`; lõi `2.0 r7`, ngày 19 Nov 2026), ghi chú `docs/releases/v2.0.7.md`. Đường đi: `develop` → `staging` (rc) → `production` qua PR.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7as)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
