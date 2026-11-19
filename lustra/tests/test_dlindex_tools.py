@@ -183,6 +183,23 @@ class CleanRpcTests(_Tmp):
         self.assertEqual((first['job'], True, 1, True), (params['job'], params['ok'], params['removed'], params['missingFolders']))
         self.assertFalse(server.METHODS['index.cleanCancel']({})['cancelled'])  # nothing running any more
 
+    def test_next_clean_can_start_on_done(self) -> None:
+        # a dry run, then the real clean as soon as the dry run's cleanDone arrives (the app's settings and self-test do that):
+        # the finished job must be gone before cleanDone is sent, or the second clean is refused with -32004
+        from lustra import server
+        done = threading.Event()
+        running_at_done: list[dict] = []
+
+        def note(method: str, params: dict) -> None:
+            if method == 'index.cleanDone':
+                running_at_done.append(dict(server._index_clean))
+                done.set()
+
+        with mock.patch.object(server, 'notify', note), mock.patch.object(dlindex_tools, 'clean_index', lambda **_: dlindex.CleanResult()):
+            server.METHODS['index.clean']({'dryRun': True})
+            self.assertTrue(done.wait(10))
+        self.assertEqual([{}], running_at_done)
+
     def test_cancel(self) -> None:
         from lustra import server
         done = threading.Event()
@@ -403,6 +420,31 @@ class ImportTests(_Tmp):
                                                            last['unknown'], last['dryRun']))
         self.assertEqual(['IMG_0001.jpg: not recognized'], last['unknownNames'])
         self.assertNotIn('K,U', out.stdout + out.stderr)
+
+    def test_ipc_final_line_is_last(self) -> None:
+        # the progress thread read a state, then lost the CPU until the import ended (a slow machine): that older state must not
+        # be printed after the final DONE line, or the app keeps its counts
+        import contextlib
+        import io
+        real = dlindex_tools.LibraryImport.progress
+
+        def late_progress(imp) -> dict:
+            state = real(imp)
+            if threading.current_thread().name == 'ipc-progress':
+                time.sleep(0.5)
+            return state
+
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {'LUSTRA_IPC': '1', 'LUSTRA_SECRET_ARGS': '[]'}), \
+                mock.patch.object(dlindex_tools.LibraryImport, 'progress', late_progress), \
+                mock.patch.object(sys, 'stdin', io.StringIO('')), contextlib.redirect_stdout(out):
+            code = dlindex_tools.main(['import', str(self.lib), '--module', 'rx', '--dry-run'])
+            for t in threading.enumerate():
+                if t.name == 'ipc-progress':
+                    t.join(5)
+        self.assertEqual(dlindex_tools.EXIT_OK, code)
+        lines = [json.loads(x[len('@@LUSTRA_PROGRESS '):]) for x in out.getvalue().splitlines() if x.startswith('@@LUSTRA_PROGRESS ')]
+        self.assertEqual(('DONE', 7), (lines[-1]['stateName'], lines[-1]['totalAll']))
 
 
 # ---------------- re-tag / renamed files ----------------

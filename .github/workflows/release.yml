@@ -241,6 +241,16 @@ jobs:
           fi
           python tools/check_selftest.py "$LUSTRA_SELFTEST_DIR/report.json"
 
+      # a failed self-test keeps its full report and screenshots (the log shows each value cut at 400 characters)
+      - name: Keep the self-test report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: selftest-${{ matrix.platform }}
+          path: ${{ runner.temp }}/selftest
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Build the model server bundles
         if: matrix.model_server != ''
         env:
