@@ -13,8 +13,12 @@ Tag lists stay out of the repository (docs/plans/ext-tag-jobs.md): an extension'
 "<abbr>_tags.json"). A list kept next to its manifest on the maintainer's machine (.gitignore leaves extensions/*/*_tags.json
 out) is used first; --lists is a folder for the others (made with 'lustra-core tags --modules <abbr> --out <dir>', or taken
 out of the zips of the catalog in use). Each list goes into its extension's zip, next to manifest.json, so
-the extension has it as soon as it is installed. An extension whose list is not there is built without it: the app reads the
-list with the extension's own update when the user asks (Tags A-Z, "Cập nhật"). A zip over the installer's limits is refused.
+the extension has it as soon as it is installed. An extension with no tag source (no 'tagUpdate', not a reviewed module, no engine
+with a tag listing: lustra/tags_updater.py source_for_manifest; today rn, rp, rs) takes the repository's 2tags/<abbr>_tags.json
+when neither place has its list, like the catalog bundled with the core (tools/build_core.py _stage_catalog), and the build stops
+when that is missing too: without a list in its zip, an update from this catalog would leave the module with no list. Any other
+extension whose list is not there is built without it: the app reads the list with the extension's own update when the user asks
+(Tags A-Z, "Cập nhật"). A zip over the installer's limits is refused.
 """
 #########################################
 #
@@ -36,6 +40,7 @@ if str(ROOT) not in sys.path:
 from lustra.extensions import ARCHIVE_ENTRIES_MAX, ARCHIVE_SIZE_MAX, ARCHIVE_UNPACKED_MAX  # noqa: E402
 
 OFFICIAL_BASE_URL = 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/'
+TAGS_DIR = ROOT / '2tags'
 SKIP_NAMES = {'__pycache__', '.DS_Store'}
 ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 
@@ -66,14 +71,30 @@ def build_archive(ext_dir: pathlib.Path, dest: pathlib.Path, extra: dict[str, pa
     return hashlib.sha256(dest.read_bytes()).hexdigest()
 
 
-def tag_list_source(ext_dir: pathlib.Path, manifest: dict, lists: pathlib.Path | None) -> pathlib.Path | None:
-    """The tag list file to put into the zip of this extension (None: no list declared, or already in its folder, or not found)"""
+def has_tag_source(ext_dir: pathlib.Path) -> bool:
+    """The app can read this extension's tag list from somewhere (lustra/tags_updater.py source_for_manifest)"""
+    from lustra.extensions import SOURCE_CATALOG
+    from lustra.modspec import ExtensionManifest
+    from lustra.tags_updater import source_for_manifest
+    return source_for_manifest(ExtensionManifest.load(ext_dir / 'manifest.json', SOURCE_CATALOG)) is not None
+
+
+def tag_list_source(ext_dir: pathlib.Path, manifest: dict, lists: pathlib.Path | None,
+                    tags_dir: pathlib.Path | None = TAGS_DIR) -> pathlib.Path | None:
+    """The tag list file to put into the zip of this extension (None: no list declared, or already in its folder, or not found).
+    Next to its manifest, else in lists, else (an extension with no tag source) the repository's 2tags/. Raises SystemExit when an
+    extension with no tag source has its list nowhere"""
     name = str(manifest.get('tagList') or '')
-    if not name or pathlib.PurePosixPath(name).name != name or (ext_dir / name).is_file() or lists is None:
+    if not name or pathlib.PurePosixPath(name).name != name or (ext_dir / name).is_file():
         return None
-    path = lists / name
-    if not path.is_file():
-        return None
+    path = lists / name if lists is not None else None
+    if path is None or not path.is_file():
+        if has_tag_source(ext_dir):
+            return None
+        path = tags_dir / name if tags_dir is not None and name == f'{manifest.get("abbr", "")}_tags.json' else None
+        if path is None or not path.is_file():
+            raise SystemExit(f'{manifest.get("id")}: no {name} next to its manifest, in --lists or in {tags_dir}, and the app has no '
+                             f'source to read it from: an update from this catalog would leave the module without a list')
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except ValueError as err:
@@ -83,7 +104,8 @@ def tag_list_source(ext_dir: pathlib.Path, manifest: dict, lists: pathlib.Path |
     return path
 
 
-def build(extensions_dir: pathlib.Path, out: pathlib.Path, base_url: str, lists: pathlib.Path | None = None) -> dict:
+def build(extensions_dir: pathlib.Path, out: pathlib.Path, base_url: str, lists: pathlib.Path | None = None,
+          tags_dir: pathlib.Path | None = TAGS_DIR) -> dict:
     if not base_url.lower().startswith('https://'):
         raise SystemExit('--base-url must be https')
     if lists is not None and not lists.is_dir():
@@ -96,11 +118,11 @@ def build(extensions_dir: pathlib.Path, out: pathlib.Path, base_url: str, lists:
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         ext_id, version = manifest['id'], manifest['version']
         name = f'{ext_id}-{version}.zip'
-        tag_list = tag_list_source(ext_dir, manifest, lists)
+        tag_list = tag_list_source(ext_dir, manifest, lists, tags_dir)
         sha256 = build_archive(ext_dir, out / name, {manifest['tagList']: tag_list} if tag_list else None)
         if manifest.get('tagList') and not tag_list and not (ext_dir / str(manifest['tagList'])).is_file():
-            print(f'{ext_id}: no {manifest["tagList"]} in --lists: built without its tag list (the app reads it when asked)',
-                  file=sys.stderr)
+            print(f'{ext_id}: no {manifest["tagList"]} in --lists: built without its tag list (the app reads it from its source '
+                  f'when asked)', file=sys.stderr)
         entries.append({'id': ext_id, 'name': manifest.get('name', ext_id), 'abbr': manifest.get('abbr', ''), 'version': version,
                         'url': base_url + name, 'sha256': sha256, 'site': manifest.get('site', ''),
                         'description': manifest.get('description', '')})
