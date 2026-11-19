@@ -122,6 +122,14 @@ function toast(msg, kind = '') {
   $('#toasts').append(el);
   setTimeout(() => el.remove(), kind === 'err' ? 7000 : 3500);
 }
+function toastAction(msg, label, fn, ms = 10000) {
+  // a toast with one button (ex. "Hoàn tác" after a delete): the button runs once, then the toast goes away
+  const el = h('div', { class: 'toast ok has-action' }, h('span', {}, msg),
+    h('button', { class: 'btn sm', onclick: () => { el.remove(); fn(); } }, label));
+  $('#toasts').append(el);
+  setTimeout(() => el.remove(), ms);
+  return el;
+}
 function errMsg(err) {
   const m = String(err?.message || err || 'lỗi');
   return m.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
@@ -1193,7 +1201,10 @@ function openLightbox(it) {
 }
 
 // ---------------- library: offline search of the download index (index.search, no website request) ----------------
-const LIB = { page: 0, pageSize: 60, total: 0, items: [], seq: 0, ready: false };
+// view 'trash': the files deleted from the library (moved to the trash by the core, restorable until purged).
+// selected: paths of the cards picked on this page (click, shift+click for a range); anchor: index of the last plain click
+const LIB = { page: 0, pageSize: 60, total: 0, items: [], seq: 0, ready: false, view: 'library', selected: new Set(), anchor: -1,
+  cards: new Map(), trash: null };
 const LIB_KIND = (ext) => (['mp4', 'webm'].includes(ext) ? 'video' : ['mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav'].includes(ext) ? 'audio' : 'image');
 function fileUrl(p) {
   // local file for <img> / <video> (the renderer is a file:// page, CSP allows file:)
@@ -1207,69 +1218,226 @@ async function openLibrary() {
     $('#lib-module').replaceChildren(h('option', { value: '' }, 'Mọi module'), ...mods.map((m) => h('option', { value: m.abbr }, `${m.abbr} · ${m.name}`)));
     runLibrary(0);
   }
+  refreshLibraryStats();
+}
+async function refreshLibraryStats() {
   try {
     const st = await L.rpc('index.stats');
-    setText($('#lib-stats'), st.exists ? `${nf.format(st.files || 0)} file · ${fmtBytes(st.bytes || 0)}` : 'chưa có file nào trong index');
+    LIB.trash = st.trash || { files: 0, bytes: 0, oldest: null };
+    const t = LIB.trash;
+    setText($('#lib-stats'), !st.exists ? 'chưa có file nào trong index'
+      : LIB.view === 'trash' ? `${nf.format(t.files)} file · ${fmtBytes(t.bytes)} trong thùng rác` : `${nf.format(st.files || 0)} file · ${fmtBytes(st.bytes || 0)}`);
+    setText($('#lib-trash-count'), t.files ? `(${nf.format(t.files)})` : '');
+    updateLibTools();
   } catch { /* old core: no index */ }
 }
 async function runLibrary(page) {
   const seq = ++LIB.seq;
   const params = { tags: $('#lib-q').value.trim(), module: $('#lib-module').value, dateFrom: $('#lib-from').value, dateTo: $('#lib-to').value,
-    order: $('#lib-order').value, page, pageSize: LIB.pageSize };
+    order: $('#lib-order').value, page, pageSize: LIB.pageSize, trash: LIB.view === 'trash' };
   try {
     const r = await L.rpc('index.search', params);
     if (seq !== LIB.seq) return;
-    Object.assign(LIB, { page: r.page, total: r.total, items: r.items });
+    const last = Math.max(0, Math.ceil(r.total / LIB.pageSize) - 1);
+    if (!r.items.length && r.page > last) { runLibrary(last); return; } // the last page was emptied (files deleted)
+    Object.assign(LIB, { page: r.page, total: r.total, items: r.items, anchor: -1 });
+    LIB.selected.clear();
     renderLibrary();
   } catch (err) {
     if (seq === LIB.seq) setText($('#lib-info'), `Không tìm được: ${errMsg(err)}`);
   }
 }
+const trashDays = () => S.settings?.library?.trashDays ?? 30;
+function trashLeft(it) {
+  // days before the automatic purge (settings.library.trashDays, main.js purgeOldTrash); '' when the trash is never emptied
+  const days = trashDays();
+  if (!days || !it.trashedAt) return '';
+  const left = Math.ceil(days - (Date.now() / 1000 - it.trashedAt) / 86400);
+  return left > 0 ? `còn ${left} ngày` : 'sắp xoá';
+}
 function renderLibrary() {
+  const trash = LIB.view === 'trash';
   const pages = Math.max(1, Math.ceil(LIB.total / LIB.pageSize));
   const missing = LIB.items.filter((it) => !it.exists).length;
-  setText($('#lib-info'), LIB.total ? `${nf.format(LIB.total)} file${missing ? ` · ${missing} file trên trang này không còn trên đĩa` : ''}`
-    : 'Không có file nào khớp. Index chỉ có những file tải từ khi có tính năng này (và khi đang bật ghi index).');
+  const days = trashDays();
+  setText($('#lib-info'), trash
+    ? (LIB.total ? `${nf.format(LIB.total)} file trong thùng rác · ${days ? `tự xoá vĩnh viễn sau ${days} ngày` : 'không tự xoá'}`
+      : 'Thùng rác trống.')
+    : LIB.total ? `${nf.format(LIB.total)} file${missing ? ` · ${missing} file trên trang này không còn trên đĩa` : ''}`
+      : 'Không có file nào khớp. Index chỉ có những file tải từ khi có tính năng này (và khi đang bật ghi index).');
   setText($('#lib-page'), `${LIB.page + 1} / ${pages}`);
   $('#lib-prev').disabled = LIB.page <= 0;
   $('#lib-next').disabled = LIB.page + 1 >= pages;
-  $('#lib-grid').replaceChildren(...LIB.items.map((it) => {
+  LIB.cards.clear();
+  $('#lib-grid').replaceChildren(...LIB.items.map((it, i) => {
     const kind = LIB_KIND(String(it.ext || '').toLowerCase());
     const thumb = it.exists && kind === 'image'
       ? h('img', { loading: 'lazy', decoding: 'async', alt: '', src: fileUrl(it.path), onerror: (e) => e.target.replaceWith(h('div', { class: 'ph' }, '🖼')) })
       : h('div', { class: 'ph' }, it.exists ? (kind === 'video' ? '▶' : '♪') : '✕');
-    return h('div', { class: `card ${it.exists ? '' : 'missing'}`, title: `${it.name}\n${(it.tags || '').slice(0, 400)}`, onclick: () => openLibraryItem(it) },
-      thumb, h('div', { class: 'badges' },
-        h('span', { class: 'b' }, it.module), it.ext ? h('span', { class: 'b' }, it.ext) : null,
-        it.size ? h('span', { class: 'b' }, fmtBytes(it.size)) : null, it.exists ? null : h('span', { class: 'b' }, 'đã mất')));
+    const left = trash ? trashLeft(it) : '';
+    const where = trash ? `\nVị trí cũ: ${it.origPath}` : '';
+    const card = h('div', {
+      class: `card ${it.exists ? '' : 'missing'}`, dataset: { path: it.path },
+      title: `${it.name}${where}\n${(it.tags || '').slice(0, 400)}\n(bấm để chọn, bấm đúp để xem)`,
+      onclick: (e) => libCardClick(e, i), ondblclick: () => openLibraryItem(it),
+    }, thumb, h('span', { class: 'tick' }, '✓'), h('div', { class: 'badges' },
+      h('span', { class: 'b' }, it.module), it.ext ? h('span', { class: 'b' }, it.ext) : null,
+      it.size ? h('span', { class: 'b' }, fmtBytes(it.size)) : null, it.exists ? null : h('span', { class: 'b' }, 'đã mất'),
+      left ? h('span', { class: 'b left' }, left) : null));
+    LIB.cards.set(it.path, card);
+    return card;
   }));
+  updateLibTools();
+}
+function updateLibTools() {
+  const trash = LIB.view === 'trash';
+  const n = LIB.selected.size;
+  for (const [p, card] of LIB.cards) card.classList.toggle('sel', LIB.selected.has(p));
+  for (const [id, label, show] of [['#lib-delete', 'Xoá', !trash], ['#lib-restore', 'Khôi phục', trash], ['#lib-purge', 'Xoá vĩnh viễn', trash]]) {
+    setHidden($(id), !show);
+    setText($(id), `${label} (${n})`);
+    $(id).disabled = !n;
+  }
+  setHidden($('#lib-empty'), !trash);
+  $('#lib-empty').disabled = !LIB.trash?.files;
+  $('#lib-sel-none').disabled = !n;
+  $('#lib-sel-page').disabled = !LIB.items.length;
+}
+function libCardClick(e, i) {
+  const it = LIB.items[i];
+  if (!it) return;
+  if (e.shiftKey && LIB.anchor >= 0) { // a range from the last clicked card
+    const [a, b] = LIB.anchor < i ? [LIB.anchor, i] : [i, LIB.anchor];
+    LIB.items.slice(a, b + 1).forEach((x) => LIB.selected.add(x.path));
+  } else {
+    if (LIB.selected.has(it.path)) LIB.selected.delete(it.path); else LIB.selected.add(it.path);
+    LIB.anchor = i;
+  }
+  updateLibTools();
+}
+const libSelectedItems = () => LIB.items.filter((it) => LIB.selected.has(it.path));
+function setLibraryView(view) {
+  if (LIB.view === view) return;
+  LIB.view = view;
+  $$('#lib-view button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
+  // newest deletion first in the trash, newest download first in the library (unless another order was picked)
+  const order = $('#lib-order');
+  order.querySelector('option[value="trashed"]').hidden = view !== 'trash';
+  if (view === 'trash' && order.value === 'downloaded') order.value = 'trashed';
+  if (view !== 'trash' && order.value === 'trashed') order.value = 'downloaded';
+  LIB.selected.clear();
+  LIB.items = [];
+  renderLibrary();
+  runLibrary(0);
+  refreshLibraryStats();
+}
+function afterLibraryChange() {
+  runLibrary(LIB.page);
+  refreshLibraryStats();
+  if ($('#page-settings').classList.contains('active')) refreshIndexStats();
+}
+function reportLibFailed(failed, what) {
+  if (!failed?.length) return;
+  toast(`${what} ${failed.length} file: ${failed[0].error}${failed.length > 1 ? '…' : ''}`, 'err');
+}
+async function releaseMedia() {
+  // a playing video keeps its file open (Windows refuses to move or delete it): stop the lightbox media before the file is touched
+  const media = $$('#modal-card video, #modal-card audio');
+  for (const m of media) { m.pause(); m.removeAttribute('src'); m.load(); }
+  closeModal();
+  if (media.length) await new Promise((r) => setTimeout(r, 200));
+}
+async function libDelete(items) {
+  // library: files on disk go to the trash (undo from the toast); rows whose file is already gone are dropped (main asks first)
+  const present = items.filter((it) => it.exists).map((it) => it.path);
+  const gone = items.filter((it) => !it.exists).map((it) => it.path);
+  if (present.length) {
+    try {
+      const r = await L.library.trash(present);
+      reportLibFailed(r.failed, 'Không chuyển được vào thùng rác');
+      const moved = r.trashed.map((x) => x.trashPath);
+      if (moved.length) toastAction(`Đã chuyển ${moved.length} file vào thùng rác`, 'Hoàn tác', () => libRestore(moved, true));
+    } catch (err) { toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
+  }
+  if (gone.length) {
+    try {
+      const r = await L.library.forget(gone);
+      if (r.removed) toast(`Đã bỏ ${r.removed} mục không còn file khỏi thư viện`, 'ok');
+    } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
+  }
+  afterLibraryChange();
+}
+async function libRestore(paths, undo = false) {
+  try {
+    const r = await L.library.restore(paths);
+    reportLibFailed(r.failed, 'Không khôi phục được');
+    if (r.restored.length) toast(undo ? `Đã hoàn tác: ${r.restored.length} file về chỗ cũ` : `Đã khôi phục ${r.restored.length} file`, 'ok');
+  } catch (err) { toast(`Không khôi phục được: ${errMsg(err)}`, 'err'); }
+  afterLibraryChange();
+}
+async function libPurge(paths) {
+  try {
+    const r = await (paths ? L.library.purge(paths) : L.library.emptyTrash());
+    reportLibFailed(r.failed, 'Không xoá được');
+    if (r.purged) toast(`Đã xoá vĩnh viễn ${r.purged} file (${fmtBytes(r.bytes)})`, 'ok');
+  } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
+  afterLibraryChange();
 }
 function openLibraryItem(it) {
   const kind = LIB_KIND(String(it.ext || '').toLowerCase());
+  const trash = Boolean(it.trashedAt);
   const media = !it.exists ? h('div', { class: 'audio-ph' }, 'File không còn trên đĩa')
     : kind === 'video' ? h('video', { controls: true, autoplay: true, src: fileUrl(it.path) })
       : kind === 'audio' ? h('div', { class: 'cover' }, h('div', { class: 'audio-ph' }, '♪'), h('audio', { controls: true, autoplay: true, src: fileUrl(it.path) }))
         : h('img', { src: fileUrl(it.path), alt: '' });
   const tags = String(it.tags || '').split(' ').filter(Boolean);
   const searchTag = (t) => { closeModal(); $('#lib-q').value = t; runLibrary(0); };
+  // the media is stopped and the lightbox closed before the file is moved or deleted
+  const act = (fn) => async () => { await releaseMedia(); fn(); };
+  const left = trash ? trashLeft(it) : '';
+  const actions = trash ? [
+    it.exists ? h('button', { class: 'btn primary', onclick: act(() => libRestore([it.path])) }, 'Khôi phục') : null,
+    h('button', { class: 'btn danger', onclick: act(() => libPurge([it.path])) }, 'Xoá vĩnh viễn'),
+  ] : [
+    it.exists && L.library ? h('button', { class: 'btn', onclick: () => L.library.open(it.path).then((r) => r && toast(r, 'err')) }, 'Mở file') : null,
+    L.library ? h('button', { class: 'btn', onclick: () => L.library.reveal(it.path) }, 'Mở thư mục') : null,
+    L.library?.trash ? h('button', { class: 'btn danger', title: it.exists ? 'Chuyển vào thùng rác' : 'Bỏ khỏi thư viện (file đã mất)', onclick: act(() => libDelete([it])) },
+      it.exists ? 'Xoá' : 'Xoá khỏi thư viện') : null,
+  ];
   openModal(h('div', { class: 'lightbox' },
     h('div', {}, media),
     h('div', {},
       h('h2', {}, `${it.module} #${it.id} `, h('span', { class: 'muted' }, [it.ext, it.size && fmtBytes(it.size), it.date, it.rating].filter(Boolean).join(' · '))),
-      h('p', { class: 'muted lib-path' }, it.path),
+      trash ? h('p', { class: 'muted' }, `Trong thùng rác · đã xoá ${ago(it.trashedAt * 1000)}${left ? ` · ${left}` : ''}`) : null,
+      h('p', { class: 'muted lib-path' }, trash ? `Vị trí cũ: ${it.origPath}` : it.path),
       it.md5 ? h('p', { class: 'muted lib-path' }, `md5 ${it.md5}`) : null,
       h('p', { class: 'muted' }, 'Bấm một tag để tìm các file khác có tag đó.'),
       h('div', { class: 'lb-tags' }, tags.slice(0, 300).map((t) => h('span', { class: 'lb-tag', onclick: () => searchTag(t), style: 'cursor:pointer' }, t))),
-      h('div', { class: 'modal-actions' },
-        it.exists && L.library ? h('button', { class: 'btn', onclick: () => L.library.open(it.path).then((r) => r && toast(r, 'err')) }, 'Mở file') : null,
-        L.library ? h('button', { class: 'btn', onclick: () => L.library.reveal(it.path) }, 'Mở thư mục') : null,
-        h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
+      h('div', { class: 'modal-actions' }, ...actions, h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
 }
 $('#lib-search').addEventListener('click', () => runLibrary(0));
 $('#lib-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') runLibrary(0); });
 ['#lib-module', '#lib-order', '#lib-from', '#lib-to'].forEach((id) => $(id).addEventListener('change', () => runLibrary(0)));
 $('#lib-prev').addEventListener('click', () => { if (LIB.page > 0) runLibrary(LIB.page - 1); });
 $('#lib-next').addEventListener('click', () => runLibrary(LIB.page + 1));
+$$('#lib-view button').forEach((b) => b.addEventListener('click', () => setLibraryView(b.dataset.view)));
+$('#lib-sel-page').addEventListener('click', () => { LIB.items.forEach((it) => LIB.selected.add(it.path)); updateLibTools(); });
+$('#lib-sel-none').addEventListener('click', () => { LIB.selected.clear(); LIB.anchor = -1; updateLibTools(); });
+$('#lib-delete').addEventListener('click', () => { if (LIB.selected.size) libDelete(libSelectedItems()); });
+$('#lib-restore').addEventListener('click', () => {
+  const paths = libSelectedItems().filter((it) => it.exists).map((it) => it.path);
+  if (paths.length) libRestore(paths); else toast('File đã chọn không còn trong thùng rác', 'err');
+});
+$('#lib-purge').addEventListener('click', () => { if (LIB.selected.size) libPurge(libSelectedItems().map((it) => it.path)); });
+$('#lib-empty').addEventListener('click', () => libPurge(null));
+document.addEventListener('keydown', (e) => {
+  // library page: Delete moves the selected cards to the trash (reversible), Escape clears the selection. Capture phase: runs
+  // before the listener that closes the lightbox on Escape, so closing it keeps the selection
+  if (!$('#page-library').classList.contains('active') || !$('#modal').hidden) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  if (e.key === 'Delete' && LIB.view === 'library' && LIB.selected.size) libDelete(libSelectedItems());
+  else if (e.key === 'Escape' && LIB.selected.size) { LIB.selected.clear(); updateLibTools(); }
+}, true);
 
 // ---------------- downloads ----------------
 async function startDownload(override = null) {
@@ -1894,6 +2062,9 @@ async function refreshIndexStats() {
   if (seq !== indexStatsSeq) return;
   const when = (t) => (t ? new Date(t * 1000).toLocaleString('vi-VN') : '—');
   $('#index-path').textContent = r.path || '';
+  const trash = r.trash || { files: 0, bytes: 0 };
+  setText($('#index-trash-info'), trash.files ? `(${nf.format(trash.files)} file · ${fmtBytes(trash.bytes)})` : '(trống)');
+  $('#index-empty-trash').disabled = !trash.files;
   if (!r.exists) {
     table.replaceChildren(h('tr', {}, h('td', { class: 'muted' }, r.recording === false
       ? 'Chưa có index; đang tắt ghi (LUSTRA_DLINDEX=0).' : 'Chưa có index: file đầu tiên tải xong sẽ được ghi vào.')));
@@ -1907,6 +2078,7 @@ async function refreshIndexStats() {
     row('Tag khác nhau', nf.format(r.tags)),
     row('Dung lượng file', fmtBytes(r.bytes)),
     row('Dung lượng index', fmtBytes(r.dbBytes)),
+    row('Thùng rác', trash.files ? `${nf.format(trash.files)} file · ${fmtBytes(trash.bytes)}` : 'trống'),
     row('Lần tải gần nhất', when(r.last)),
     ...(r.recording === false ? [row('Ghi index', 'đang tắt (LUSTRA_DLINDEX=0)')] : []),
     ...(r.modules?.length ? [h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Gần nhất')),
@@ -1914,6 +2086,15 @@ async function refreshIndexStats() {
         h('td', {}, fmtBytes(m.bytes)), h('td', {}, when(m.last))))] : []));
 }
 $('#index-refresh').addEventListener('click', () => refreshIndexStats());
+$('#s-trash-days').addEventListener('change', async (e) => {
+  // a shorter time empties what is older at once (main); the "còn X ngày" badges follow
+  try { await saveSettings({ library: { trashDays: Number(e.target.value) } }); } catch (err) { toast(`Không lưu được: ${errMsg(err)}`, 'err'); }
+  if (LIB.ready && LIB.view === 'trash') renderLibrary();
+});
+$('#index-empty-trash').addEventListener('click', async () => {
+  await libPurge(null); // main asks first (native dialog)
+  refreshIndexStats();
+});
 $('#s-skip-known').addEventListener('change', (e) => { $('#f-skip-known').checked = e.target.checked; });
 
 // ---------------- download index tools: clean (index.clean in the sidecar, via main) ----------------
@@ -2981,6 +3162,10 @@ function renderSettings() {
   bindSetting('#s-notify', 'download.notify');
   bindSetting('#s-concurrent', 'download.maxConcurrentJobs', 'number');
   bindSetting('#s-skip-known', 'download.skipKnown');
+  const days = s.library?.trashDays ?? 30;
+  const daysSel = $('#s-trash-days');
+  if (![...daysSel.options].some((o) => Number(o.value) === days)) daysSel.append(h('option', { value: String(days) }, `${days} ngày`));
+  daysSel.value = String(days);
   $('#c-proxy').value = s.connection.proxy || '';
   $('#c-ignore').checked = !!s.connection.ignoreProxy;
   $('#c-nodown').checked = !!s.connection.proxyNoDownload;
@@ -3178,6 +3363,10 @@ function listen() {
       if (cell) cell.textContent = `đang tải… ${nf.format(params.count)} tag`;
     } else if (method === 'index.cleanProgress' || method === 'index.cleanDone') {
       onIndexCleanNotify(method, params);
+    } else if (method === 'library.trashPurged') {
+      // main emptied the trash of files older than settings.library.trashDays
+      if (LIB.ready) { refreshLibraryStats(); if (LIB.view === 'trash') runLibrary(LIB.page); }
+      if ($('#page-settings').classList.contains('active')) refreshIndexStats();
     } else if (method === 'app.notice') {
       // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');

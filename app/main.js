@@ -95,6 +95,8 @@ const DEFAULT_SETTINGS = {
   // gender image model: runs in a model server (python -m lustra.model_server), the app only calls its API (token: MODEL_SECRET).
   // enabled: the user turned it on (the renderer checks the server's GPU / VRAM first); off: jobs filter by tags only
   genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
+  // "Đã tải" page: deleted files go to the trash (core lustra/dlindex.py); trashDays: emptied of files older than this (0 = never)
+  library: { trashDays: 30 },
   window: { width: 1360, height: 860 },
 };
 
@@ -497,7 +499,11 @@ function sanitizeSettings() {
   settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
   settings.genderModel.url = sanitizeModelUrl(settings.genderModel.url) ?? DEFAULT_SETTINGS.genderModel.url;
   settings.genderModel.enabled = settings.genderModel.enabled === true;
+  if (!validTrashDays(settings.library.trashDays)) settings.library.trashDays = DEFAULT_SETTINGS.library.trashDays;
 }
+
+const TRASH_DAYS_MAX = 365;
+const validTrashDays = (d) => Number.isInteger(d) && d >= 0 && d <= TRASH_DAYS_MAX;
 
 // the image model is used only when it is turned on and has an address; otherwise the gender filter goes by tags
 const genderModelOn = () => settings.genderModel.enabled === true && Boolean(settings.genderModel.url);
@@ -2054,12 +2060,20 @@ function registerIpc() {
       if (u === null) throw new Error('Địa chỉ model server phải có dạng http://máy:cổng hoặc https://…');
       patch.genderModel.url = u;
     }
+    if (patch.library !== undefined && !isPlainObject(patch.library)) throw new Error('invalid settings patch');
+    if (patch.library?.trashDays !== undefined && !validTrashDays(patch.library.trashDays)) {
+      throw new Error(`Số ngày giữ thùng rác phải là số nguyên từ 0 đến ${TRASH_DAYS_MAX}`);
+    }
+    const trashDaysBefore = settings.library.trashDays;
     settings = deepMerge(settings, patch);
     settings.genderModel.enabled = settings.genderModel.enabled === true;
     Object.assign(settings.connection, replaceMaps);
     if (!GEN_MODELS.includes(settings.ai.model)) settings.ai.model = DEFAULT_SETTINGS.ai.model;
     settings.ai.maxUsd = clampUsd(settings.ai.maxUsd, DEFAULT_SETTINGS.ai.maxUsd);
     saveSettings();
+    // a shorter time in the trash (or none before): what is older than it now goes at once, not at the next 12-hour check
+    const trashDays = settings.library.trashDays;
+    if (trashDays > 0 && (trashDaysBefore === 0 || trashDays < trashDaysBefore)) purgeOldTrash('setting').catch(() => {});
     if (patch?.connection?.keyRateLimits) syncKeyRateLimits();
     if (patch?.connection) await applyProxyToSession();
     let iconSync;
@@ -2235,6 +2249,85 @@ function registerIndexIpc() {
 }
 
 const LIBRARY_MEDIA_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4', 'webm', 'mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav']);
+
+// ---------- library: delete and the trash ("Đã tải" page; core: lustra/dlindex.py trash / restore / purge_trash / forget) ----------
+// Moving to the trash and back is reversible: no dialog. Purging files and forgetting rows cannot be undone: a native confirmation.
+// The core refuses any path that is not a row of the index, so the renderer cannot name an arbitrary file
+
+const LIBRARY_PATHS_MAX = 1000;
+const TRASH_PURGE_EVERY_MS = 12 * 3600e3;
+let trashPurgedAt = 0; // last automatic purge of the files older than settings.library.trashDays
+
+function libraryPaths(paths) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > LIBRARY_PATHS_MAX) throw new Error('invalid paths');
+  const out = [...new Set(paths)];
+  if (out.some((p) => typeof p !== 'string' || !p || p.length > 4096 || p.includes('\0') || !path.isAbsolute(p))) throw new Error('invalid paths');
+  return out;
+}
+
+const trashRoots = () => [resolveUserPath(settings.download.path)].filter((p) => path.isAbsolute(p));
+
+function trashSizeText(bytes) {
+  const b = Number(bytes) || 0;
+  return b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
+}
+
+// native confirmation of what cannot be undone; the self-test replaces it
+let confirmLibrary = async (message, detail, okLabel) => {
+  const r = await dialog.showMessageBox(mainWindow, {
+    type: 'warning', buttons: ['Huỷ', okLabel], defaultId: 0, cancelId: 0, noLink: true, message, detail,
+  });
+  return r.response === 1;
+};
+
+async function purgeOldTrash(reason) {
+  // files that stayed in the trash longer than settings.library.trashDays are deleted for good. reason 'timer': at most every 12 h
+  // (60 s after the core is up, then on the 5-minute tick); 'setting': the user shortened the time
+  const days = settings.library.trashDays;
+  if (!validTrashDays(days) || days === 0) return null;
+  if (reason === 'timer' && (process.env.LUSTRA_SELFTEST_DIR || Date.now() - trashPurgedAt < TRASH_PURGE_EVERY_MS)) return null;
+  trashPurgedAt = Date.now();
+  try {
+    const r = await sidecar.call('index.purgeTrash', { days }, 600000);
+    if (r.purged || r.failed?.length) {
+      send('log', { source: 'library', text: `thùng rác: xoá vĩnh viễn ${r.files} file quá ${days} ngày (${trashSizeText(r.bytes)})`
+        + `${r.failed?.length ? `, ${r.failed.length} file không xoá được` : ''}` });
+      send('sidecar:notify', { method: 'library.trashPurged', params: { ...r, days, auto: true } });
+    }
+    return r;
+  } catch (err) {
+    send('log', { source: 'library', text: `thùng rác: không tự dọn được: ${err.message}` });
+    return null;
+  }
+}
+
+function registerLibraryIpc() {
+  handle('library:trash', (_e, paths) => sidecar.call('index.trash', { paths: libraryPaths(paths), roots: trashRoots() }, 600000));
+  handle('library:restore', (_e, paths) => sidecar.call('index.restore', { paths: libraryPaths(paths) }, 600000));
+  handle('library:forget', async (_e, paths) => {
+    const list = libraryPaths(paths);
+    const ok = await confirmLibrary(`Xoá ${list.length} mục khỏi thư viện?`,
+      'File của các mục này không còn trên đĩa. Chỉ xoá dòng trong index của Lustra, không thể hoàn tác.', 'Xoá khỏi thư viện');
+    if (!ok) throw new Error('cancelled');
+    return sidecar.call('index.forget', { paths: list });
+  });
+  handle('library:purge', async (_e, paths) => {
+    const list = libraryPaths(paths);
+    const ok = await confirmLibrary(`Xoá vĩnh viễn ${list.length} file?`,
+      'Các file này bị xoá khỏi ổ đĩa và khỏi thư viện. Không thể hoàn tác.', 'Xoá vĩnh viễn');
+    if (!ok) throw new Error('cancelled');
+    return sidecar.call('index.purgeTrash', { paths: list }, 600000);
+  });
+  handle('library:emptyTrash', async () => {
+    const st = await sidecar.call('index.stats', {});
+    const n = st.trash?.files || 0;
+    if (!n) return { purged: 0, files: 0, bytes: 0, failed: [], kept: 0 };
+    const ok = await confirmLibrary('Dọn sạch thùng rác?',
+      `${n} file (${trashSizeText(st.trash.bytes)}) bị xoá khỏi ổ đĩa và khỏi thư viện. Không thể hoàn tác.`, 'Dọn sạch');
+    if (!ok) throw new Error('cancelled');
+    return sidecar.call('index.purgeTrash', { all: true }, 600000);
+  });
+}
 
 function secretsStatus() {
   return {
@@ -2955,8 +3048,97 @@ async function selfTestIndexTools(js, shot) {
     jobs.pump = realPump;
     await js(`document.querySelector('#jobs-clear').click()`).catch(() => {}); // the renderer drops the jobs main no longer has
   }
+  out.trash = await selfTestLibraryTrash(js);
   out.ui = await selfTestIndexUi(js, shot);
-  out.ok = out.rpcBlocked.every((x) => /^blocked: .*not allowed/.test(x)) && out.cleanOk && out.importOk && out.multiOk && out.ui.ok;
+  out.ok = out.rpcBlocked.every((x) => /^blocked: .*not allowed/.test(x)) && out.cleanOk && out.importOk && out.multiOk && out.trash.ok
+    && out.ui.ok;
+  return out;
+}
+
+function selfTestSeedIndex(rows) {
+  // rows of the download index for files the self-test made, written by the real core (lustra/dlindex.py add_many) into the
+  // index the sidecar reads (LUSTRA_DATA_DIR = userData)
+  const py = 'import json, sys\nfrom lustra.dlindex import DownloadIndex, IndexRecord\n'
+    + "with DownloadIndex(create=True) as index:\n    print(index.add_many([IndexRecord(module=r['module'], post_id=r['id'], path=r['path'], "
+    + "tags=r['tags'], size=r['size']) for r in json.loads(sys.argv[1])]))";
+  const res = spawnSync(resolvePython(), ['-c', py, JSON.stringify(rows)], { cwd: REPO_ROOT, env: pythonEnv(), encoding: 'utf8', timeout: 60000 });
+  if (res.status !== 0) throw new Error(`index seed failed: ${redact(res.stderr || res.error?.message || '').slice(-300)}`);
+}
+
+async function selfTestLibraryTrash(js) {
+  // the trash of the "Đã tải" page: only through main (the rpc channel refuses the core methods), paths checked, trash -> restore ->
+  // purge with the native confirmation stubbed (declined: nothing deleted), forget, empty, settings.library.trashDays
+  if (bundledCore()) return { ok: true, skipped: 'frozen core: no python to seed the index' };
+  const out = {};
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lustra-selftest-trash-'));
+  const realConfirm = confirmLibrary;
+  const realPath = settings.download.path;
+  const asked = [];
+  const call = (expr) => js(`${expr}.then((r) => r, (e) => 'ERR ' + e.message)`);
+  const files = ['db_901.png', 'db_902.png', 'db_903.png'].map((n) => path.join(dir, n));
+  try {
+    settings.download.path = dir; // the download folder: its root takes '.lustra-trash' when the data dir is on another drive
+    const icon = path.join(__dirname, 'assets', 'icons', 'full-mask-orange-64.png');
+    files.forEach((f) => fs.copyFileSync(icon, f));
+    const gone = path.join(dir, 'db_904.png'); // a row whose file is not on disk
+    const stranger = path.join(dir, 'stranger.png'); // a file the index does not know
+    fs.copyFileSync(icon, stranger);
+    selfTestSeedIndex([...files, gone].map((p, i) => ({ module: 'db', id: String(901 + i), path: p, tags: 'selftest_trash', size: 100 })));
+    out.rpcBlocked = [];
+    for (const m of ['index.trash', 'index.restore', 'index.purgeTrash', 'index.forget']) {
+      out.rpcBlocked.push(await call(`window.lustra.rpc('${m}', { paths: ${JSON.stringify(files)}, all: true })`));
+    }
+    out.badPaths = [await call(`window.lustra.library.trash('x')`), await call(`window.lustra.library.restore(['relative.png'])`)];
+    const t = await call(`window.lustra.library.trash(${JSON.stringify([files[0], files[1], stranger])})`);
+    const moved = (t.trashed || []).map((x) => x.trashPath);
+    out.trash = { trashed: moved.length, refused: t.refused, gone: !fs.existsSync(files[0]) && !fs.existsSync(files[1]),
+      inTrash: moved.length === 2 && moved.every((p) => fs.existsSync(p)), strangerKept: fs.existsSync(stranger) };
+    out.listed = (await call(`window.lustra.rpc('index.search', { tags: 'selftest_trash', trash: true })`)).total;
+    const r = await call(`window.lustra.library.restore(${JSON.stringify(moved.slice(0, 1))})`);
+    out.restore = { restored: r.restored?.length, back: fs.existsSync(files[0]) };
+    confirmLibrary = async (message) => { asked.push(message); return false; };
+    out.purgeDeclined = await call(`window.lustra.library.purge(${JSON.stringify(moved.slice(1))})`);
+    out.keptAfterDecline = fs.existsSync(moved[1]);
+    confirmLibrary = async (message) => { asked.push(message); return true; };
+    const p = await call(`window.lustra.library.purge(${JSON.stringify(moved.slice(1))})`);
+    out.purge = { purged: p.purged, files: p.files, deleted: !fs.existsSync(moved[1]) };
+    const f = await call(`window.lustra.library.forget(${JSON.stringify([gone, files[0]])})`);
+    out.forget = { removed: f.removed, refused: f.refused };
+    const t2 = await call(`window.lustra.library.trash(${JSON.stringify([files[2]])})`);
+    const e = await call('window.lustra.library.emptyTrash()');
+    out.empty = { purged: e.purged, deleted: Boolean(t2.trashed?.[0]) && !fs.existsSync(t2.trashed[0].trashPath) };
+    out.asked = asked;
+    out.autoTimer = await purgeOldTrash('timer'); // the self-test never purges on the timer
+    out.autoSetting = await purgeOldTrash('setting');
+  } catch (err) {
+    out.error = String(err && err.stack || err);
+  } finally {
+    confirmLibrary = realConfirm;
+    settings.download.path = realPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+    await sidecar.call('index.forget', { paths: files }).catch(() => {}); // the rows left of the self-test's files
+  }
+  try {
+    out.days = {
+      tooMany: await call('window.lustra.settings.set({ library: { trashDays: 400 } })'),
+      notInt: await call('window.lustra.settings.set({ library: { trashDays: 2.5 } })'),
+      badPatch: await call("window.lustra.settings.set({ library: 'x' })"),
+      seven: await call('window.lustra.settings.set({ library: { trashDays: 7 } }).then((x) => x.settings.library.trashDays)'),
+      never: await call('window.lustra.settings.set({ library: { trashDays: 0 } }).then((x) => x.settings.library.trashDays)'),
+      back: await call('window.lustra.settings.set({ library: { trashDays: 30 } }).then((x) => x.settings.library.trashDays)'),
+    };
+  } catch (err) {
+    out.daysError = String(err && err.message || err);
+  }
+  const d = out.days || {};
+  out.ok = Boolean(!out.error && out.rpcBlocked.every((x) => /^ERR .*not allowed/.test(x)) && out.badPaths.every((x) => /invalid paths/.test(x))
+    && out.trash.trashed === 2 && out.trash.refused?.length === 1 && out.trash.gone && out.trash.inTrash && out.trash.strangerKept
+    && out.listed === 2 && out.restore.restored === 1 && out.restore.back && /cancelled/.test(out.purgeDeclined) && out.keptAfterDecline
+    && out.purge.purged === 1 && out.purge.files === 1 && out.purge.deleted && out.forget.removed === 1 && out.forget.refused?.length === 1
+    && out.empty.purged === 1 && out.empty.deleted && out.asked.length === 4 && /Dọn sạch/.test(out.asked[3])
+    && out.autoTimer === null && out.autoSetting?.purged === 0
+    && [d.tooMany, d.notInt].every((x) => /từ 0 đến 365/.test(x)) && /invalid settings patch/.test(d.badPatch)
+    && d.seven === 7 && d.never === 0 && d.back === 30 && settings.library.trashDays === 30);
   return out;
 }
 
@@ -3031,10 +3213,107 @@ async function selfTestIndexUi(js, shot) {
     await pause(200);
     out.groupRemoved = await js(`![...document.querySelectorAll('.job-group')].some((x) => x.textContent.includes('selftest_group_ui'))`).catch(() => null);
   }
-  out.ok = Boolean(out.dryRun?.buttons && /Đã kiểm/.test(out.dryRun?.text) && out.importDialog?.open && out.importDialog.modules >= 3
+  out.trash = await selfTestTrashUi(js, shot);
+  out.ok = Boolean(out.trash.ok && out.dryRun?.buttons && /Đã kiểm/.test(out.dryRun?.text) && out.importDialog?.open && out.importDialog.modules >= 3
     && out.importDialog.startDisabled === true && out.multi?.visible && out.multi.pills >= 1 && /\(2 site\)/.test(out.multi.label) && out.multi.warn
     && /\+1 site/.test(out.multi.summary) && out.multiOff === 'Tải xuống' && out.group?.cards === 2 && out.group.order.join() === '1,2'
     && out.group.waiting && /db → rx/.test(out.group.head) && out.groupRemoved === true);
+  return out;
+}
+
+async function selfTestTrashUi(js, shot) {
+  // the "Đã tải" page with real files: select (click, shift + click), Xoá -> toast "Hoàn tác" -> files back; the trash view (badges
+  // "còn X ngày", restore / purge / empty buttons), its lightbox, the settings row (select, trash size)
+  if (bundledCore()) return { ok: true, skipped: 'frozen core: no python to seed the index' };
+  const out = {};
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lustra-selftest-trashui-'));
+  const files = Array.from({ length: 4 }, (_, i) => path.join(dir, `db_${951 + i}.png`));
+  try {
+    const icon = path.join(__dirname, 'assets', 'icons', 'full-mask-orange-64.png');
+    files.forEach((f) => fs.copyFileSync(icon, f));
+    selfTestSeedIndex(files.map((p, i) => ({ module: 'db', id: String(951 + i), path: p, tags: 'selftest_trash_ui', size: 1500 })));
+    await sidecar.call('index.trash', { paths: files.slice(2), roots: [] }); // two files already in the trash
+    await js(`document.querySelector('[data-page="library"]').click()`);
+    out.library = await js(`(async () => {
+      const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+      const cards = () => [...document.querySelectorAll('#lib-grid .card')];
+      document.querySelector('#lib-q').value = 'selftest_trash_ui';
+      document.querySelector('#lib-search').click();
+      for (let i = 0; i < 50 && cards().length !== 2; i++) await pause(100);
+      cards()[0].click();
+      cards()[1].dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+      const label = document.querySelector('#lib-delete').textContent;
+      const selected = cards().filter((c) => c.classList.contains('sel')).length;
+      document.querySelector('#lib-delete').click();
+      let undo = null;
+      for (let i = 0; i < 50 && !undo; i++) {
+        await pause(100);
+        undo = [...document.querySelectorAll('#toasts .toast button')].find((b) => b.textContent === 'Hoàn tác');
+      }
+      const count = () => document.querySelector('#lib-trash-count').textContent;
+      for (let i = 0; i < 30 && (cards().length || count() !== '(4)'); i++) await pause(100);
+      const afterDelete = { cards: cards().length, count: document.querySelector('#lib-trash-count').textContent };
+      undo?.click();
+      for (let i = 0; i < 50 && cards().length !== 2; i++) await pause(100);
+      return { label, selected, undo: Boolean(undo), afterDelete, afterUndo: cards().length };
+    })()`);
+    out.backOnDisk = files.slice(0, 2).every((f) => fs.existsSync(f));
+    out.trashView = await js(`(async () => {
+      const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+      const cards = () => [...document.querySelectorAll('#lib-grid .card')];
+      document.querySelector('#lib-view button[data-view="trash"]').click();
+      for (let i = 0; i < 50 && !(cards().length === 2 && cards().every((c) => c.querySelector('.b.left'))); i++) await pause(100);
+      const shown = (s) => !document.querySelector(s).hidden;
+      return { cards: cards().length, badges: cards().map((c) => c.querySelector('.b.left')?.textContent || ''),
+        info: document.querySelector('#lib-info').textContent, count: document.querySelector('#lib-trash-count').textContent,
+        order: document.querySelector('#lib-order').value,
+        tools: { delete: shown('#lib-delete'), restore: shown('#lib-restore'), purge: shown('#lib-purge'), empty: shown('#lib-empty') } };
+    })()`);
+    await new Promise((r) => setTimeout(r, 400));
+    await shot('25-library-trash');
+    // the thumbnails are read from the trash folder (lazy images: loaded once the page is drawn)
+    out.trashView.thumbs = await js(`(async () => {
+      const imgs = () => [...document.querySelectorAll('#lib-grid .card img')];
+      for (let i = 0; i < 50 && imgs().filter((x) => x.naturalWidth === 64).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+      return imgs().filter((x) => x.naturalWidth === 64).length;
+    })()`);
+    out.lightbox = await js(`(async () => {
+      document.querySelector('#lib-grid .card').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      return { text: document.querySelector('#modal-card').textContent,
+        buttons: [...document.querySelectorAll('#modal-card .modal-actions .btn')].map((b) => b.textContent) };
+    })()`);
+    await new Promise((r) => setTimeout(r, 400));
+    await shot('26-library-trash-item');
+    await js('closeModal()');
+    await js(`document.querySelector('#lib-view button[data-view="library"]').click(); document.querySelector('#lib-q').value = ''`);
+    await js(`document.querySelector('[data-page="settings"]').click()`);
+    out.settings = await js(`(async () => {
+      const info = document.querySelector('#index-trash-info');
+      for (let i = 0; i < 50 && !/file/.test(info.textContent); i++) await new Promise((r) => setTimeout(r, 100));
+      const sel = document.querySelector('#s-trash-days');
+      sel.scrollIntoView({ block: 'center' });
+      return { value: sel.value, options: sel.options.length, info: info.textContent, emptyEnabled: !document.querySelector('#index-empty-trash').disabled,
+        row: [...document.querySelectorAll('#index-stats tr')].map((r) => r.textContent).find((t) => t.startsWith('Thùng rác')) || '' };
+    })()`);
+    await new Promise((r) => setTimeout(r, 400));
+    await shot('27-trash-settings');
+  } catch (err) {
+    out.error = String(err && err.stack || err);
+  } finally {
+    await sidecar.call('index.purgeTrash', { all: true }).catch(() => {});
+    fs.rmSync(dir, { recursive: true, force: true });
+    await sidecar.call('index.forget', { paths: files }).catch(() => {});
+  }
+  const lib = out.library || {};
+  const tv = out.trashView || {};
+  out.ok = Boolean(!out.error && lib.label === 'Xoá (2)' && lib.selected === 2 && lib.undo && lib.afterDelete?.cards === 0
+    && lib.afterDelete?.count === '(4)' && lib.afterUndo === 2 && out.backOnDisk && tv.cards === 2 && tv.badges?.every((b) => b === 'còn 30 ngày')
+    && tv.thumbs === 2 && /2 file trong thùng rác/.test(tv.info) && tv.count === '(2)' && tv.order === 'trashed'
+    && !tv.tools?.delete && tv.tools?.restore && tv.tools?.purge && tv.tools?.empty
+    && /Vị trí cũ: /.test(out.lightbox?.text) && out.lightbox?.buttons?.join() === 'Khôi phục,Xoá vĩnh viễn,Đóng'
+    && out.settings?.value === '30' && out.settings?.options === 6 && /2 file/.test(out.settings?.info) && out.settings?.emptyEnabled
+    && /2 file/.test(out.settings?.row));
   return out;
 }
 
@@ -3094,6 +3373,7 @@ if (!app.requestSingleInstanceLock()) {
     registerThumbProtocol();
     registerIpc();
     registerIndexIpc();
+    registerLibraryIpc();
     await applyProxyToSession();
     sidecar.start();
     setupMenu();
@@ -3104,8 +3384,14 @@ if (!app.requestSingleInstanceLock()) {
     sidecar.ready.then(() => maybeAutoUpdateTags()).catch(() => {});
     if (!process.env.LUSTRA_SELFTEST_DIR) refreshTagSchedule(); // a self-test never touches the user's crontab
     sidecar.ready.then(() => {
-      setTimeout(() => runDueSaved().catch(() => {}), 60000); // saved queries due while the app was closed
-      setInterval(() => runDueSaved().catch(() => {}), AUTO_CHECK_MS);
+      setTimeout(() => { // saved queries due while the app was closed, the trash past its time
+        runDueSaved().catch(() => {});
+        purgeOldTrash('timer').catch(() => {});
+      }, 60000);
+      setInterval(() => {
+        runDueSaved().catch(() => {});
+        purgeOldTrash('timer').catch(() => {});
+      }, AUTO_CHECK_MS);
     }).catch(() => {});
   });
   app.on('window-all-closed', () => app.quit());

@@ -7,12 +7,16 @@ Lustra: local download index (lustra/dlindex.py, docs/plans/search-engine.md pha
 - download pipeline: finished files are recorded from the scan's post info; '-skip_known' (off by default) skips posts known by
   module + id or by md5 (any module) whose file is still on disk
 - sidecar methods index.search / index.stats, desktop app wiring (allowlist, -skip_known)
+- schema 2 (a schema 1 index is migrated, rows kept) and the trash of the "Đã tải" page: trash / restore / purge_trash / forget,
+  trashed rows left out of the library (find_known, search, stats, rows_for_posts, posts_after), trash folders on the file's drive
+  (EXDEV goes on to the next one), the sidecar methods and their desktop wiring (main only, confirmations, trashDays)
 Run: python -m unittest lustra.tests.test_dlindex
 """
 #########################################
 #
 #
 
+import errno
 import os
 import pathlib
 import re
@@ -461,6 +465,271 @@ class PipelineTests(TestCase):
         self.assertFalse((self.tmp / 'data' / dlindex.INDEX_DIR_NAME).exists())
 
 
+# ---------------- schema 2, the trash ----------------
+
+class TrashTests(_TempDir):
+    def setUp(self) -> None:
+        super().setUp()
+        self.trash_dir = self.tmp / dlindex.TRASH_DIR_NAME
+        self.root = self.tmp / 'files'
+
+    def _index(self) -> dlindex.DownloadIndex:
+        return dlindex.DownloadIndex(self.db_path)
+
+    def _fill(self, n: int = 3) -> list[pathlib.Path]:
+        files = [self._file(f'rx_{i}.jpg') for i in range(1, n + 1)]
+        self._write([_rec('rx', i, f, md5=_md5(i), tags=f'common t{i}', size=100, at=100 + i) for i, f in enumerate(files, 1)])
+        return files
+
+    def _row(self, path: str | pathlib.Path) -> dict:
+        with self._index() as index:
+            return index.rows_for_paths([str(path)])[str(path)]
+
+    @staticmethod
+    def _table(path: pathlib.Path) -> list[tuple]:
+        conn = sqlite3.connect(path)
+        try:
+            return [tuple(r[1:]) for r in conn.execute('PRAGMA table_info(files)')]
+        finally:
+            conn.close()
+
+    def test_a_schema_1_index_is_migrated(self) -> None:
+        f = self._file('rx_1.jpg')
+        self.db_path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            for statement in dlindex.SCHEMA:
+                conn.execute(statement)
+            conn.execute("INSERT INTO files (module, post_id, md5, path, tags, downloaded_at) VALUES ('rx', 1, ?, ?, 'a', 5)", (_md5(1), str(f)))
+            conn.execute("INSERT INTO tag_names (name) VALUES ('a')")
+            conn.execute('INSERT INTO file_tags (tag_id, file_id) VALUES (1, 1)')
+            conn.execute('PRAGMA user_version = 1')
+            conn.commit()
+        finally:
+            conn.close()
+        with self._index() as index:  # a reader migrates it in place
+            items = index.search('a')['items']
+        self.assertEqual([(str(f), '1', None, '', True)], [(x['path'], x['id'], x['trashedAt'], x['origPath'], x['exists']) for x in items])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(2, conn.execute('PRAGMA user_version').fetchone()[0])
+            self.assertIn('files_trashed_at', [r[1] for r in conn.execute('PRAGMA index_list(files)')])
+            self.assertEqual([(1, None, None)], conn.execute('SELECT id, trashed_at, orig_path FROM files').fetchall())
+        finally:
+            conn.close()
+        migrated = self._table(self.db_path)
+        self.assertEqual(['trashed_at', 'orig_path'], [c[0] for c in migrated[-2:]])
+        new = self.tmp / 'new' / dlindex.INDEX_FILE_NAME  # a new index: the same table
+        with dlindex.DownloadIndex(new, create=True) as index:
+            index.add_many([_rec('rx', 1, f)])
+        self.assertEqual(migrated, self._table(new))
+
+    def test_trash_moves_the_file_and_marks_the_row(self) -> None:
+        a, b, _ = self._fill()
+        before = self._row(a)
+        with self._index() as index:
+            res = index.trash([str(a), str(b)], now=1000.0)
+        self.assertEqual(([], []), (res['failed'], res['refused']))
+        moved = {x['path']: x['trashPath'] for x in res['trashed']}
+        self.assertEqual({str(a), str(b)}, set(moved))
+        trash_a = pathlib.Path(moved[str(a)])
+        self.assertFalse(a.exists())
+        # the data dir is on the same drive: its trash folder, named '<row id>_<name>'
+        self.assertEqual((self.trash_dir, f'1_{a.name}', b'xxx'), (trash_a.parent, trash_a.name, trash_a.read_bytes()))
+        row = self._row(trash_a)
+        self.assertEqual((str(trash_a), str(a), 1000.0, a.name, True), (row['path'], row['origPath'], row['trashedAt'], row['name'], row['exists']))
+        kept = ('module', 'id', 'md5', 'tags', 'size', 'downloadedAt')
+        self.assertEqual({k: before[k] for k in kept}, {k: row[k] for k in kept})
+
+    def test_trashed_rows_leave_the_library(self) -> None:
+        a, _, _ = self._fill()
+        with self._index() as index:
+            index.trash([str(a)], now=500.0)
+            self.assertEqual(['3', '2'], [x['id'] for x in index.search('common')['items']])
+            self.assertEqual(0, index.search('t1')['total'])
+            trashed = index.search('common', trash=True, order='trashed')
+            self.assertEqual((1, '1', str(a)), (trashed['total'], trashed['items'][0]['id'], trashed['items'][0]['origPath']))
+            # a post whose file is in the trash is not known any more: it may be downloaded again
+            by_id, by_md5 = index.find_known('rx', ['1', '2'], [_md5(1), _md5(2)])
+            self.assertEqual((['2'], [_md5(2)]), (sorted(by_id), sorted(by_md5)))
+            self.assertEqual(['2'], sorted(index.rows_for_posts('rx', ['1', '2'])))
+            self.assertEqual([2, 3], [r[0] for r in index.posts_after('rx')])
+            st = index.stats()
+        self.assertEqual((2, 2, 2, 200, 102, 103), (st['files'], st['posts'], st['withMd5'], st['bytes'], st['first'], st['last']))
+        self.assertEqual({'files': 1, 'bytes': 100, 'oldest': 500.0}, st['trash'])
+        self.assertEqual([('rx', 2, 200)], [(m['module'], m['files'], m['bytes']) for m in st['modules']])
+        with dlindex.DownloadIndex(self.tmp / 'none' / dlindex.INDEX_FILE_NAME) as index:
+            self.assertEqual({'files': 0, 'bytes': 0, 'oldest': None}, index.stats()['trash'])
+
+    def test_paths_the_index_does_not_know_are_refused(self) -> None:
+        a, b = self._fill(2)
+        stranger = self._file('stranger.jpg')
+        gone = self.root / 'gone.jpg'
+        self._write([_rec('rx', 9, gone)])
+        with self._index() as index:
+            res = index.trash([str(stranger), str(gone), str(self.root / 'nope.jpg'), str(a)])
+            self.assertEqual([str(a)], [x['path'] for x in res['trashed']])
+            self.assertEqual([str(stranger), str(gone), str(self.root / 'nope.jpg')], res['refused'])
+            trash_a = res['trashed'][0]['trashPath']
+            # already in the trash: by its old path (no row there any more) or its path in the trash
+            self.assertEqual([str(a), trash_a], index.trash([str(a), trash_a])['refused'])
+            # restore: only rows of the trash
+            self.assertEqual([str(b), str(stranger)], index.restore([str(b), str(stranger)])['refused'])
+        self.assertTrue(stranger.exists() and b.exists())
+
+    def test_trash_folders(self) -> None:
+        f = self._file('sub/x.jpg')
+        hidden = dlindex.TRASH_HIDDEN_NAME
+        real = dlindex._device
+        with self._index() as index:
+            self.assertEqual([str(self.trash_dir), str(self.root / hidden), str(f.parent / hidden)], index.trash_folders(str(f), [str(self.root)]))
+            # the data dir on another drive: the root of the download folder that holds the file, else next to the file
+            with mock.patch.object(dlindex, '_device', lambda p: -1 if p == str(self.trash_dir) else real(p)):
+                self.assertEqual([str(self.root / hidden), str(f.parent / hidden)], index.trash_folders(str(f), [str(self.root)]))
+                self.assertEqual([str(f.parent / hidden)], index.trash_folders(str(f), [str(self.tmp / 'elsewhere')]))
+                self.assertEqual([str(f.parent / hidden)], index.trash_folders(str(f), [str(f.parent)]))
+            self.assertEqual([], index.trash_folders(str(self.tmp / 'missing.jpg')))
+
+    def test_a_cross_device_rename_goes_on_to_the_next_folder(self) -> None:
+        a, b = self._fill(2)
+        real = os.replace
+
+        def replace(src, dst) -> None:  # the data dir is on another drive after all (a mount point)
+            if str(dst).startswith(str(self.trash_dir)):
+                raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+            real(src, dst)
+
+        def nowhere(src, dst) -> None:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV))
+
+        with self._index() as index:
+            with mock.patch('lustra.dlindex.os.replace', replace):
+                res = index.trash([str(a)], roots=[str(self.root)])
+            self.assertEqual([str(self.root / dlindex.TRASH_HIDDEN_NAME / f'1_{a.name}')], [x['trashPath'] for x in res['trashed']])
+            with mock.patch('lustra.dlindex.os.replace', nowhere):  # no folder takes it: never copied, the file and its row stay
+                res = index.trash([str(b)], roots=[str(self.root)])
+        self.assertEqual(([], [str(b)]), (res['trashed'], [x['path'] for x in res['failed']]))
+        self.assertIn('OSError', res['failed'][0]['error'])
+        self.assertTrue(b.exists())
+        self.assertIsNone(self._row(b)['trashedAt'])
+
+    def test_a_download_while_trashed_gets_its_own_row(self) -> None:
+        a, = self._fill(1)
+        with self._index() as index:
+            trash_a = index.trash([str(a)])['trashed'][0]['trashPath']
+        a.write_bytes(b'new file')  # the post is downloaded again into the same file name
+        self._write([_rec('rx', 1, a, md5=_md5(1), tags='again')])
+        with self._index() as index:
+            st = index.stats()
+            self.assertEqual((1, 1), (st['files'], st['trash']['files']))
+            self.assertEqual({'1': str(a)}, index.find_known('rx', ['1'])[0])
+            res = index.restore([trash_a])
+            # the name is taken: the file of the trash comes back next to it
+            restored = self.root / 'rx_1_1.jpg'
+            self.assertEqual([{'path': trash_a, 'restoredPath': str(restored)}], res['restored'])
+            self.assertEqual((2, 0), (index.stats()['files'], index.stats()['trash']['files']))
+        self.assertEqual((b'new file', b'xxx'), (a.read_bytes(), restored.read_bytes()))
+        self.assertFalse(os.path.exists(trash_a))
+
+    def test_restore(self) -> None:
+        f = self._file('sub/rx_5.jpg')
+        self._write([_rec('rx', 5, f, tags='five')])
+        with self._index() as index:
+            trash_f = index.trash([str(f)])['trashed'][0]['trashPath']
+            f.parent.rmdir()  # the folder is gone: created again
+            self.assertEqual([str(f)], [x['restoredPath'] for x in index.restore([trash_f])['restored']])
+            row = index.search('five')['items'][0]
+            self.assertEqual((str(f), None, ''), (row['path'], row['trashedAt'], row['origPath']))
+            # a file that is not in the index took the name meanwhile
+            trash_f = index.trash([str(f)])['trashed'][0]['trashPath']
+            f.write_bytes(b'other')
+            self.assertEqual([str(f.parent / 'rx_5_1.jpg')], [x['restoredPath'] for x in index.restore([trash_f])['restored']])
+            self.assertEqual(b'other', f.read_bytes())
+            # the file left the trash by another way: it stays a row of the trash
+            trash_f = index.trash([str(f.parent / 'rx_5_1.jpg')])['trashed'][0]['trashPath']
+            os.remove(trash_f)
+            res = index.restore([trash_f])
+            self.assertEqual(([], [trash_f]), (res['restored'], [x['path'] for x in res['failed']]))
+            self.assertEqual(1, index.stats()['trash']['files'])
+
+    def test_purge_by_age_by_paths_and_all(self) -> None:
+        a, b, c, d = self._fill(4)
+        now = time.time()
+        with self._index() as index:
+            old = index.trash([str(a)], now=now - 10 * dlindex.DAY_SECONDS)['trashed'][0]['trashPath']
+            mid = index.trash([str(b)], now=now - 3 * dlindex.DAY_SECONDS)['trashed'][0]['trashPath']
+            index.trash([str(c), str(d)], now=now)
+            res = index.purge_trash(older_than_days=7, now=now)
+            self.assertEqual((1, 1, 3, []), (res['purged'], res['files'], res['bytes'], res['failed']))
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(mid))
+            self.assertEqual(1, index.purge_trash(paths=[mid, str(c)])['purged'])  # c: its old path, not a path of the trash
+            self.assertEqual(2, index.purge_trash(all=True)['purged'])
+            self.assertEqual(0, index.stats()['trash']['files'])
+            conn = index._connection()
+            self.assertEqual((0, 0), (conn.execute('SELECT COUNT(*) FROM files').fetchone()[0],
+                                      conn.execute('SELECT COUNT(*) FROM file_tags').fetchone()[0]))
+            for bad in ({}, {'all': True, 'older_than_days': 1}, {'paths': [], 'all': True}):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    index.purge_trash(**bad)
+        self.assertEqual([], list(self.trash_dir.iterdir()))
+
+    def test_purge_keeps_what_it_cannot_delete(self) -> None:
+        a, b, c = self._fill(3)
+        real_remove = os.remove
+        with self._index() as index:
+            ta, tb = [x['trashPath'] for x in index.trash([str(a), str(b)])['trashed']]
+            real_remove(tb)  # deleted from the trash folder by hand: only the row goes
+            # a row of the trash that points outside any trash folder: its row goes, the file is never deleted
+            index._connection().execute('UPDATE files SET trashed_at = 1 WHERE path = ?', (str(c),))
+
+            def remove(path) -> None:
+                if path == ta:
+                    raise PermissionError(errno.EACCES, 'in use')
+                real_remove(path)
+
+            with mock.patch('lustra.dlindex.os.remove', remove):
+                res = index.purge_trash(all=True)
+            self.assertEqual((2, 0, 1), (res['purged'], res['files'], res['kept']))
+            self.assertEqual([ta], [x['path'] for x in res['failed']])
+            self.assertEqual([ta], [x['path'] for x in index.search('', trash=True)['items']])
+        self.assertTrue(os.path.exists(ta) and c.exists())
+
+    def test_purge_removes_an_empty_trash_folder(self) -> None:
+        a, = self._fill(1)
+        real = dlindex._device
+        with self._index() as index, mock.patch.object(dlindex, '_device', lambda p: -1 if p == str(self.trash_dir) else real(p)):
+            moved = index.trash([str(a)], roots=[str(self.root)])['trashed'][0]['trashPath']
+            self.assertEqual(self.root / dlindex.TRASH_HIDDEN_NAME, pathlib.Path(moved).parent)
+            self.assertEqual(1, index.purge_trash(all=True)['files'])
+        self.assertFalse((self.root / dlindex.TRASH_HIDDEN_NAME).exists())
+
+    def test_forget(self) -> None:
+        a, b = self._fill(2)
+        gone = self.root / 'gone.jpg'
+        unknown = self.root / 'unknown.jpg'
+        self._write([_rec('rx', 9, gone, tags='gone common')])
+        with self._index() as index:
+            res = index.forget([str(gone), str(a), str(unknown)])
+            self.assertEqual((1, [str(a), str(unknown)]), (res['removed'], res['refused']))
+            self.assertEqual(0, index.search('gone')['total'])
+            tb = index.trash([str(b)])['trashed'][0]['trashPath']
+            os.remove(tb)  # a row of the trash whose file vanished
+            self.assertEqual(1, index.forget([tb])['removed'])
+            self.assertEqual(0, index.stats()['trash']['files'])
+        self.assertTrue(a.exists())
+
+    def test_no_index(self) -> None:
+        f = self._file('x.jpg')
+        with self._index() as index:
+            self.assertEqual([str(f)], index.trash([str(f)])['refused'])
+            self.assertEqual([str(f)], index.restore([str(f)])['refused'])
+            self.assertEqual([str(f)], index.forget([str(f)])['refused'])
+            self.assertEqual(0, index.purge_trash(all=True)['purged'])
+        self.assertFalse(self.db_path.exists())
+        self.assertTrue(f.exists())
+
+
 # ---------------- cli, sidecar, desktop app ----------------
 
 class FrontendTests(TestCase):
@@ -487,6 +756,83 @@ class FrontendTests(TestCase):
             for bad in ({'module': 'RX!'}, {'pageSize': 'x'}, {'page': [1]}):
                 with self.subTest(bad=bad), self.assertRaises(server.RpcError):
                     server.METHODS['index.search'](bad)
+
+    def test_trash_sidecar_methods(self) -> None:
+        from lustra import server
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': tmp}):
+            lib = pathlib.Path(tmp) / 'lib'
+            lib.mkdir()
+            files = []
+            for i in (1, 2):
+                (lib / f'rx_{i}.jpg').write_bytes(b'abc')
+                files.append(str(lib / f'rx_{i}.jpg'))
+            self.assertEqual(files, server.METHODS['index.trash']({'paths': files})['refused'])  # no index yet: nothing is touched
+            with dlindex.DownloadIndex(create=True) as index:
+                index.add_many([_rec('rx', i, f, tags='a') for i, f in enumerate(files, 1)])
+            res = server.METHODS['index.trash']({'paths': files, 'roots': [str(lib)]})
+            moved = [x['trashPath'] for x in res['trashed']]
+            self.assertEqual(2, len(moved))
+            self.assertTrue(all(pathlib.Path(p).parent == pathlib.Path(tmp) / dlindex.TRASH_DIR_NAME for p in moved))
+            self.assertEqual((2, 0), (server.METHODS['index.search']({'trash': True})['total'], server.METHODS['index.search']({})['total']))
+            self.assertEqual(2, server.METHODS['index.stats']({})['trash']['files'])
+            self.assertEqual([files[0]], [x['restoredPath'] for x in server.METHODS['index.restore']({'paths': moved[:1]})['restored']])
+            self.assertEqual(0, server.METHODS['index.purgeTrash']({'days': 1})['purged'])
+            self.assertEqual(1, server.METHODS['index.purgeTrash']({'paths': moved[1:]})['purged'])
+            self.assertEqual(0, server.METHODS['index.purgeTrash']({'all': True})['purged'])
+            os.remove(files[0])
+            self.assertEqual(1, server.METHODS['index.forget']({'paths': files[:1]})['removed'])
+            many = [files[0]] * (server.INDEX_PATHS_MAX + 1)
+            bad = [('index.trash', {}), ('index.trash', {'paths': files[0]}), ('index.trash', {'paths': ['relative.jpg']}),
+                   ('index.trash', {'paths': many}), ('index.trash', {'paths': files, 'roots': files[0]}), ('index.restore', {'paths': [1]}),
+                   ('index.forget', {'paths': []}), ('index.purgeTrash', {}), ('index.purgeTrash', {'days': 1, 'all': True}),
+                   ('index.purgeTrash', {'days': -1}), ('index.purgeTrash', {'days': True}), ('index.purgeTrash', {'all': 'yes'}),
+                   ('index.purgeTrash', {'paths': ['relative.jpg']}), ('index.purgeTrash', {'all': False})]
+            for method, params in bad:
+                with self.subTest(method=method, params=str(params)[:80]), self.assertRaises(server.RpcError):
+                    server.METHODS[method](params)
+
+    def test_trash_desktop_wiring(self) -> None:
+        main_js = (ROOT / 'app' / 'main.js').read_text(encoding='utf-8')
+        allowed = re.search(r"handle\('rpc'.*?const allowed = \[(.*?)\];", main_js, re.S).group(1)
+        for method in ('index.trash', 'index.restore', 'index.purgeTrash', 'index.forget'):
+            self.assertNotIn(f"'{method}'", allowed)  # main only: the library:* handlers
+        for channel in ('library:trash', 'library:restore', 'library:forget', 'library:purge', 'library:emptyTrash'):
+            self.assertIn(f"handle('{channel}'", main_js)
+        for channel in ('library:forget', 'library:purge', 'library:emptyTrash'):  # cannot be undone: a native confirmation first
+            body = re.search(rf"handle\('{channel}'.*?\n  \}}\);", main_js, re.S).group(0)
+            self.assertIn('await confirmLibrary(', body)
+        for channel in ('library:trash', 'library:restore'):  # reversible: no dialog, paths checked
+            line = re.search(rf"handle\('{channel}'.*", main_js).group(0)
+            self.assertNotIn('confirm', line)
+            self.assertIn('libraryPaths(paths)', line)
+        self.assertIn('library: { trashDays: 30 },', main_js)  # settings.library.trashDays default
+        self.assertIn('const validTrashDays = (d) => Number.isInteger(d) && d >= 0 && d <= TRASH_DAYS_MAX;', main_js)
+        self.assertIn('const TRASH_DAYS_MAX = 365;', main_js)
+        # 60 s after the core is up, then on the 5-minute tick (purgeOldTrash itself waits 12 h between two timer runs)
+        startup = re.search(r'sidecar\.ready\.then\(\(\) => \{\n\s+setTimeout\(\(\) => \{.*?\}, AUTO_CHECK_MS\);', main_js, re.S).group(0)
+        self.assertEqual(2, startup.count("purgeOldTrash('timer')"))
+        self.assertIn('}, 60000);', startup)
+        self.assertIn('const TRASH_PURGE_EVERY_MS = 12 * 3600e3;', main_js)
+        self.assertIn("purgeOldTrash('setting')", main_js)
+        preload = (ROOT / 'app' / 'preload.js').read_text(encoding='utf-8')
+        for channel in ('library:trash', 'library:restore', 'library:forget', 'library:purge', 'library:emptyTrash'):
+            self.assertIn(f"invoke('{channel}'", preload)
+        html = (ROOT / 'app' / 'renderer' / 'index.html').read_text(encoding='utf-8')
+        app_js = (ROOT / 'app' / 'renderer' / 'app.js').read_text(encoding='utf-8')
+        for el in ('lib-view', 'lib-trash-count', 'lib-sel-page', 'lib-sel-none', 'lib-delete', 'lib-restore', 'lib-purge', 'lib-empty',
+                   's-trash-days', 'index-trash-info', 'index-empty-trash'):
+            self.assertIn(f'id="{el}"', html)
+            self.assertIn(f"'#{el}", app_js)
+        self.assertIn('<option value="trashed" hidden>', html)
+        self.assertIn("trash: LIB.view === 'trash'", app_js)
+        for call in ('L.library.trash(', 'L.library.restore(', 'L.library.forget(', 'L.library.purge(', 'L.library.emptyTrash('):
+            self.assertIn(call, app_js)
+        mock_js = (ROOT / 'app' / 'renderer' / 'mock.js').read_text(encoding='utf-8')
+        library = re.search(r'\n    library: \{\n(.*?)\n    \},', mock_js, re.S).group(1)
+        for name in ('trash:', 'restore:', 'forget:', 'purge:', 'emptyTrash:'):
+            self.assertIn(name, library)
+        self.assertIn('library: { trashDays: 30 },', mock_js)
+        self.assertIn('p.trash === true', mock_js)
 
     def test_desktop_wiring(self) -> None:
         main_js = (ROOT / 'app' / 'main.js').read_text(encoding='utf-8')

@@ -28,6 +28,7 @@
     advanced: { pythonPath: '', verbose: false, catalogUrl: 'https://github.com/Leiz-Workspace/Lustra/releases/download/catalog/index.json' },
     ai: { model: 'claude-opus-5-5', maxUsd: 2 },
     genderModel: { url: 'http://127.0.0.1:8765', enabled: false },
+    library: { trashDays: 30 },
   };
   const secrets = {}; // abbr -> true (the real app never sends key values to the renderer either)
   let aiKey = false;
@@ -188,6 +189,21 @@
     }, 250);
   };
   const clean = { running: false, stop: false };
+  // files of the "Đã tải" page; trashedAt / origPath: in the trash (two of them already, one deleted 26 days ago)
+  const libExts = ['jpg', 'png', 'mp4', 'webm', 'mp3', 'jpg', 'gif', 'png'];
+  const libFiles = Array.from({ length: 25 }, (_, i) => {
+    const name = `${i % 3 ? 'db' : 'rx'}_${9000 - i}.${libExts[i % 8]}`;
+    const trashedAt = i >= 23 ? Date.now() / 1000 - (i === 23 ? 3600 : 86400 * 26) : null;
+    return { module: i % 3 ? 'db' : 'rx', id: String(9000 - i), md5: `${i}`.padStart(32, 'a'), name, ext: libExts[i % 8],
+      path: trashedAt ? `/home/user/.config/Lustra/trash/${i + 1}_${name}` : `/home/user/Downloads/Lustra/${name}`,
+      size: 350000 + i * 91000, tags: 'scenery sky cloud original', score: 10 + i, rating: 'g', date: '2026-11-10',
+      downloadedAt: Date.now() / 1000 - i * 3600, exists: i % 7 !== 6, trashedAt, origPath: trashedAt ? `/home/user/Downloads/Lustra/${name}` : '' };
+  });
+  const purgeMock = (pick) => {
+    const gone = libFiles.filter((f) => f.trashedAt && pick(f));
+    gone.forEach((f) => libFiles.splice(libFiles.indexOf(f), 1));
+    return { purged: gone.length, files: gone.filter((f) => f.exists).length, bytes: gone.reduce((n, f) => n + (f.exists ? f.size : 0), 0), failed: [], kept: 0 };
+  };
   window.lustra = {
     __mock: true,
     sidecarStatus: async () => ({ ok: true, info: { version: '2.0 r1 (mock)' } }),
@@ -257,22 +273,21 @@
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;
-        return { path: '~/.config/Lustra/index/downloads.sqlite', exists: true, schema: 1, files: 1834, posts: 1801, withMd5: 1790, tags: 9412,
+        const trashed = libFiles.filter((x) => x.trashedAt);
+        return { path: '~/.config/Lustra/index/downloads.sqlite', exists: true, schema: 2, files: 1834, posts: 1801, withMd5: 1790, tags: 9412,
           bytes: 2.9e9, dbBytes: 3.1e6, first: now - 86400 * 40, last: now - 3600, recording: true,
-          modules: [{ module: 'rx', files: 1210, bytes: 2.1e9, last: now - 3600 }, { module: 'db', files: 624, bytes: 0.8e9, last: now - 86400 * 3 }] };
+          modules: [{ module: 'rx', files: 1210, bytes: 2.1e9, last: now - 3600 }, { module: 'db', files: 624, bytes: 0.8e9, last: now - 86400 * 3 }],
+          trash: { files: trashed.length, bytes: trashed.reduce((n, x) => n + x.size, 0), oldest: trashed.length ? Math.min(...trashed.map((x) => x.trashedAt)) : null } };
       }
       if (method === 'index.search') {
-        // a few fake files (the browser cannot read local files: thumbnails fall back to the placeholder)
-        const exts = ['jpg', 'png', 'mp4', 'webm', 'mp3', 'jpg', 'gif', 'png'];
-        const all = Array.from({ length: 23 }, (_, i) => ({
-          module: i % 3 ? 'db' : 'rx', id: String(9000 - i), md5: `${i}`.padStart(32, 'a'), path: `/home/user/Downloads/Lustra/${i % 3 ? 'db' : 'rx'}_${9000 - i}.${exts[i % 8]}`,
-          name: `${i % 3 ? 'db' : 'rx'}_${9000 - i}.${exts[i % 8]}`, ext: exts[i % 8], size: 350000 + i * 91000, tags: 'scenery sky cloud original',
-          score: 10 + i, rating: 'g', date: '2026-11-10', downloadedAt: Date.now() / 1000 - i * 3600, exists: i % 7 !== 6 }));
+        // a few fake files (the browser cannot read local files: thumbnails fall back to the placeholder); trash: the deleted ones
         const q = String(p.tags || '').trim();
-        const hit = all.filter((x) => (!p.module || x.module === p.module) && (!q || q.split(/\s+/).every((t) => x.tags.split(' ').includes(t))));
+        const hit = libFiles.filter((x) => Boolean(x.trashedAt) === (p.trash === true) && (!p.module || x.module === p.module)
+          && (!q || q.split(/\s+/).every((t) => x.tags.split(' ').includes(t))));
+        if (p.order === 'trashed') hit.sort((a, b) => b.trashedAt - a.trashedAt);
         const size = p.pageSize || 50;
         const page = p.page || 0;
-        return { total: hit.length, page, pageSize: size, items: hit.slice(page * size, (page + 1) * size), terms: [] };
+        return { total: hit.length, page, pageSize: size, items: hit.slice(page * size, (page + 1) * size).map((x) => ({ ...x })), terms: [] };
       }
       throw new Error(`mock: ${method}`);
     },
@@ -329,6 +344,8 @@
         // like main's deepMerge: objects merge, arrays and scalars replace
         const merge = (a, b) => { for (const [k, v] of Object.entries(b)) { if (v && typeof v === 'object' && !Array.isArray(v)) { a[k] = a[k] || {}; merge(a[k], v); } else a[k] = v; } };
         const copy = JSON.parse(JSON.stringify(patch));
+        const days = copy.library?.trashDays;
+        if (days !== undefined && !(Number.isInteger(days) && days >= 0 && days <= 365)) throw new Error('Số ngày giữ thùng rác phải là số nguyên từ 0 đến 365');
         const maps = {}; // headers / cookies (shared and per website) are replaced as a whole, like main does
         for (const k of ['headers', 'cookies', 'siteHeaders', 'siteCookies']) if (copy.connection && k in copy.connection) { maps[k] = copy.connection[k] || {}; delete copy.connection[k]; }
         merge(settings, copy);
@@ -422,6 +439,46 @@
     },
     library: {
       open: async () => '', reveal: async () => true,
+      // trash / restore move the fake files; forget, purge and emptyTrash ask first (main: a native dialog, here window.confirm)
+      trash: async (paths) => {
+        await delay(80);
+        const r = { trashed: [], failed: [], refused: [] };
+        for (const p of paths) {
+          const x = libFiles.find((f) => f.path === p && !f.trashedAt && f.exists);
+          if (!x) { r.refused.push(p); continue; }
+          const trashPath = `/home/user/.config/Lustra/trash/${libFiles.indexOf(x) + 1}_${x.name}`;
+          Object.assign(x, { origPath: x.path, path: trashPath, trashedAt: Date.now() / 1000 });
+          r.trashed.push({ path: p, trashPath });
+        }
+        return r;
+      },
+      restore: async (paths) => {
+        await delay(80);
+        const r = { restored: [], failed: [], refused: [] };
+        for (const p of paths) {
+          const x = libFiles.find((f) => f.path === p && f.trashedAt);
+          if (!x) { r.refused.push(p); continue; }
+          Object.assign(x, { path: x.origPath, origPath: '', trashedAt: null });
+          r.restored.push({ path: p, restoredPath: x.path });
+        }
+        return r;
+      },
+      forget: async (paths) => {
+        if (!window.confirm(`(mock) Xoá ${paths.length} mục khỏi thư viện? Không thể hoàn tác.`)) throw new Error('cancelled');
+        const gone = libFiles.filter((f) => paths.includes(f.path) && !f.exists);
+        gone.forEach((f) => libFiles.splice(libFiles.indexOf(f), 1));
+        return { removed: gone.length, refused: paths.filter((p) => !gone.some((f) => f.path === p)) };
+      },
+      purge: async (paths) => {
+        if (!window.confirm(`(mock) Xoá vĩnh viễn ${paths.length} file? Không thể hoàn tác.`)) throw new Error('cancelled');
+        return purgeMock((f) => paths.includes(f.path));
+      },
+      emptyTrash: async () => {
+        const n = libFiles.filter((f) => f.trashedAt).length;
+        if (!n) return { purged: 0, files: 0, bytes: 0, failed: [], kept: 0 };
+        if (!window.confirm(`(mock) Dọn sạch thùng rác? ${n} file bị xoá vĩnh viễn.`)) throw new Error('cancelled');
+        return purgeMock(() => true);
+      },
     },
     index: {
       // clean: main confirms natively (here: window.confirm), then index.cleanProgress / index.cleanDone notifications

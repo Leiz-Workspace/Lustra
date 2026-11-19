@@ -17,7 +17,7 @@ cd app && npm install && node node_modules/electron/install.js   # tải binary 
 | Sidecar (debug) | `.venv/bin/python -m lustra.server`, rồi gõ `{"jsonrpc":"2.0","id":1,"method":"app.info"}` |
 | UI mock trên trình duyệt | `python3 -m http.server 5178 --directory app`, mở `http://localhost:5178/renderer/index.html` |
 | Tạo extension (CLI / skill) | `.venv/bin/python -m lustra.extgen survey https://site` → `new https://site --out .extgen-drafts` → `record .extgen-drafts/<id> --query "<tag>"` → `check .extgen-drafts/<id>` → `pack .extgen-drafts/<id> --out <file>.zip` |
-| Công cụ index các lần tải | `.venv/bin/python -m lustra.dlindex_tools clean --dry-run`, `import ~/Pictures/booru --module db`, `retag ~/Downloads/Lustra --source index` (mục 3b) |
+| Công cụ index các lần tải | `.venv/bin/python -m lustra.dlindex_tools clean --dry-run`, `import ~/Pictures/booru --module db`, `retag ~/Downloads/Lustra --source index`, `trash list`, `trash purge --days 30` (mục 3b) |
 | Worker tạo extension (debug) | `(echo '{"cmd":"start","url":"https://site","mode":"template"}'; sleep 120) \| .venv/bin/python -m lustra.aigen.worker` |
 
 Biến môi trường:
@@ -42,7 +42,7 @@ Biến môi trường:
 - `LUSTRA_SECRET_MODULE_ARGS`: object JSON `{"db": ["-api_key", "KEY,LOGIN"]}`, khoá API theo module cho job nhập thư viện (`dlindex_tools import`); đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
 - `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron. Bước `generator` kiểm: khoá chỉ ghi (không lộ ra renderer, không có dạng chữ thường), phiên bị từ chối (R10), phiên cho site trong danh sách chặn tên miền bị từ chối (R7, lời nhắn tiếng Việt), cài từ catalog từ xa không nhận URL / sha256 từ renderer, không cài được bản nháp chưa đạt, cài cần xác nhận, dọn dẹp.
-  Bước `indexTools` kiểm: `index.clean` / `index.cleanCancel` không gọi trực tiếp được qua `rpc`, dọn cần xác nhận (từ chối thì không chạy, chạy thử thì không hỏi), nhập thư viện chỉ với thư mục chọn từ hộp thoại và module hợp lệ, một job nhập chạy thử thật (lõi `index import --dry-run`) và thẻ job của nó, nhóm tải nhiều site (2–8 module, ép `-skip_known` / `-prefix`, site sau chờ site trước, renderer không tự tạo nhóm), giao diện (Kiểm tra / Dọn index ở Cài đặt, hộp nhập thư viện, chọn site thêm, khung nhóm trong hàng đợi; ảnh `20-…` tới `24-…`).
+  Bước `indexTools` kiểm: `index.clean` / `index.cleanCancel` không gọi trực tiếp được qua `rpc`, dọn cần xác nhận (từ chối thì không chạy, chạy thử thì không hỏi), nhập thư viện chỉ với thư mục chọn từ hộp thoại và module hợp lệ, một job nhập chạy thử thật (lõi `index import --dry-run`) và thẻ job của nó, nhóm tải nhiều site (2–8 module, ép `-skip_known` / `-prefix`, site sau chờ site trước, renderer không tự tạo nhóm), thùng rác (`index.trash` / `index.restore` / `index.purgeTrash` / `index.forget` không gọi được qua `rpc`, đường dẫn không hợp lệ hoặc không có trong index bị từ chối, xoá → khôi phục → xoá vĩnh viễn với hộp xác nhận thay bằng hàm giả: từ chối thì không xoá gì, `settings.library.trashDays` chỉ nhận số nguyên 0–365), giao diện (Kiểm tra / Dọn index ở Cài đặt, hộp nhập thư viện, chọn site thêm, khung nhóm trong hàng đợi, chọn thẻ ở trang Đã tải → Xoá → Hoàn tác, Thùng rác; ảnh `20-…` tới `27-…`). Bước này cần Python của mã nguồn để ghi index mẫu (lõi đóng băng: phần thùng rác bỏ qua).
 
 Chế độ AI của trình tạo extension cần gói `anthropic`: `uv pip install --python .venv/bin/python 'anthropic>=2.9'`, hoặc `pip install "lustra[ai]"`. Khoá Claude API nhập trong app (Cài đặt → AI tạo extension). Khoá được mã hoá bằng keyring của hệ điều hành; không có keyring thì app không lưu. Chế độ "Không dùng AI" không cần gói hay khoá này. Bản nháp nằm ở `<data>/extgen/drafts/`.
 
@@ -172,7 +172,7 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
 
 ## 3b. Index các lần tải
 - File: `<data dir>/index/downloads.sqlite` (kèm `-wal`, `-shm` khi đang có tiến trình mở). Mỗi file tải xong ở chế độ `full` được ghi một dòng (module, id, md5, đường dẫn, tags, score, rating, ngày post, thời điểm tải). Không đọc nội dung file, không gửi dữ liệu ra ngoài.
-- Bỏ qua post đã tải: CLI `-skip_known`; app: ô "Bỏ qua file đã tải" trong tuỳ chọn tải, mặc định ở Cài đặt → Index các lần tải. Post chỉ bị bỏ qua khi file đã ghi trong index vẫn còn trên đĩa, nên xoá file là cách tải lại.
+- Bỏ qua post đã tải: CLI `-skip_known`; app: ô "Bỏ qua file đã tải" trong tuỳ chọn tải, mặc định ở Cài đặt → Index các lần tải. Post chỉ bị bỏ qua khi file đã ghi trong index vẫn còn trên đĩa và không nằm trong thùng rác, nên xoá file (trên đĩa hoặc ở trang Đã tải) là cách tải lại.
   ```bash
   .venv/bin/python -m lustra -module db -skip_known -path ~/Downloads/Lustra -- cat_ears rating:g
   ```
@@ -194,6 +194,16 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
   .venv/bin/python -m lustra.dlindex_tools retag ~/Downloads/Lustra --source index
   ```
   `--source both` (mặc định: index trước, file info JSON sau), `--types artist,character` (theo loại tag, cần danh sách tag), `--module` (bộ lọc tag của module khi `--types auto`). Exit code `3` khi có file không tìm được info. Re-tag / un-tag / sắp xếp file trong GUI Tk tự cập nhật đường dẫn trong index.
+- **Xoá file, thùng rác** (trang Đã tải): bấm thẻ để chọn (Shift + bấm: chọn một dải; **Chọn cả trang**), bấm đúp để xem. **Xoá (N)** hoặc phím Delete chuyển file vào thùng rác, thông báo có nút **Hoàn tác**. **Thùng rác (N)** liệt kê file đã xoá (vị trí cũ, "còn X ngày"): **Khôi phục** đưa file về chỗ cũ (thư mục đã mất thì tạo lại; tên đã có file khác thì thêm `_1`, `_2`…), **Xoá vĩnh viễn** và **Dọn sạch thùng rác…** xoá file khỏi đĩa sau hộp xác nhận. Thẻ "đã mất" (file không còn trên đĩa): **Xoá** chỉ bỏ dòng khỏi index, cũng có xác nhận.
+  - Thùng rác do Lustra quản lý, không phải thùng rác của hệ điều hành. File chỉ được đổi tên thành `<id dòng>_<tên>`, không bao giờ chép sang ổ khác: vào `<data dir>/trash/` nếu cùng ổ với file; nếu không, vào `.lustra-trash` ở gốc thư mục tải (Cài đặt → Tải xuống mặc định → Thư mục) nếu file nằm trong đó, cùng ổ; nếu không nữa thì `.lustra-trash` cạnh file. Nhập thư viện bỏ qua thư mục ẩn nên không nhập lại file trong thùng rác.
+  - Trong index, dòng của file trong thùng rác giữ nguyên metadata: `path` là chỗ file đang nằm, `orig_path` là chỗ cũ, `trashed_at` là lúc xoá. File trong thùng rác không còn tính là đã tải (`-skip_known`, tìm ở trang Đã tải, số liệu, tag học từ file đã tải); tải lại post đó thì có một dòng mới. Dọn index bỏ cả dòng thùng rác có file đã bị xoá bằng tay.
+  - Tự dọn: Cài đặt → Index các lần tải → **Tự dọn thùng rác sau** 7 / 14 / 30 (mặc định) / 60 / 90 ngày hoặc Không tự xoá (`settings.library.trashDays`, 0 = không tự xoá). App xoá file quá hạn 60 giây sau khi lõi sẵn sàng, sau đó tối đa 12 giờ một lần, và ngay khi số ngày được giảm. CLI:
+    ```bash
+    .venv/bin/python -m lustra.dlindex_tools trash list
+    .venv/bin/python -m lustra.dlindex_tools trash purge --days 30
+    ```
+    `--days 0` hoặc `--all`: xoá mọi file trong thùng rác; `--json`. Exit code `3` khi có file không xoá được (đang mở). Sidecar: `index.trash`, `index.restore`, `index.purgeTrash`, `index.forget` (app chỉ gọi từ tiến trình chính, renderer không gọi trực tiếp được), `index.search` với `"trash": true`.
+  - Schema index lên 2 (thêm cột `trashed_at`, `orig_path`): index cũ được nâng cấp tại chỗ ở lần mở đầu tiên, dòng cũ giữ nguyên. Bản app cũ vẫn đọc được index mới, nhưng hiện file trong thùng rác như file thường.
 - **Tải nhiều site**: Tìm kiếm → Bộ lọc & tuỳ chọn tải → **Tải thêm từ site khác**, chọn thêm site rồi bấm **Tải xuống (N site)**. Mỗi site một job, chạy lần lượt, luôn bỏ qua file đã tải và đặt tiền tố module cho tên file; post trùng md5 với file site trước đã tải thì không tải lại. Thử truy vấn trên từng site bằng Preview trước: tên tag, metatag và alias khác nhau giữa các site.
 
 ## 3c. Model nhận diện giới tính (`-gender_mode model`)

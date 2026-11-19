@@ -74,6 +74,13 @@ contextBridge.exposeInMainWorld('lustra', {
     // files of the download index: open with the default app (media extensions only) or show in the file manager
     open: (file) => invoke('library:open', file),
     reveal: (file) => invoke('library:reveal', file),
+    // delete: paths of index rows only (the core refuses others). trash / restore are reversible; forget (rows of files already
+    // gone), purge (files of the trash) and emptyTrash cannot be undone: main asks with a native dialog
+    trash: (paths) => invoke('library:trash', paths),
+    restore: (paths) => invoke('library:restore', paths),
+    forget: (paths) => invoke('library:forget', paths),
+    purge: (paths) => invoke('library:purge', paths),
+    emptyTrash: () => invoke('library:emptyTrash'),
   },
   index: {
     // download index maintenance. clean: rows whose file is gone (main confirms natively; {dryRun: true} only counts).

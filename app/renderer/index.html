@@ -171,7 +171,7 @@
 
       <!-- LIBRARY: offline search of the download index -->
       <section class="page" id="page-library">
-        <div class="page-head"><h1>Đã tải</h1><span class="row"><span class="muted" id="lib-stats"></span><button class="btn sm ghost" id="lib-import" title="Ghi vào index các file đã có sẵn trong một thư mục">Nhập thư viện…</button></span></div>
+        <div class="page-head"><h1>Đã tải</h1><span class="row"><span class="muted" id="lib-stats"></span><div class="seg sm" id="lib-view"><button data-view="library" class="on">Thư viện</button><button data-view="trash" title="File đã xoá, khôi phục được cho tới khi bị xoá vĩnh viễn">Thùng rác <span id="lib-trash-count"></span></button></div><button class="btn sm ghost" id="lib-import" title="Ghi vào index các file đã có sẵn trong một thư mục">Nhập thư viện…</button></span></div>
         <div class="glass panel lib-bar">
           <input type="text" id="lib-q" spellcheck="false" autocomplete="off" placeholder="tag  -tag  tiền_tố*  rating:e  md5:…  id:…  (để trống = tất cả)">
           <select id="lib-module" title="Module"></select>
@@ -180,14 +180,22 @@
           <select id="lib-order" title="Sắp xếp">
             <option value="downloaded">Mới tải trước</option><option value="downloaded_asc">Cũ tải trước</option>
             <option value="date">Ngày post mới trước</option><option value="date_asc">Ngày post cũ trước</option>
-            <option value="score">Điểm cao trước</option><option value="id">Theo id</option>
+            <option value="score">Điểm cao trước</option><option value="id">Theo id</option><option value="trashed" hidden>Mới xoá trước</option>
           </select>
           <button class="btn primary" id="lib-search">Tìm</button>
         </div>
         <div class="results glass">
           <div class="results-bar">
             <div class="muted" id="lib-info">Tìm lại file đã tải từ index trên máy (không gửi yêu cầu nào tới website).</div>
-            <span class="pager"><button class="btn sm ghost" id="lib-prev">‹</button><span id="lib-page">1</span><button class="btn sm ghost" id="lib-next">›</button></span>
+            <div class="results-tools lib-tools">
+              <button class="btn sm ghost" id="lib-sel-page" title="Bấm thẻ để chọn, Shift + bấm để chọn một dải">Chọn cả trang</button>
+              <button class="btn sm ghost" id="lib-sel-none" disabled>Bỏ chọn</button>
+              <button class="btn sm danger" id="lib-delete" disabled title="Chuyển vào thùng rác (phím Delete)">Xoá (0)</button>
+              <button class="btn sm" id="lib-restore" hidden disabled>Khôi phục (0)</button>
+              <button class="btn sm danger" id="lib-purge" hidden disabled>Xoá vĩnh viễn (0)</button>
+              <button class="btn sm ghost danger" id="lib-empty" hidden>Dọn sạch thùng rác…</button>
+              <span class="pager"><button class="btn sm ghost" id="lib-prev">‹</button><span id="lib-page">1</span><button class="btn sm ghost" id="lib-next">›</button></span>
+            </div>
           </div>
           <div class="grid lib-grid" id="lib-grid"></div>
         </div>
@@ -310,6 +318,9 @@
               <span class="row"><button class="btn sm ghost" id="index-clean-check" title="Chỉ đếm, không xoá gì">Kiểm tra</button><button class="btn sm" id="index-clean">Dọn index…</button><button class="btn sm ghost danger" id="index-clean-stop" hidden>Dừng</button></span></div>
             <p class="muted index-clean-status" id="index-clean-status" hidden></p>
             <div class="setting index-tool"><span>Nhập thư viện có sẵn <span class="muted">(file đã tải trước đây)</span></span><button class="btn sm" id="index-import">Nhập thư mục…</button></div>
+            <div class="setting"><span>Tự dọn thùng rác sau <span class="muted">(file đã xoá ở trang Đã tải)</span></span>
+              <select id="s-trash-days"><option value="7">7 ngày</option><option value="14">14 ngày</option><option value="30">30 ngày</option><option value="60">60 ngày</option><option value="90">90 ngày</option><option value="0">Không tự xoá</option></select></div>
+            <div class="setting index-tool"><span>Thùng rác <span class="muted" id="index-trash-info"></span></span><button class="btn sm ghost danger" id="index-empty-trash">Dọn sạch thùng rác…</button></div>
           </div>
 
           <div class="glass panel">
