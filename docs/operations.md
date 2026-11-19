@@ -266,12 +266,14 @@ Dán mục in ra vào `"keys"` của `lustra/safety_data/catalog_keys.json`, com
 
 Cập nhật catalog chính thức (khi một extension trong `extensions/` đổi `version`, và trước ngày `expires`, hiện là 2027-05-17):
 ```bash
-python tools/build_catalog.py --out /tmp/lustra-catalog     # zip tất định cho mỗi extension + index.json
+python tools/build_catalog.py --out /tmp/lustra-catalog --lists ~/lustra-tag-lists     # zip tất định cho mỗi extension + index.json
 python tools/sign_catalog.py sign /tmp/lustra-catalog/index.json --key ~/lustra-keys/signing-key.pem --expires-days 180
 python tools/sign_catalog.py verify /tmp/lustra-catalog/index.json
 gh release upload catalog /tmp/lustra-catalog/* --repo Leiz-Workspace/Lustra --clobber
 ```
 Extension không đổi giữ nguyên sha256, vì zip tất định. Zip của bản cũ có thể giữ lại trong release cho tới khi người dùng đã cập nhật.
+
+`--lists`: thư mục chứa danh sách tag mà manifest khai báo (`"tagList": "<abbr>_tags.json"`). Danh sách không nằm trong repo; mỗi file được gói vào zip của extension của nó, nên extension có danh sách ngay khi cài. Tạo danh sách bằng `lustra-core tags --modules <abbr> --out ~/lustra-tag-lists`, hoặc lấy lại từ zip của catalog đang phát hành (`unzip -j <zip> '<abbr>_tags.json' -d ~/lustra-tag-lists`). Extension thiếu danh sách vẫn được build, kèm một dòng báo; zip vượt giới hạn của trình cài bị từ chối. Xem plan [ext-tag-jobs](plans/ext-tag-jobs.md).
 
 Mỗi lần sửa catalog:
 ```bash

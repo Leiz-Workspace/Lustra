@@ -1,6 +1,6 @@
 # Plan: tag list và job cập nhật tag của extension
 
-> 2026-11-19 · Trạng thái: **đã chốt với người dùng; phần lõi và app đã làm** (nhánh `feat/ext-tag-jobs`, dev log 7at). Extension có job do các session tạo extension làm · Nhánh tham chiếu: `develop`
+> 2026-11-19 · Trạng thái: **đã chốt với người dùng; phần lõi và app đã làm** (nhánh `feat/ext-tag-jobs`, dev log 7at); danh sách của ext trong catalog nằm ngoài repo (dev log 7ay). Extension có job do các session tạo extension làm · Nhánh tham chiếu: `develop`
 > Yêu cầu gốc: extension mang sẵn tag list và job cập nhật tag list của riêng nó. Lustra chỉ việc lấy danh sách đó, và chạy job khi người dùng bấm nút. Job không chạy nền liên tục, chỉ chạy khi được yêu cầu.
 
 ## Quyết định (người dùng chọn, 2026-11-19)
@@ -10,6 +10,7 @@
 | Job chạy ở đâu | **Trong app, trên máy người dùng**, khi bấm "Cập nhật" ở Tags A–Z, bằng khoá của chính họ | Job theo lịch trên server (Forgejo) ký và đăng danh sách, app chỉ tải về |
 | Bộ dò tag theo engine của lõi (Gelbooru, Danbooru, Moebooru, e621, Philomena, Szurubooru, Shimmie) | **Giữ làm dự phòng** cho ext chưa có `tagUpdate`; ext đã cài không bị hỏng | Bỏ khỏi lõi, chỉ giữ rx / db |
 | Cách tự chạy đang có: lịch hệ thống (crontab / Task Scheduler), tự cập nhật khi mở app, tải ngay sau khi cài | **Không bao giờ chạy job của ext**; các tuỳ chọn này giữ nguyên cho rx / db và ext cũ | Bỏ hẳn mọi cách tự chạy |
+| Danh sách đi kèm của ext trong catalog nằm ở đâu (chọn ngày 2026-11-19, sau PR #37: 9 danh sách, 33,8 MB, 897 nghìn dòng) | **Ngoài repo**: `tools/build_catalog.py --lists <thư mục>` gói từng danh sách vào zip của ext trong catalog chính thức | Trong repo, cạnh `manifest.json`: repo nặng thêm, và app cũng nặng thêm vì `tools/build_core.py` chép cả `extensions/` vào lõi đóng gói |
 
 ## Hợp đồng cho extension
 
@@ -51,14 +52,27 @@ def read_tags(job):  # job: lustra.sdk.TagJob
 | Tải ngay sau khi cài ext | **không**: ext đã mang sẵn danh sách | chạy khi ext không mang danh sách |
 | Trình tạo extension (extgen / aigen) với bản nháp | **không**: code của bản nháp chỉ chạy trong sandbox | bộ dò theo engine |
 
-Danh sách đi kèm của ext trong catalog được tạo trên máy người bảo trì:
+### Danh sách đi kèm của ext trong catalog
+
+Danh sách tag là dữ liệu, không phải code, nên **không nằm trong repo**: `extensions/<id>/` chỉ có `manifest.json` (vẫn khai báo `tagList`), `downloader.py`, `tags.py`, `specs.md`. Test `test_repository_extensions_carry_no_tag_list` từ chối file `*_tags.json` hoặc file trên 1 MB trong `extensions/`.
+
+Danh sách đi vào zip của ext trong catalog chính thức (bản phát hành `catalog` trên GitHub), lúc người bảo trì build catalog:
 ```bash
-lustra-core tags --modules <abbr> --out <thư mục tạm>
+lustra-core tags --modules <abbr> --out <thư mục danh sách>     # job của chính ext (ext nằm trong extensions/ của repo)
+python tools/build_catalog.py --out <thư mục catalog> --lists <thư mục danh sách>
 ```
-(ext nằm trong `extensions/` của repo). Sau đó chép `<abbr>_tags.json` vào cạnh `manifest.json`.
+- Dùng lại danh sách của catalog đang phát hành, thay vì đọc lại từ site: `unzip -j <id>-<version>.zip '<abbr>_tags.json' -d <thư mục danh sách>` cho từng zip của bản phát hành `catalog`.
+- Ext thiếu danh sách trong `--lists` vẫn được build, kèm một dòng báo. App tạo danh sách bằng job của ext khi người dùng bấm "Cập nhật".
+- `build_catalog.py` từ chối zip vượt giới hạn của trình cài (10 MB nén, 50 MB giải nén, 2.000 file).
+
+| Đường cài | Danh sách tag |
+|---|---|
+| Zip (bản nháp của trình tạo, file tự cài) | có trong zip: dùng được ngay |
+| Catalog chính thức (zip tải về, đã ký) | có trong zip (`--lists`): dùng được ngay |
+| Catalog đi kèm app (`extensions/` của repo, đóng gói trong lõi) | không có: bấm "Cập nhật" ở Tags A–Z (job của ext; ví dụ Safebooru khoảng 1.000 request, khoảng 21 phút) |
 
 ## Phân công giữa các session
 
 - **Lõi và app** (session "Repository overview and components", nhánh `feat/ext-tag-jobs`): `lustra/tags_updater.py` (`TagJob`, `EXTENSION_JOB`, `TagSource.on_demand`), `lustra/modspec.py` (`tagUpdate`), `lustra/sdk.py` (SDK 1.1), `lustra/extgen/policy.py`, `sandbox.py`, `taglist.py`, `app/main.js`, `app/renderer/`, schema manifest, tài liệu.
-- **Extension và skill** (các session tạo ext): `tags.py`, manifest, danh sách đi kèm của từng ext; skill `new-site-extension`. Không sửa các file của lõi và app ở trên.
+- **Extension và skill** (các session tạo ext): `tags.py`, manifest, danh sách đi kèm của từng ext (trong zip bản nháp; với ext của catalog thì qua `--lists`, không commit vào `extensions/`); skill `new-site-extension`. Không sửa các file của lõi và app ở trên.
 - Bộ đọc riêng cho một site (không phải engine) nằm trong `tags.py` của ext đó, không nằm trong lõi.
