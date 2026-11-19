@@ -63,7 +63,7 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 | `gelbooru_dapi` | `index.php?page=dapi&s=tag&q=index`, phân trang theo số trang `pid` (danh sách của site không theo thứ tự id) | bắt buộc nếu manifest có `auth.apiKey` (site trả "Missing authentication"), nếu không thì dùng khi có (`API_KEY,USER_ID`) |
 | `danbooru_json` | `tags.json`, con trỏ id `page=a<id>` | dùng khi có (`API_KEY,LOGIN`) |
 | `moebooru_json` | `tag.json?order=name`, theo trang | không |
-| `e621_json` | bản export `db_export/tags-<ngày>.csv.gz` (thử 4 ngày gần nhất) | không |
+| `e621_json` | bản export hằng ngày: trang `db_exports` liệt kê `tags.csv.gz` và SHA-256 của nó; tải file (host con của site, ví dụ `static1.e621.net`), kiểm SHA-256 (sai thì không đọc). Trang không có link thì thử `db_export/tags-<ngày>.csv.gz` cũ (4 ngày gần nhất) | không |
 | `philomena_json` | `api/v1/json/search/tags`: 10.000 tag dùng nhiều nhất (giới hạn cửa sổ tìm kiếm của site); dấu cách trong tên tag thành `_` | không |
 | `szurubooru_json` | `api/tags/`, theo offset | không |
 | `shimmie_api` | `api/danbooru/find_tags`: cả danh sách trong một câu trả lời | không |
@@ -81,7 +81,7 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Nguồn: tag của các post hiện trong Preview (`search.preview`) và của các file đã tải (index các lần tải; app gọi `tags.learn` sau mỗi lượt tải xong, hoặc nút "Học từ file đã tải" ở Tags A–Z).
   - Mỗi post chỉ đếm một lần. File ghi dạng `"tag": "N posts (unknown)"`, với N là số post đã thấy ở đây, không phải số trên site; loại tag không biết.
   - Trạng thái ở `<thư mục dữ liệu>/tags/learned/<abbr>.sqlite`.
-  - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó.
+  - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó. Danh sách thật được dùng kể cả khi file của nó cũ hơn danh sách đã học.
 
 **Lịch sự** (mọi nguồn):
 - **Nhịp request:** khoảng cách giữa hai request là `--delay` (mặc định 0,5 giây). Bộ cập nhật dùng giá trị lớn nhất trong các mức sau, tối đa 60 giây:
@@ -130,8 +130,11 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 **Trong app** (Tags A–Z → Danh sách tag):
 - Bảng liệt kê mọi extension đã cài, có cột "Nguồn" (rê chuột để xem site, cách đọc, có tuân thủ robots.txt không).
   - Module có nguồn: có nút "Cập nhật". Với extension có job riêng, nút này là cách duy nhất để chạy job.
+  - Khi đang cập nhật (bấm ở đây, tự cập nhật khi mở app, hoặc extension vừa cài), dòng đó ghi "đang cập nhật… N tag" (khoảng 2 giây cập nhật một lần) và nút thành "Đang cập nhật…" (tắt) tới khi xong, kể cả khi chuyển trang hay tải lại cửa sổ: bảng hỏi lõi (`tags.sources`, `running`).
   - Module bắt buộc khoá mà chưa có khoá: ghi "cần API key" (nhập ở Cài đặt → API key).
   - Module không có nguồn: cột "Nguồn" ghi "học từ post đã xem / đã tải", có nút "Học từ file đã tải"; cột dung lượng ghi "(đã học)" khi danh sách là danh sách học được. Module không có nguồn nhưng có danh sách đi kèm (ví dụ `2tags/` của repo) ghi "không có nguồn".
+    - Nút "Học từ file đã tải" báo rõ lý do khi không học thêm được: index chưa có post nào của site ("Chưa có post nào của … trong index: tải vài post (hoặc xem Preview) để Lustra học tag"), module đã có danh sách từ nguồn (không cần học), hoặc không có post đã tải mới.
+    - Rule34Hentai, Paheal, Rule34.us: catalog đi kèm app có sẵn danh sách của chúng (từ v1.0.2). Bản 1.0.1 đã cài thấy "có bản v1.0.2" ở trang Extensions; cập nhật là có danh sách.
   - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay. Extension có job riêng thì không: job chỉ chạy khi bấm nút.
 - "Tự cập nhật mỗi N ngày khi mở app": Rule34 và Danbooru, bằng khoá đã lưu; Rule34 bị bỏ qua khi chưa có khoá.
 - "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" (mỗi tuần vào thứ Hai, hoặc mỗi ngày, lúc khoảng 4 giờ sáng):
@@ -374,7 +377,7 @@ LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests
 ## 5. Build
 - CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`, icon `images/lustra.ico`: icon mặt nạ cam của app ở 16–256 px). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.
 - App desktop:
-  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli`, `index` (nhập thư viện chạy thử), `aigen`, danh sách chặn tên miền (phiên `https://www.youtube.com/` bị từ chối R7) và các file `lustra/safety_data`. Đo ngày 2026-11-17 (có `lustra.sdk`, `lustra.trust`, danh sách chặn): 51,4 MiB khi kèm `anthropic`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
+  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag trong `2tags/` của lõi; dùng `--tags all` hoặc `--tags rx,db` để kèm. Riêng catalog extension đi kèm thì extension nào có `tagList` mà không có nguồn cập nhật (không `tagUpdate`, không phải module đã duyệt, không engine có API danh sách: hiện là rn, rp, rs) được chép danh sách `2tags/` cạnh manifest (thêm khoảng 26 MB); danh sách mà người bảo trì để cạnh manifest trong `extensions/` không được chép vào lõi. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli`, `index` (nhập thư viện chạy thử), `aigen`, danh sách chặn tên miền (phiên `https://www.youtube.com/` bị từ chối R7) và các file `lustra/safety_data`. Đo ngày 2026-11-17 (có `lustra.sdk`, `lustra.trust`, danh sách chặn): 51,4 MiB khi kèm `anthropic`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
   2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
   3. Model server chạy độc lập (tuỳ chọn, phát hành riêng với app): `python tools/build_model_server.py`, xem mục 3c.
 - **Release** (`.github/workflows/release.yml`, cùng cách làm với Mirrix). Tên file: `<app>-<os>-<arch>_v<version>.<ext>`.

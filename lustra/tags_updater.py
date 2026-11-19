@@ -22,6 +22,7 @@ import contextlib
 import csv
 import datetime
 import gzip
+import hashlib
 import html
 import importlib.util
 import io
@@ -113,15 +114,24 @@ re_site = re.compile(r'^https://[a-z\d.-]+(?::\d+)?/$')
 re_rate_limit = re.compile(r'limit of\s+(\d+)\s+requests?\s+(?:every|per)\s+(\d+)\s+second', re.IGNORECASE)
 '''the 429 text of rule34.xxx: "You currently have a limit of 60 requests every 60 second(s)."'''
 re_secret_param = re.compile(r'([?&](?:api_key|login|user_id|password|pass_hash|token|key)=)[^&#]*', re.IGNORECASE)
+re_export_row = re.compile(r'<(?:tr\b|div\b[^>]*\bclass=["\'][^"\']*\brow\b)', re.IGNORECASE)
+'''a row of e621's db_exports page: its export link and that file's checksum'''
+re_html_tag = re.compile(r'<(a|input)\b([^>]*)>', re.IGNORECASE)
+re_e621_tags_export = re.compile(r'tags(?:-\d{4}-\d{2}-\d{2})?\.csv\.gz')
+re_sha256 = re.compile(r'[\da-fA-F]{64}')
 
 ProgressCb = Callable[[str, int], None]
 '''(message, tags fetched so far)'''
+PROGRESS_INTERVAL = 2.0
+'''seconds between two progress lines while tags come in (the app shows the count read so far)'''
 
+E621_EXPORTS_PAGE = 'db_exports'
+'''e621's page listing its daily database exports (db_export/ redirects there since 2026-11)'''
 ENGINE_TAG_SOURCES: dict[str, str] = {
     'gelbooru_dapi': 'DAPI tag index, pages by number (pid)',
     'danbooru_json': 'tags.json, id cursor',
     'moebooru_json': 'tag.json, pages by name',
-    'e621_json': 'daily database export (db_export/tags-DATE.csv.gz)',
+    'e621_json': f'daily database export (tags.csv.gz listed on {E621_EXPORTS_PAGE}, its SHA-256 checked)',
     'philomena_json': f'api/v1/json/search/tags, the {PHILOMENA_MAX_RESULTS:d} most used tags',
     'szurubooru_json': 'api/tags/, offset pages',
     'shimmie_api': 'api/danbooru/find_tags, the whole list in one answer',
@@ -724,20 +734,68 @@ def _iter_danbooru(client: PoliteClient, api_key: str, min_posts: int, max_pages
                 yield str(t['name']), count, DANBOORU_TYPES.get(_int(t.get('category')), 'general')
 
 
+def _e621_export_link(page: str, base: str) -> tuple[str, str]:
+    """(address, SHA-256 or '') of the tag export the db_exports page of e621 lists, ('', '') when it lists none. The link is
+    tags.csv.gz (a dated tags-YYYY-MM-DD.csv.gz is taken too, the newest when there are several, the undated one first); its
+    checksum is the one in the same row, used only when that row holds exactly one export link and one checksum"""
+    found: list[tuple[str, str, str]] = []
+    for row in re_export_row.split(page):
+        links, sums = [], []
+        for m in re_html_tag.finditer(row):
+            attrs = {k.lower(): html.unescape(v).strip() for k, _, v in re_attr.findall(m.group(2))}
+            if m.group(1).lower() == 'a' and attrs.get('href'):
+                url = url_parse.urljoin(base, attrs['href'])
+                name = url_parse.urlsplit(url).path.rsplit('/', 1)[-1]
+                if name.endswith('.csv.gz'):
+                    links.append((name, url))
+            elif m.group(1).lower() == 'input' and re_sha256.fullmatch(attrs.get('value', '')):
+                sums.append(attrs['value'].lower())
+        for name, url in links:
+            if re_e621_tags_export.fullmatch(name):
+                found.append((name, url, sums[0] if len(links) == 1 and len(sums) == 1 else ''))
+    if not found:
+        return '', ''
+    _name, url, digest = max(found, key=lambda x: (x[0] == 'tags.csv.gz', x[0]))
+    return url, digest
+
+
+def _e621_rows(name: str, body: bytes, min_posts: int) -> Iterator[tuple[str, int, str]]:
+    if body[:2] != b'\x1f\x8b':
+        raise RuntimeError(f'{name} is not a gzip file: not read')
+    with gzip.open(io.BytesIO(body), 'rt', encoding=UTF8, newline='') as f:
+        for row in csv.DictReader(f):
+            count = _int(row.get('post_count'))
+            if count >= min_posts and row.get('name'):
+                yield row['name'], count, E621_TYPES.get(_int(row.get('category')), 'general')
+
+
 def _iter_e621_export(client: PoliteClient, min_posts: int) -> Iterator[tuple[str, int, str]]:
-    """e621 publishes daily database exports, much lighter for the website than paging through the api"""
+    """e621 publishes daily database exports, much lighter for the website than paging through the api. The page db_exports lists
+    them (gzipped CSV files on its static host, each with its SHA-256): the tag export is read from there and checked. The dated
+    files of before (db_export/tags-DATE.csv.gz, the last 4 days) are tried only when the page lists no tag export"""
+    host = _host(client.site)
+    page = client.get(f'{client.site}{E621_EXPORTS_PAGE}', accept='text/html', ok=(200, 404))
+    url, digest = _e621_export_link(page.text, page.url) if page.status == 200 else ('', '')
+    if url:
+        name = url_parse.urlsplit(url).path.rsplit('/', 1)[-1]
+        client._tell(f'downloading {name} from {_host(url)} (the tag export listed on {host}/{E621_EXPORTS_PAGE})')
+        r = client.get(url, max_bytes=MAX_EXPORT_BYTES)
+        if digest:
+            if (got := hashlib.sha256(r.body).hexdigest()) != digest:
+                raise RuntimeError(f'{name} does not match the SHA-256 listed on {host}/{E621_EXPORTS_PAGE} ({got[:12]}... instead of '
+                                   f'{digest[:12]}...): not read, try again later')
+        else:
+            client._tell(f'{host}/{E621_EXPORTS_PAGE} lists no SHA-256 for {name}: not checked')
+        yield from _e621_rows(name, r.body, min_posts)
+        return
     for days_back in range(4):
         day = (datetime.date.today() - datetime.timedelta(days=days_back)).isoformat()
         r = client.get(f'{client.site}db_export/tags-{day}.csv.gz', max_bytes=MAX_EXPORT_BYTES, ok=(200, 404))
-        if r.status == 404:
+        if r.status == 404 or r.body[:2] != b'\x1f\x8b':  # gone, or a page instead of the file
             continue
-        with gzip.open(io.BytesIO(r.body), 'rt', encoding=UTF8, newline='') as f:
-            for row in csv.DictReader(f):
-                count = _int(row.get('post_count'))
-                if count >= min_posts and row.get('name'):
-                    yield row['name'], count, E621_TYPES.get(_int(row.get('category')), 'general')
+        yield from _e621_rows(f'tags-{day}.csv.gz', r.body, min_posts)
         return
-    raise RuntimeError(f'no recent tag export found on {_host(client.site)}')
+    raise RuntimeError(f'no recent tag export found on {host} ({E621_EXPORTS_PAGE} lists no tags.csv.gz)')
 
 
 def _iter_moebooru(client: PoliteClient, min_posts: int, max_pages: int) -> Iterator[tuple[str, int, str]]:
@@ -1026,10 +1084,13 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     try:
         source_iter = (_iter_gelbooru_tail(client, _dapi_auth(src, api_key), min_posts, base, state, on_tail_page) if state is not None
                        else _iter_source(src, client, api_key, min_posts, max_pages, resume))
-        for i, (name, count, ttype) in enumerate(source_iter):
+        told = -math.inf
+        for name, count, ttype in source_iter:
             if name not in tags or tags[name][0] < count:
                 tags[name] = (count, ttype)
-            if progress and i % 5000 == 0:
+            # every PROGRESS_INTERVAL seconds while tags come in (a page or two): a long read never looks stopped
+            if progress and (now := time.monotonic()) - told >= PROGRESS_INTERVAL:
+                told = now
                 progress(f'[{module}] {len(tags):d} tags...', len(tags))
     except BaseException:
         if (resume is not None or state is not None) and tags:
@@ -1068,6 +1129,8 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
         res.message = (f'not written: fetched {res.count:d} tags vs {res.previous:d} existing'
                        f'{" (partial fetch, use --force)" if partial else " (sanity check failed, use --force)"}')
         return res
+    if progress:
+        progress(f'[{module}] {res.count:d} tags read, writing the list', res.count)
     write_tag_list(res.path, tags)
     res.written = True
     if src.tail_updates and src.engine == 'gelbooru_dapi' and (resume is not None or state is not None):

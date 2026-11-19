@@ -3,7 +3,7 @@
   "id": "rule34hentai",
   "name": "Rule34 Hentai",
   "abbr": "rn",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,
