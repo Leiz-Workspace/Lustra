@@ -60,7 +60,10 @@
       "futa_with_male",
       "futa_with_futa"
     ],
-    "futaMale": [],
+    "futaMale": [
+      "cuntboy",
+      "male_with_breasts"
+    ],
     "trap": [
       "trap",
       "otoko_no_ko"
@@ -81,13 +84,25 @@
       "crowd"
     ],
     "pov": [
-      "pov"
+      "pov",
+      "female_pov"
     ]
   },
   "maleBodypart": [
     "penis",
     "disembodied_penis",
     "faceless_male"
+  ],
+  "femaleBodypart": [
+    "pussy",
+    "faceless_female",
+    "female_pov",
+    "breasts",
+    "large_breasts",
+    "huge_breasts",
+    "medium_breasts",
+    "small_breasts",
+    "gigantic_breasts"
   ],
   "aliases": {}
 }

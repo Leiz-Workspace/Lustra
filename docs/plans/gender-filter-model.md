@@ -24,6 +24,12 @@
 
 ## Trạng thái triển khai
 
+- **Bằng chứng nữ đối xứng với nam (2026-11-20)**: chủ app báo "chỉ nam" + `amputee` trên rx vẫn ra post có nữ. Nguyên nhân: bảng `rx` thiếu `1girl` (~1,3M post rx) và `female_focus`, còn tag bộ phận cơ thể nữ không phải bằng chứng trong khi `penis` tạo M. Đã sửa:
+  - `rx`, `bb`, `gelbooru_generic`: F (H) thêm `1girl`, `female_focus`; `rx` thêm M (H) `male_focus` cho cân.
+  - Khoá mới `femaleBodypart`, đối xứng với `maleBodypart` (§1.2): có bộ phận nữ thì F=1 (high), nên post có cả bằng chứng nam thành `both`, không còn là `only_male`. Cờ `futa` / `futaMale` vẫn chặn cả hai chiều: bộ phận đó có thể là của nhân vật futa / cuntboy.
+  - Cờ futa thêm `gynomorph`, `herm` (rx, bb, generic); cờ futaMale thêm `andromorph`, `maleherm` và `male_with_breasts` (db thêm `cuntboy`, `male_with_breasts`), để bộ phận nữ của các nhân vật này không bị đếm là một người nữ.
+  - Bộ phận nữ chỉ vào `evidence` khi chính nó làm F thành high. Vì vậy một tag thừa không hạ độ tin cậy của model (độ tin cậy lấy theo tag bằng chứng yếu nhất).
+  - Hệ quả: post chỉ có tag cơ thể nữ (`breasts`, `pussy`) có nhãn `only_female` (medium trên rx), như `penis` một mình vẫn cho `only_male`. Các số độ phủ đo bên dưới là của bảng cũ; chưa đo lại (đo cần request tới site).
 - **P1, công cụ đánh giá (2026-11-17, dev log "Công cụ đánh giá model giới tính")**: `lustra/gender_eval.py` (`python -m lustra.gender_eval`, cách chạy ở operations.md mục 3g).
   - `sample`: lấy post qua downloader (chỉ metadata), loại theo thứ tự §3.2 có đếm từng bước, nhãn tầng 0 + slice §3.7, phân tầng (nhãn high, "thiếu tag", nhãn yếu) → manifest JSON. `label`: trang gán nhãn cục bộ (127.0.0.1, phím tắt, người gán không thấy tag), ảnh chỉ nằm trong RAM, safety gate của model chạy trước khi người xem, nút "không an toàn" xoá post khỏi manifest và báo tag. `agree`: Cohen's κ, danh sách cho trọng tài, tập vàng. `evaluate`: tầng 0 / model / tầng 0 + model với tập vàng, hoặc silver; ra `report.json` + `report.md` theo §3.7.
   - Đã chạy **silver** trên Danbooru `rating:g`: [docs/reports/gender-model-eval-2026-11-17.md](../reports/gender-model-eval-2026-11-17.md). Silver đo mức đồng ý của model với tag mạnh, **không** thay cho tập vàng.
@@ -92,14 +98,14 @@ Mỗi post có hai thuộc tính:
 | Trường hợp | Quy tắc | Ghi chú |
 |---|---|---|
 | Futanari, dickgirl, gynomorph, herm, intersex (thể hiện nữ) | Đặt **F=1**, gắn cờ `futa`. Khi có cờ `futa`, tag `penis` **không** tạo M. | Danbooru đếm futanari là `1girl`. Với `-gender_strict`, post có cờ này bị loại khỏi `only_female`. |
-| Andromorph, maleherm, cuntboy (thể hiện nam) | Đặt **M=1**, gắn cờ `futa`. | e621 và rx có những tag này. |
+| Andromorph, maleherm, cuntboy, male_with_breasts (thể hiện nam) | Đặt **M=1**, gắn cờ `futa` (`futaMale`). Khi có cờ này, tag bộ phận nữ (`pussy`, `breasts`) **không** tạo F. | e621 và rx có những tag này. |
 | otoko_no_ko, trap, femboy, girly (rx) | Đặt **M=1**, gắn cờ `trap`. | Đây là ca khó nhất với model vì ngoại hình giống nữ. Model không được tự kết luận `only_female` cho slice này (xem §3.7). Strict loại post khỏi `only_male`. |
 | reverse_trap (db) | Đặt **F=1**, gắn cờ `trap`. | |
 | genderswap, rule_63, crossgender | Không phải bằng chứng. Count tag của ảnh hiện tại quyết định. | |
 | 1other, androgynous, ambiguous_gender | Không cộng vào F hay M; gắn cờ `other`. Nếu chỉ có nhân vật mơ hồ → `none` (medium). Nếu có F hoặc M kèm nhân vật mơ hồ → nhãn `only_*` bị hạ tối đa xuống `medium`. | Strict loại mọi post có cờ `other` khỏi `only_*`. |
 | Anthro, furry, feral | Đếm như người, theo tag giới của site. e621 áp `male`/`female` cho mọi nhân vật; db dùng `furry_female`/`furry_male`. Feral không có tag giới → `other`. | Gắn cờ `anthro`. Có slice đánh giá riêng. |
 | Nhóm đông người (`6+girls`, `group`, `gangbang`, `orgy`) | Theo count tag. `crowd`/`everyone` mà không có count tag → `unknown`. Nhân vật nền không được tag thì không tính. | Gắn cờ `crowd`. Model chỉ được kết luận nếu độ tin cậy là `high`. |
-| Chỉ một bộ phận cơ thể, POV, close-up | Bộ phận nam nhìn thấy được (`penis` khi không có cờ futa, `disembodied_penis`, `faceless_male`, `male_pov`) → **M=1**, tức post sẽ là `both` nếu có nữ. Close-up không có count tag và không có bộ phận phân biệt → `unknown`. Đồ chơi tình dục không tính. | Người chọn "chỉ nữ" thường không muốn POV nam, nên tính M là lựa chọn bảo thủ. |
+| Chỉ một bộ phận cơ thể, POV, close-up | Bộ phận nam nhìn thấy được (`penis` khi không có cờ futa, `disembodied_penis`, `faceless_male`, `male_pov`) → **M=1**, tức post sẽ là `both` nếu có nữ. Đối xứng (từ 2026-11-20): bộ phận nữ (`pussy`, `vagina`, `breasts` và các cỡ, `faceless_female`, `female_pov`; khi không có cờ futa) → **F=1**, tức post sẽ là `both` nếu có nam. Close-up không có count tag và không có bộ phận phân biệt → `unknown`. Đồ chơi tình dục không tính. | Người chọn "chỉ nữ" thường không muốn POV nam, người chọn "chỉ nam" thường không muốn thấy nữ, nên tính F / M là lựa chọn bảo thủ. e621 chỉ dùng `female_pov`, `faceless_female`: ở đó nhân vật intersex nhiều, tag cơ thể không cho biết giới. |
 | `no_humans`, scenery không có count tag | `none` | `no_humans` đi kèm `1girl` (robot, pokémon cái) thì vẫn theo count tag. |
 | Ảnh thật, cosplay, `real_person` | Tầng 0 vẫn suy nhãn từ tag. **Tầng 1 không chạy.** | Gắn cờ `real` (§4.3). |
 | Tag mâu thuẫn (`female_only` + `1boy`) | Count tag thắng marker loại trừ; độ tin cậy `low`. | Ghi log khi `-verbose`. |
@@ -122,24 +128,26 @@ Mức bằng chứng: **H** (mạnh), **m** (vừa). Khi so khớp, tag được
 | F / M (m) | `yuri` / `yaoi` |
 | other | `1other`, `2others`, `multiple_others`, `6+others`, `androgynous` |
 | none | `no_humans` |
-| cờ futa / trap | `futanari`, `futa_with_female`, `futa_with_male`, `futa_with_futa` / `trap`, `reverse_trap`. Snapshot không có `otoko_no_ko`. |
+| cờ futa / trap | `futanari`, `futa_with_female`, `futa_with_male`, `futa_with_futa` / `trap`, `reverse_trap`. Snapshot không có `otoko_no_ko`. `cuntboy`, `male_with_breasts` → M + futa |
 | M từ bộ phận cơ thể | `penis` (khi không có futa), `disembodied_penis`, `faceless_male` |
+| F từ bộ phận cơ thể | `pussy`, `breasts`, `large_breasts`, `huge_breasts`, `medium_breasts`, `small_breasts`, `gigantic_breasts`, `faceless_female`, `female_pov` (khi không có futa) |
 | real | `photo_(medium)`, `cosplay_photo` |
 
 **Rule34.xxx (`rx`)**, completeness prior 0,85:
 - `bb` (Bbooru) có bảng riêng `bb.json` từ 2026-11-19 (dev log 7av): bảng này cộng thêm các tag đếm kiểu Danbooru (xem mục Bbooru bên dưới). Trước đó `bb` dùng chung bảng `rx`, vì `2tags/bb_tags.json` từng là bản sao của `rx_tags.json`.
-- `rs` (rule34.us) và `xb` (xbooru) dùng bản `gelbooru_generic`, prior lần lượt 0,80 và 0,75. Bản này thêm `1girl` và `hetero`.
+- `rs` (rule34.us) và `xb` (xbooru) dùng bản `gelbooru_generic`, prior lần lượt 0,80 và 0,75. Bản này thêm `hetero` (và có `1girl`, `female_focus`, `male_focus` như `rx`).
 
 | Bằng chứng | Tag |
 |---|---|
 | exclusive | `female_only` → `only_female`; `male_only` → `only_male`; `futa_only` → `only_female` + cờ futa; `solo_female` / `solo_male` |
 | both (H) | `straight` (gồm cả alias `hetero`, `hetero_sex`) |
-| F (H) | `1girls`, `2girls`, `3girls`, `multiple_girls`, `female` |
-| M (H) | `1boy`, `2boys`, `3boys`, `multiple_boys`, `male` |
+| F (H) | `1girls`, `2girls`, `3girls`, `multiple_girls`, `female`, `1girl` (~1,3M post kiểu Danbooru), `female_focus` |
+| M (H) | `1boy`, `2boys`, `3boys`, `multiple_boys`, `male`, `male_focus` |
 | F / M (m) | `yuri`, `lesbian` / `yaoi`, `gay` |
-| cờ futa | `futanari`, `1futa`, `multiple_futa`, `dickgirl`, `intersex`; `cuntboy` → M + futa |
+| cờ futa | `futanari`, `1futa`, `multiple_futa`, `dickgirl`, `intersex`, `gynomorph`, `herm`; `cuntboy`, `andromorph`, `maleherm`, `male_with_breasts` → M + futa |
 | cờ trap | `femboy`, `trap`, `otoko_no_ko`, `girly` |
 | M từ bộ phận cơ thể | `penis` (khi không có futa), `disembodied_penis`, `faceless_male`, `male_pov` |
+| F từ bộ phận cơ thể | `pussy`, `vagina`, `vulva`, `disembodied_pussy`, `faceless_female`, `female_pov`, `breasts` và các cỡ (`large_`, `big_`, `huge_`, `medium_`, `small_`, `hyper_`, `gigantic_breasts`) (khi không có futa) |
 | other | `androgynous`, `ambiguous_gender` |
 | real | `real`, `photo`, `real_person` (tranh vẽ người thật có thể nhận diện; loại khỏi dataset) |
 
@@ -147,9 +155,9 @@ Ghi chú cho rx: `female` (10,4M post) và `male` (6,5M) được gắn rất r�
 
 **Bbooru (`bb`, extension)**, completeness prior 0,85 (như rx): bảng `rx` cộng các tag đếm của Danbooru.
 - Bbooru gom post của nhiều site, và tự gắn thêm tag kiểu Rule34 cho post kiểu Danbooru: trong mẫu đo, chỉ 3/6.902 post có `1girl` mà thiếu cả `1girls` lẫn `female`.
-- Thêm so với `rx`:
-  - F (H): `1girl`, `4girls`, `5girls`, `6+girls`, `furry_female`;
-  - M (H): `male_focus`, `4boys`, `5boys`, `6+boys`, `furry_male`;
+- Thêm so với `rx` (từ 2026-11-20 `rx` cũng có `1girl`, `male_focus`):
+  - F (H): `4girls`, `5girls`, `6+girls`, `furry_female`;
+  - M (H): `4boys`, `5boys`, `6+boys`, `furry_male`;
   - other: `1other`, `2others`, `multiple_others`, `6+others`;
   - cờ futa: `futa_with_female`, `futa_with_male`, `futa_with_futa`; cờ trap nữ: `reverse_trap`;
   - real: `photo_(medium)`, `cosplay_photo`.
@@ -158,7 +166,7 @@ Ghi chú cho rx: `female` (10,4M post) và `male` (6,5M) được gắn rất r�
   - Độ phủ ≥ medium: post mới 96,2 % với `rx`, 96,4 % với `bb`; post cũ 85,8 % và 86,0 %.
   - `bb` đổi nhãn 19 post (0,3 %), mọi trường hợp đều đi về nhãn đúng hơn: `1girl penis` từ only_male thành both, `furry_female` từ unknown thành only_female, `1other` từ unknown thành none. `gelbooru_generic` kém hơn `rx`, vì thiếu `solo_female` / `solo_male`.
   - Luật `solo` của e621 không được thêm: nó nâng 17–25 % post từ medium lên high, nhưng chưa có tập vàng để kiểm.
-  - Post còn `unknown` (3 % post mới, 14 % post cũ) phần lớn chỉ có tag cơ thể (`breasts`, `pussy`) hoặc `ai_generated`, không có tag đếm. Đây là phần việc của tầng 1.
+  - Post còn `unknown` (3 % post mới, 14 % post cũ) phần lớn chỉ có tag cơ thể (`breasts`, `pussy`) hoặc `ai_generated`, không có tag đếm. Đây là phần việc của tầng 1. Từ 2026-11-20 tag cơ thể nữ là bằng chứng F, nên phần post chỉ có tag cơ thể nay có nhãn; số trên là của bảng cũ, chưa đo lại.
   - Đây là độ phủ và độ đồng ý giữa các bảng, chưa phải precision: chưa có nhãn của người.
 
 **e621 (`en`, extension)**, completeness prior 0,92:
@@ -171,6 +179,7 @@ Ghi chú cho rx: `female` (10,4M post) và `male` (6,5M) được gắn rất r�
 | futa | `intersex`, `gynomorph`, `herm` → F + futa; `andromorph`, `maleherm` → M + futa |
 | trap / other | `femboy` → M + trap; `ambiguous_gender` → other |
 | M từ bộ phận cơ thể | `male_pov`, `faceless_male` |
+| F từ bộ phận cơ thể | `female_pov`, `faceless_female` |
 | real | `photography_(artwork)`, `real` |
 
 **Paheal (`rp`), rule34hentai (`rn`)**: tag tự do, viết hoa, chủ yếu là tên nhân vật/series. Gần như không có count tag: rp có `yuri` 2.573 post và `1girls` 13 post. Ruleset tối thiểu (so khớp không phân biệt hoa thường) sẽ cho phần lớn post nhãn `unknown`, nên các site này phụ thuộc Tầng 1. UI cảnh báo khi người dùng bật bộ lọc ở chế độ "chỉ tag" trên các site này.
@@ -184,6 +193,7 @@ def infer_from_tags(tags: Iterable[str], rules: GenderRules) -> GenderResult:
     F = rules.strongest(t, 'female')                   # None | MEDIUM | HIGH
     M = rules.strongest(t, 'male')
     if t & rules.male_bodypart and not futa: M = HIGH
+    if t & rules.female_bodypart and not futa: F = HIGH  # 2026-11-20, đối xứng với bộ phận nam
     if futa and F is None and not (t & rules.futa_male_presenting): F = HIGH
     other, conflict = bool(t & rules.other), False
     if excl := rules.exclusive_label(t):              # female_only / male_only / straight / solo+giới
@@ -210,7 +220,7 @@ Quyết định cuối cho từng post khi chạy `-gender S -gender_conf C [-ge
 | File | Thay đổi |
 |---|---|
 | `lustra/gender.py` (mới) | `GenderLabel` (StrEnum), `GenderConf` (IntEnum), `GenderResult` (dataclass, slots), `GenderRules.load(abbr)`, `infer_from_tags`. Thuần Python, không phụ thuộc mới. |
-| `lustra/gender_rules/{db,rx,bb,en,gelbooru_generic}.json` (mới; `bb` từ 2026-11-19) | Gồm `schema`, `completeness`, `female`/`male` {high, medium}, `exclusive`, `other`, `none`, `flags`, `maleBodypart`. Extension khai báo `"genderRules": "gender_rules.json"` trong manifest (trường tuỳ chọn, `apiVersion` vẫn là 1). Module không có ruleset dùng `gelbooru_generic` với completeness 0,5. |
+| `lustra/gender_rules/{db,rx,bb,en,gelbooru_generic}.json` (mới; `bb` từ 2026-11-19) | Gồm `schema`, `completeness`, `female`/`male` {high, medium}, `exclusive`, `other`, `none`, `flags`, `maleBodypart`, `femaleBodypart` (từ 2026-11-20). Extension khai báo `"genderRules": "gender_rules.json"` trong manifest (trường tuỳ chọn, `apiVersion` vẫn là 1). Module không có ruleset dùng `gelbooru_generic` với completeness 0,5. |
 | `lustra/safety.py` (mới) | Blacklist cứng (§4.1). |
 | `lustra/defines.py` | Thêm `ModuleCaps.GENDER_TAGS = 'gender_tags'` (module có ruleset đã được đo). Thêm vào `CAPABILITIES` của `DownloaderDb` và `DownloaderRx`. Extension có `genderRules` được thêm tự động. |
 | `lustra/download_base.py` | Thuộc tính `gender_select: frozenset[GenderLabel]`, `gender_mode`, `gender_min_conf`, `gender_strict`, `gender_results: dict[str, GenderResult]`. Kết quả để ở dict riêng, keyed theo `idstring` giống `item_info_dict_per_task`, **không** thêm slot vào `ItemInfo`, nhờ vậy định dạng dump/merge không đổi. Thêm `_filter_items_safety(parents)` và `_filter_items_by_gender(parents)`. Cách xoá item giống `_filter_items_missing_required_tags`: xoá khỏi `item_info_dict_per_task` và `items_raw_per_task`, thêm vào `filtered_out_ids_cache`, gọi `parents.discard(item_id)`. |

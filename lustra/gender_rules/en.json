@@ -75,12 +75,17 @@
       "group"
     ],
     "pov": [
-      "male_pov"
+      "male_pov",
+      "female_pov"
     ]
   },
   "maleBodypart": [
     "male_pov",
     "faceless_male"
+  ],
+  "femaleBodypart": [
+    "female_pov",
+    "faceless_female"
   ],
   "aliases": {}
 }
