@@ -54,13 +54,14 @@ def read_tags(job):  # job: lustra.sdk.TagJob
 
 ### Danh sách đi kèm của ext trong catalog
 
-Danh sách tag là dữ liệu, không phải code, nên **không nằm trong repo**: `extensions/<id>/` chỉ có `manifest.json` (vẫn khai báo `tagList`), `downloader.py`, `tags.py`, `specs.md`. Test `test_repository_extensions_carry_no_tag_list` từ chối file `*_tags.json` hoặc file trên 1 MB trong `extensions/`.
+Danh sách tag là dữ liệu, không phải code, nên **không nằm trong repo**: `extensions/<id>/` chỉ commit `manifest.json` (vẫn khai báo `tagList`), `downloader.py`, `tags.py`, `specs.md`. `.gitignore` bỏ qua `extensions/*/*_tags.json`, nên người bảo trì cứ để danh sách cạnh `manifest.json` trên máy mà không lo commit nhầm. Test `test_repository_extensions_carry_no_tag_list` từ chối file `*_tags.json` hoặc file trên 1 MB được commit trong `extensions/`.
 
 Danh sách đi vào zip của ext trong catalog chính thức (bản phát hành `catalog` trên GitHub), lúc người bảo trì build catalog:
 ```bash
 lustra-core tags --modules <abbr> --out <thư mục danh sách>     # job của chính ext (ext nằm trong extensions/ của repo)
 python tools/build_catalog.py --out <thư mục catalog> --lists <thư mục danh sách>
 ```
+- Danh sách để sẵn cạnh `manifest.json` (bị `.gitignore` bỏ qua) được dùng trước; `--lists` cho các danh sách nằm ở thư mục khác.
 - Dùng lại danh sách của catalog đang phát hành, thay vì đọc lại từ site: `unzip -j <id>-<version>.zip '<abbr>_tags.json' -d <thư mục danh sách>` cho từng zip của bản phát hành `catalog`.
 - Ext thiếu danh sách trong `--lists` vẫn được build, kèm một dòng báo. App tạo danh sách bằng job của ext khi người dùng bấm "Cập nhật".
 - `build_catalog.py` từ chối zip vượt giới hạn của trình cài (10 MB nén, 50 MB giải nén, 2.000 file).
