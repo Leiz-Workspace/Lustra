@@ -25,6 +25,7 @@ tags up to 8 of its frames (lustra/media_frames.py); classify_frames turns them 
 from __future__ import annotations
 
 import csv
+import dataclasses
 import hashlib
 import io
 import itertools
@@ -316,7 +317,7 @@ def _conf_of(p: float) -> GenderConf:
 def _rule_tags(rules) -> frozenset[str]:
     """every tag a ruleset reads (an undecided one of these can change a label)"""
     out = set(rules.both | rules.exclusive_female | rules.exclusive_male | rules.exclusive_futa | rules.solo | rules.other
-              | rules.none | rules.male_bodypart) | set(rules.aliases)
+              | rules.none | rules.male_bodypart | rules.female_bodypart) | set(rules.aliases)
     for table in (rules.female, rules.male, rules.flags):
         for tags in table.values():
             out |= tags
@@ -742,18 +743,30 @@ def _fetch_image(dwn, url: str) -> bytes:
     return data if len(data) <= IMAGE_MAX_BYTES else b''
 
 
+CLASSIFY_VERSION = 1
+'''bump when classify() turns predicted tags into a label differently (thresholds, confidence): cached verdicts are made again'''
+
+
+def verdict_cache_model(model_id: str) -> str:
+    """'model' column of the verdict cache: the model's id and what turns its tags into a label (classify, the 'db' ruleset). The
+    cache keeps labels, not the predicted tags: a verdict made with other rules is not served again, the post is looked at anew"""
+    rules = json.dumps(dataclasses.asdict(rules_for_module('db')), sort_keys=True, default=sorted, ensure_ascii=False)
+    return f'{model_id}#c{CLASSIFY_VERSION:d}-{hashlib.sha256(rules.encode()).hexdigest()[:12]}'
+
+
 def verdicts_for(dwn, posts: list[tuple[str, str]], *, workers: int = MODEL_WORKERS) -> dict[str, ModelVerdict]:
-    """{post id: verdict} for (post id, raw item) pairs. Cached verdicts are reused; posts whose picture cannot be fetched
-    are absent (they stay 'unknown'). Raises ModelUnavailable when the model server cannot be used, or the model or its
-    runtime is missing (in process)"""
+    """{post id: verdict} for (post id, raw item) pairs. Cached verdicts of the same model and rules are reused (verdict_cache_model);
+    posts whose picture cannot be fetched are absent (they stay 'unknown'). Raises ModelUnavailable when the model server cannot be
+    used, or the model or its runtime is missing (in process)"""
     from concurrent.futures import ThreadPoolExecutor
     tagger = backend(getattr(dwn, 'gender_model_url', ''), getattr(dwn, 'gender_model_token', ''))
     cache = _shared_cache()
     abbr = dwn._get_module_abbr()
+    model = verdict_cache_model(tagger.model_id)
 
     def one(post_id: str, raw: str) -> tuple[str, ModelVerdict | None]:
         key = f'{abbr}:{post_id}'
-        if (hit := cache.get(key, tagger.model_id)) is not None:
+        if (hit := cache.get(key, model)) is not None:
             return post_id, hit
         url = image_url_for(dwn, raw)
         data = _fetch_image(dwn, url) if url else b''
@@ -768,7 +781,7 @@ def verdicts_for(dwn, posts: list[tuple[str, str]], *, workers: int = MODEL_WORK
         if not probs:  # the model server refused this picture
             return post_id, None
         v = classify(probs, video=dwn._media_kind(raw) == 'video')
-        cache.put(key, v, tagger.model_id)
+        cache.put(key, v, model)
         return post_id, v
 
     out: dict[str, ModelVerdict] = {}

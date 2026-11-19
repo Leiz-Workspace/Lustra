@@ -36,10 +36,11 @@
 2. Hệ thống gọi `search.preview` với trang hiện tại: thumbnail tải qua `lustra-thumb://` (có cache), post bị lọc cục bộ được ẩn (bật "Hiện post bị lọc" để xem).
 3. ND bấm để chọn post; dùng Chọn hết, Bỏ chọn, Đảo; chuyển trang bằng ‹ ›.
 4. ND bấm đúp → lightbox hiện ảnh sample và danh sách tag, có nút + và − cho từng tag, và liên kết mở post trên website.
-5. ND bấm **Tải đã chọn (N)** → Hệ thống tạo job với `id:1,2,3` (Danbooru) hoặc `(id:1~id:2…)` (module khác, tối đa 200).
+5. ND bấm **Tải đã chọn (N)** → Hệ thống tạo job với `id:1,2,3` (Danbooru) hoặc `(id:1~id:2…)` (module khác, tối đa 200). Job tải đúng các post đã chọn: số post tối đa, khoảng ngày và bộ lọc giới tính của bảng bộ lọc không áp dụng (loại media và tuỳ chọn file vẫn áp dụng).
+- **Ngoại lệ:** truy vấn, khoảng ngày hay bộ lọc đã đổi sau lần Preview, hoặc Preview vừa lỗi → lưới bị làm mờ kèm ghi chú cho tới lần Preview sau. Site không tìm theo ngày (như Rule34; Danbooru thì tìm được): Preview chỉ ẩn post ngoài khoảng ngày trên trang đang xem, Đếm ghi "chưa trừ post ngoài khoảng ngày".
 
 ## UC-06 Tải xuống
-1. ND bấm **Tải xuống** (hoặc Ctrl+Enter).
+1. ND bấm **Tải xuống** (hoặc Ctrl+Enter). Nếu đang chọn post trên Preview còn khớp truy vấn và bộ lọc, Hệ thống hỏi: **Tải N post đã chọn** (như UC-05 bước 5) hay **Tải cả truy vấn**.
 2. Nếu bật cảnh báo và thư mục đích không trống, Hệ thống hỏi xác nhận.
 3. Hệ thống đưa job vào hàng đợi (tối đa `maxConcurrentJobs` job chạy cùng lúc) và spawn CLI ở chế độ IPC.
 4. Trang **Tải xuống** cập nhật trạng thái, thanh tiến độ, ✓/✗, log.

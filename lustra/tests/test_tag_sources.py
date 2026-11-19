@@ -6,7 +6,9 @@ Retry-After, request budget, bot challenges, hosts). End to end: a Gelbooru-type
 gets its list from the updater and autocompletion shows it.
 Every new extension has a list at once: the generator puts the site's list into the draft and the archive (lustra/extgen/taglist.py),
 the installed extension's list is used (TagsDB.extension_lists), and a site without a tag listing gets its list learned from the
-posts previewed and downloaded (lustra/tags_learned.py).
+posts previewed and downloaded (lustra/tags_learned.py); a list from a source wins over a learned one.
+A running update is listed by tags.sources until it ends; e621's tag export is found on its db_exports page (a trimmed copy in
+lustra/tests/fixtures/) and checked against the SHA-256 listed there.
 Run: python -m unittest lustra.tests.test_tag_sources
 """
 #########################################
@@ -16,6 +18,7 @@ Run: python -m unittest lustra.tests.test_tag_sources
 import csv
 import datetime
 import gzip
+import hashlib
 import html
 import io
 import itertools
@@ -375,6 +378,20 @@ class EngineSourceTests(TestCase):
                 self.assertGreater(seen[0], 0)  # started from the saved cursor (page 2 / an id), not from the first page
                 self.assertTrue(any('continuing a stopped update' in n for n in notes), notes)
                 self.assertFalse(partial.exists())  # complete: nothing left to continue
+
+    def test_progress_comes_with_time_not_with_a_count_of_tags(self) -> None:
+        # a slow read (Bbooru: 1000 tags a page, a page a second or more) told only every 5000 tags looked stopped for minutes
+        def counts(interval: float) -> list[int]:
+            notes: list[tuple[str, int]] = []
+            with mock.patch.object(tags_updater, 'PROGRESS_INTERVAL', interval):
+                res, _ = self._update('danbooru_json', progress=lambda msg, n: notes.append((msg, n)))
+            self.assertTrue(res.written, res.message)
+            self.assertEqual(f'[zq] {len(EXPECTED):d} tags read, writing the list', notes[-1][0])
+            return [n for msg, n in notes if msg.endswith(' tags...')]
+
+        self.assertEqual(list(range(1, len(EXPECTED) + 1)), counts(0.0))  # each tag as it comes when the interval is over
+        self.assertEqual([1], counts(3600.0))  # the first tag at once, then once per interval
+        self.assertEqual(2.0, tags_updater.PROGRESS_INTERVAL)
 
     def test_budget_error_is_raised_and_nothing_is_written(self) -> None:
         with self.assertRaises(TagSourceError) as cm:
@@ -917,6 +934,175 @@ class LearnedTagListTests(_DataDirTest):
         with mock.patch.object(server.threading, 'Thread') as thread:  # Preview: nothing to learn, no thread
             server._learn_from_preview('rp', [{'id': '1', 'tags': ['a']}])
             thread.assert_not_called()
+
+    def test_a_list_from_a_source_wins_over_a_newer_learned_list(self) -> None:
+        # Rule34Hentai before 1.0.2: a list learned from Preview, then the update ships the site's list (older file)
+        tags_learned.learn('fq', [('1', ['sky'])])
+        learned = tags_learned.list_path('fq')
+        self.assertEqual(learned, TagsDB.get_file('fq'))
+        folder = self.data / 'extensions' / 'fakebooru'
+        folder.mkdir(parents=True)
+        m = {**make_manifest(ext_id='fakebooru', abbr='fq', name='Fakebooru', site=SITE, engine='custom', media=['image']),
+             'tagList': 'fq_tags.json'}
+        (folder / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+        tags_updater.write_tag_list(folder / 'fq_tags.json', {'sky': (5000, 'general'), 'skyline': (40, 'general')})
+        old = time.time() - 30 * 86400
+        os.utime(folder / 'fq_tags.json', (old, old))
+        TagsDB.locate_default_lists(reload=('fq',))
+        self.assertEqual(folder / 'fq_tags.json', TagsDB.get_file('fq'))
+        self.assertEqual(['sky', 'skyline'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sk'})])
+        self.assertFalse(tags_learned.may_learn('fq'))
+        self.assertTrue(tags_learned.has_source_list('fq'))
+        self.assertEqual(0, tags_learned.learn('fq', [('2', ['sky', 'new'])]))
+        shutil.rmtree(folder)  # uninstalled: the learned list is the module's list again
+        TagsDB.locate_default_lists(reload=('fq',))
+        self.assertEqual(learned, TagsDB.get_file('fq'))
+        self.assertTrue(tags_learned.may_learn('fq'))
+
+    def test_learn_says_why_nothing_was_learned(self) -> None:
+        # "Học từ file đã tải" (Tags A-Z): nothing downloaded yet, nothing new, or no learning needed (a list from a source)
+        keys = ('mayLearn', 'sourceList', 'indexed', 'newPosts')
+        res = server.m_tags_learn({'module': 'zq'})
+        self.assertEqual((True, False, False, 0), tuple(res[k] for k in keys))
+        with DownloadIndex(create=True) as index:
+            index.add_many([IndexRecord(module='zq', post_id='1', path='/x/zq_1.jpg', tags='sky')])
+        res = server.m_tags_learn({'module': 'zq'})
+        self.assertEqual((True, False, True, 1), tuple(res[k] for k in keys))
+        res = server.m_tags_learn({'module': 'zq'})
+        self.assertEqual((True, False, True, 0), tuple(res[k] for k in keys))
+        self.assertEqual({'learned': True, 'posts': 1, 'tags': 1}, {k: res[k] for k in ('learned', 'posts', 'tags')})
+        TagsDB.load_from_dict('zm', {'sky': (TagTypes.TAG_TYPE_GENERAL, 3)})
+        res = server.m_tags_learn({'module': 'zm'})
+        self.assertEqual((False, True, False, 0), tuple(res[k] for k in keys))
+        self.assertFalse(server.m_tags_learn({'module': 'rp'})['mayLearn'])  # its list is bundled in 2tags/
+        self.assertTrue(server.m_tags_learn({'module': 'rp'})['sourceList'])
+
+
+class RunningUpdateTests(_DataDirTest):
+    """Tags A-Z shows a running update whoever started it (its button, the app's auto update, a new extension), also after a reload
+    of the window: tags.sources says which modules run, with the count of tags read so far"""
+
+    def test_a_running_update_is_listed_until_it_ends(self) -> None:
+        shutil.copytree(_draft(self.root), self.data / 'extensions' / 'fakebooru')  # installed: fq has a tag source
+        started, release, done = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        notes: list[tuple[str, dict]] = []
+        running_at_done: list[dict] = []
+
+        def slow_update(module: str, out_dir: pathlib.Path, *, progress=None, **_kw):
+            progress(f'[{module}] 1234 tags...', 1234)
+            started.set()
+            release.wait(WAIT)
+            res = tags_updater.UpdateResult(module, out_dir / f'{module}_tags.json')
+            res.message = 'not written: no tags fetched'
+            return res
+
+        def notify(method: str, params: dict) -> None:
+            notes.append((method, params))
+            if method == 'tags.updateDone':
+                running_at_done.append(server._running_tag_updates())
+                done.set()
+
+        def row() -> dict:
+            return next(r for r in server.m_tags_sources({}) if r['module'] == 'fq')
+
+        self.assertEqual((False, 0, ''), (row()['running'], row()['count'], row()['message']))
+        out = self.root / 'out'
+        with mock.patch.object(tags_updater, 'update_tag_list', slow_update), mock.patch.object(server, 'notify', notify):
+            self.assertEqual('tags-fq', server.m_tags_update({'module': 'fq', 'outDir': str(out)})['job'])
+            self.assertTrue(started.wait(WAIT))
+            r = row()
+            self.assertEqual((True, 1234, '[fq] 1234 tags...'), (r['running'], r['count'], r['message']))
+            self.assertLessEqual(abs(time.time() - r['startedAt']), WAIT)
+            with self.assertRaises(server.RpcError) as cm:  # one update of a module at a time
+                server.m_tags_update({'module': 'fq', 'outDir': str(out)})
+            self.assertEqual(-32004, cm.exception.code)
+            release.set()
+            self.assertTrue(done.wait(WAIT), notes)
+        self.assertEqual([{}], running_at_done)  # gone before the app is told: its next tags.sources has it stopped
+        self.assertEqual((False, 0, ''), (row()['running'], row()['count'], row()['message']))
+        self.assertEqual(['tags.updateProgress', 'tags.updateDone'], [m for m, _ in notes])
+        self.assertEqual({'job': 'tags-fq', 'module': 'fq', 'count': 1234, 'message': '[fq] 1234 tags...'}, notes[0][1])
+        self.assertEqual(('fq', False), (notes[1][1]['module'], notes[1][1]['written']))
+
+
+FIXTURES = pathlib.Path(__file__).resolve().parent / 'fixtures'
+
+
+class E621ExportTests(_DataDirTest):
+    """e621 lists its daily database exports on db_exports (db_export/ redirects there): the tag export is found there, its SHA-256
+    checked, then read. A fake e621 serves a trimmed copy of the real page (lustra/tests/fixtures/e621_db_exports.html)"""
+    LISTED = '702bfb79c59542891a0b6ec3a345ac90864e9edd978cc6f1136c3841fca728b7'
+    '''the checksum of tags.csv.gz in the saved page (not the one of the small export here)'''
+
+    def setUp(self) -> None:
+        super().setUp()
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(['id', 'name', 'category', 'post_count'])
+        w.writerows([i, name, c, n] for i, name, n, c in TAGS)
+        self.export = gzip.compress(buf.getvalue().encode())
+        self.page = (FIXTURES / 'e621_db_exports.html').read_text(encoding='utf-8')
+        self.out = self.root / 'out'
+
+    def _update(self, page: str) -> tuple[tags_updater.UpdateResult, FakeSession]:
+        def route(url: str, _headers: dict) -> tuple[int, bytes, dict]:
+            where = url_parse.urlsplit(url)
+            where = (where.hostname, where.path)
+            if where == ('e621.net', '/robots.txt'):
+                return 200, b'User-agent: *\nDisallow: /posts.json\n', {'content-type': 'text/plain'}
+            if where == ('e621.net', '/db_exports'):
+                return 200, page.encode(), {'content-type': 'text/html; charset=utf-8'}
+            if where == ('e621.net', '/db_export/'):
+                return 301, b'', {'location': 'https://e621.net/db_exports'}
+            if where == ('static1.e621.net', '/data/db_export/tags.csv.gz'):
+                return 200, self.export, {'content-type': 'application/octet-stream'}
+            return 404, b'<html>not found</html>', {'content-type': 'text/html'}
+
+        session = FakeSession(route)
+        return update_tag_list('en', self.out, delay=0, allow_local=True, session=session), session
+
+    def test_the_tag_export_listed_on_db_exports_is_checked_and_read(self) -> None:
+        self.assertIs(CURATED['en'], tag_source('en'))
+        self.assertIn('db_exports', CURATED['en'].description)
+        res, session = self._update(self.page.replace(self.LISTED, hashlib.sha256(self.export).hexdigest()))
+        self.assertTrue(res.written, res.message)
+        got = _read_list(res.path)
+        self.assertEqual(EXPECTED, {k: int(v.split()[0]) for k, v in got.items()})
+        self.assertEqual('40 posts (copyright)', got['tom_&_jerry'])
+        self.assertEqual('300 posts (character)', got['hatsune_miku'])
+        self.assertEqual(['https://e621.net/robots.txt', 'https://e621.net/db_exports',
+                          'https://static1.e621.net/data/db_export/tags.csv.gz'], [u for u, _ in session.calls])
+
+    def test_a_wrong_checksum_is_refused(self) -> None:
+        with self.assertRaises(RuntimeError) as cm:
+            self._update(self.page)  # the page's checksum is the one of the real 33.7 MB export
+        self.assertIn('SHA-256', str(cm.exception))
+        self.assertFalse((self.out / 'en_tags.json').exists())
+
+    def test_the_link_and_its_checksum_are_read_from_the_same_row(self) -> None:
+        link = tags_updater._e621_export_link
+        base = 'https://e621.net/db_exports'
+        self.assertEqual(('https://static1.e621.net/data/db_export/tags.csv.gz', self.LISTED), link(self.page, base))
+        # a dated name, a relative link; a row without its checksum, or with two links, gives none
+        dated = self.page.replace('db_export/tags.csv.gz', 'db_export/tags-2026-11-19.csv.gz')
+        self.assertEqual(('https://static1.e621.net/data/db_export/tags-2026-11-19.csv.gz', self.LISTED), link(dated, base))
+        rel = self.page.replace('https://static1.e621.net/data/db_export/tags.csv.gz', '/data/tags.csv.gz')
+        self.assertEqual(('https://e621.net/data/tags.csv.gz', self.LISTED), link(rel, base))
+        self.assertEqual(('https://static1.e621.net/data/db_export/tags.csv.gz', ''), link(self.page.replace(self.LISTED, 'x'), base))
+        flat = self.page.replace('<div class="row">', '<div class="cells">')
+        self.assertEqual(('https://static1.e621.net/data/db_export/tags.csv.gz', ''), link(flat, base))
+        self.assertEqual(('', ''), link(self.page.replace('tags.csv.gz', 'tags.json'), base))
+
+    def test_without_a_link_the_dated_exports_of_before_are_tried(self) -> None:
+        session = FakeSession(lambda url, _h: (404, b'<html>not found</html>', {'content-type': 'text/html'}))
+        with self.assertRaises(RuntimeError) as cm:  # no page, and the dated files are gone (the error the owner saw, now clearer)
+            update_tag_list('en', self.out, delay=0, allow_local=True, session=session)
+        self.assertEqual('no recent tag export found on e621.net (db_exports lists no tags.csv.gz)', str(cm.exception))
+        today = datetime.date.today()
+        self.assertEqual(['https://e621.net/robots.txt', 'https://e621.net/db_exports',
+                          *(f'https://e621.net/db_export/tags-{today - datetime.timedelta(days=d)}.csv.gz' for d in range(4))],
+                         [u for u, _ in session.calls])
 
 
 JOB_FILE = '''# coding=UTF-8

@@ -11,6 +11,7 @@ Handles short queries (tags, preview, count, extensions, tag list updates). Down
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import io
 import json
@@ -20,6 +21,7 @@ import platform
 import re
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +33,7 @@ _PROTO_OUT = sys.stdout
 sys.stdout = sys.stderr
 
 from . import tags_learned  # noqa: E402
-from .defines import ThreadInterruptException  # noqa: E402
+from .defines import DATE_MIN_DEFAULT, ModuleCaps, ThreadInterruptException  # noqa: E402
 from .extensions import ENV_CATALOG_AUTOLOAD, Extensions, data_dir  # noqa: E402
 from .gender import decide, infer_from_tags, rules_for_module  # noqa: E402
 from .help import APP_ADDRESS  # noqa: E402
@@ -43,6 +45,7 @@ from .safety import blocked_tag  # noqa: E402
 from .tags import TAG_NAMES_BY_TYPE, TagTypes  # noqa: E402
 from .tagsdb import TAG_ALIASES, TagsDB, is_wtag, load_tag_aliases, wildcard_pattern  # noqa: E402
 from .task import KNOWN_META_NAMES, re_meta_name  # noqa: E402
+from .utils import as_date  # noqa: E402
 from .vcs import APP_NAME, APP_VERSION  # noqa: E402
 
 __all__ = ('main',)
@@ -299,12 +302,15 @@ def m_tags_status(_: dict) -> list[dict]:
 
 def m_tags_learn(p: dict) -> dict:
     """Learns a module's tag list from its downloaded files (download index) when it has no list from a source; the app calls it
-    after each download job. No request is made. -> {module, posts (new), learned, tags}"""
+    after each download job. No request is made. -> {module, learned, posts, tags (status), newPosts, mayLearn (False: nothing is
+    learned, the module has a list from a source, see sourceList), sourceList, indexed (the download index holds posts of the module)}"""
     module = str(p.get('module', ''))
     if not re_abbr.fullmatch(module):
         raise RpcError(-32602, f'invalid module \'{module}\'')
-    new = tags_learned.learn_from_index(module)
-    return {'module': module, **tags_learned.status(module), 'newPosts': new}
+    may = tags_learned.may_learn(module)
+    new = tags_learned.learn_from_index(module) if may else 0
+    return {'module': module, **tags_learned.status(module), 'newPosts': new, 'mayLearn': may,
+            'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module)}
 
 
 def _learn_from_preview(module: str, items: list[dict]) -> None:
@@ -323,14 +329,28 @@ def _learn_quietly(module: str, posts: list) -> None:
 
 
 _tags_updates_lock = threading.Lock()
-_tags_updates: set[str] = set()
+_tags_updates: dict[str, dict] = {}
+'''running tag list updates, module -> {count, message, startedAt}: Tags A-Z shows them as running whoever started them (its button,
+the app's auto update, an extension just installed), also after the window was reloaded'''
+
+
+def _running_tag_updates() -> dict[str, dict]:
+    with _tags_updates_lock:
+        return {m: dict(st) for m, st in _tags_updates.items()}
 
 
 def m_tags_sources(_: dict) -> list[dict]:
     """Installed modules with a tag list source (the five reviewed ones, extensions made from a known engine): the Tags A-Z page
-    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'"""
+    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'.
+    running: an update of the module runs in this core (count: tags read so far, message: its last progress line, startedAt: epoch s)"""
     from .tags_updater import tag_sources
-    return [s.as_dict() for s in tag_sources()]
+    running = _running_tag_updates()
+    rows = []
+    for s in tag_sources():
+        st = running.get(s.module) or {}
+        rows.append({**s.as_dict(), 'running': bool(st), 'count': st.get('count', 0), 'message': st.get('message', ''),
+                     'startedAt': st.get('startedAt', 0)})
+    return rows
 
 
 def m_tags_update(p: dict) -> dict:
@@ -341,28 +361,48 @@ def m_tags_update(p: dict) -> dict:
         raise RpcError(-32602, f'tag list update is not supported for \'{module}\'')
     out_dir = pathlib.Path(p['outDir']) if p.get('outDir') else tags_dirs()[0] if os.environ.get(ENV_TAGS_DIR) else data_dir() / 'tags'
     job = f'tags-{module}'
+    reference = TagsDB.get_file(module)
     with _tags_updates_lock:
         if module in _tags_updates:
             raise RpcError(-32004, f'tag list update for \'{module}\' is already running')
-        _tags_updates.add(module)
-    reference = TagsDB.get_file(module)
+        _tags_updates[module] = {'count': 0, 'message': '', 'startedAt': time.time()}
+
+    def progress(msg: str, count: int) -> None:
+        msg = _redact(msg)
+        with _tags_updates_lock:
+            if (st := _tags_updates.get(module)) is not None:
+                st.update(count=int(count), message=msg)
+        notify('tags.updateProgress', {'job': job, 'module': module, 'count': count, 'message': msg})
 
     def run() -> None:
+        done: dict = {'job': job, 'module': module, 'ok': False, 'written': False, 'message': 'failed: stopped'}
         try:
             res = update_tag_list(module, out_dir, api_key=p.get('apiKey', ''), delay=float(p.get('delay', 0.5)), reference=reference,
-                                  source=source, full=p.get('full') is True,
-                                  progress=lambda msg, n: notify('tags.updateProgress', {'job': job, 'module': module, 'count': n, 'message': msg}))
+                                  source=source, full=p.get('full') is True, progress=progress)
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
-            notify('tags.updateDone', {'job': job, 'ok': True, **res.as_dict()})
+            done = {'job': job, 'ok': True, **res.as_dict()}
         except Exception as err:
-            notify('tags.updateDone', {'job': job, 'module': module, 'ok': False, 'written': False, 'message': _redact(f'failed: {err}')})
+            done = {'job': job, 'module': module, 'ok': False, 'written': False, 'message': _redact(f'failed: {err}')}
         finally:
             with _tags_updates_lock:
-                _tags_updates.discard(module)
+                _tags_updates.pop(module, None)
+            # told once the running state is gone: the app reads tags.sources again when an update ends
+            notify('tags.updateDone', done)
 
     threading.Thread(target=run, daemon=True, name=job).start()
     return {'job': job, 'outDir': out_dir.as_posix()}
+
+
+def _date_filter_kind(dwn, args) -> str:
+    """How the date limits (-mindate / -maxdate) reach a search, after argument parsing:
+    '' none set; 'native': the site filters (db turns them into a 'date:' metatag), so counts and pages are exact;
+    'local': not part of the site query: a results page hides the posts outside the limits, the count ignores them (the download
+    finds the right pages by date first, download.py); 'unsupported': the module cannot filter by date, the limits were dropped"""
+    if dwn._has_date_limits():
+        return 'native' if dwn._supports_native_date_filter() else 'local'
+    asked = bool(getattr(args, 'mindate', None) or getattr(args, 'maxdate', None))
+    return 'unsupported' if asked and not dwn._has_capability(ModuleCaps.DATE_FILTER) else ''
 
 
 def m_search_count(p: dict) -> dict:
@@ -371,8 +411,11 @@ def m_search_count(p: dict) -> dict:
         if dwn.launch_error or dwn.interrupted:
             raise RpcError(-32002, dwn.launch_error or 'cancelled', {'log': list(_tls.log or []), 'cfChallenge': dwn.cf_challenge_hit})
         counts = list(dwn.task_counts)
-        return {'count': int(dwn.total_count), 'taskCounts': counts, 'approximate': len(counts) > 1 or bool(dwn.required_tags),
-                'requiredTags': list(dwn.required_tags), 'cfChallenge': dwn.cf_challenge_hit}
+        dates = _date_filter_kind(dwn, args)
+        # 'local' dates: the site counted every date, the real count is lower (an upper bound, like required tags)
+        return {'count': int(dwn.total_count), 'taskCounts': counts,
+                'approximate': len(counts) > 1 or bool(dwn.required_tags) or dates == 'local',
+                'requiredTags': list(dwn.required_tags), 'dateFilter': dates, 'cfChallenge': dwn.cf_challenge_hit}
     return _with_downloader(p.get('module', 'rx'), p.get('tags', ''), list(p.get('args', [])), fn)
 
 
@@ -432,7 +475,7 @@ def _fetch_results_page(dwn, page: int, page_size: int, maxlim: int | None) -> t
 
 class _ResultsFilter:
     """Local filters of a results page, as the download applies them: safety blacklist (-safety_blacklist), required tags,
-    negative groups, gender. Counts what it hides"""
+    negative groups, date limits the site query does not carry (see _date_filter_kind), gender. Counts what it hides"""
 
     def __init__(self, dwn) -> None:
         self.dwn = dwn
@@ -441,6 +484,9 @@ class _ResultsFilter:
         self.safety_on = bool(dwn.safety_blacklist)
         self.rules = rules_for_module(dwn._get_module_abbr()) if self.gender_on else None
         self.with_tags = bool(dwn._can_extract_item_info_without_fetch())
+        self.dates = _date_bounds(dwn) if _date_filter_kind(dwn, None) == 'local' else None
+        self.dated = 0
+        '''posts of the page whose listing gave a readable date (none: the dates could not be checked, see m_search_preview)'''
         self.gender_stats: dict[str, int] = {}
         self.blocked = 0
         self.hidden_no_tags = 0
@@ -474,6 +520,8 @@ class _ResultsFilter:
             excluded_by.append('required')
         if any(all(any(pt.fullmatch(t) for t in tl) for pt in pl) for pl in dwn.neg_and_groups):
             excluded_by.append('neg')
+        if self.dates is not None and not self._in_dates(info.date):
+            excluded_by.append('date')
         if self.rules is not None:
             res = infer_from_tags(tags, self.rules)
             keep, eff = decide(res, dwn.gender_select, dwn.gender_min_conf, dwn.gender_strict)
@@ -488,6 +536,25 @@ class _ResultsFilter:
         item['excluded'] = bool(excluded_by)
         item['excludedBy'] = excluded_by
         return item
+
+    def _in_dates(self, date: str) -> bool:
+        """Post date (FMT_DATE) within the limits; a post without a readable date is kept, as the download keeps it"""
+        if self.dates is None:
+            return True
+        try:
+            day = as_date(date)
+        except (TypeError, ValueError):
+            return True
+        self.dated += 1
+        return self.dates[0] <= day <= self.dates[1]
+
+
+def _date_bounds(dwn) -> tuple[datetime.date, datetime.date]:
+    """First and last day a download keeps (download_base: _filter_last_items, _filter_first_items): a min date on or before
+    DATE_MIN_DEFAULT and a max date on or after the downloader's day (date_today, the default) limit nothing. A site ahead of the
+    user's time zone dates its newest posts tomorrow: they stay, as in the download"""
+    lo, hi = as_date(dwn.date_min), as_date(dwn.date_max)
+    return lo if lo > as_date(DATE_MIN_DEFAULT) else datetime.date.min, hi if hi < dwn.date_today else datetime.date.max
 
 
 PREVIEW_MODEL_MAX = 40
@@ -552,8 +619,11 @@ def _mark_downloaded(module: str, items: list[dict]) -> None:
 
 
 def m_search_preview(p: dict) -> dict:
-    """Page `page` of search results with thumbnails, local filters (required tags / negative groups) applied.
-    pageSize: see _results_page_size. Multi-task queries: page `page` of every task, merged (see _fetch_results_page)"""
+    """Page `page` of search results with thumbnails, local filters (required tags / negative groups / dates / gender) applied.
+    pageSize: see _results_page_size. Multi-task queries: page `page` of every task, merged (see _fetch_results_page).
+    dateFilter: see _date_filter_kind, plus 'unchecked' (local limits, but no post of the listing carries a date: nothing hidden).
+    Pages are the site's pages: with 'local' limits a page may hold no post in range (finding the first page by date costs a
+    search per step, the download does it)"""
     page = max(0, int(p.get('page', 0)))
 
     def fn(dwn, args) -> dict:
@@ -564,10 +634,14 @@ def m_search_preview(p: dict) -> dict:
         result = [item for item in map(filt.item, items_raw) if item is not None]
         _apply_gender_model(filt, result)
         _mark_downloaded(dwn._get_module_abbr(), result)
+        dates = _date_filter_kind(dwn, args)
+        # no post of the page had a readable date in the listing (rule34hentai lists tags, not dates): nothing could be checked
+        if dates == 'local' and (not filt.with_tags or (result and not filt.dated)):
+            dates = 'unchecked'
         return {'page': page, 'pageSize': page_size, 'hasMore': has_more, 'items': result, 'tasks': list(dwn.tags_str_arr),
                 'requiredTags': list(dwn.required_tags), 'site': dwn._get_sitename(), 'genderStats': filt.gender_stats,
                 'blockedCount': filt.blocked, 'hiddenNoTags': filt.hidden_no_tags, 'genderEnabled': filt.gender_on,
-                'genderModel': filt.model_info}
+                'genderModel': filt.model_info, 'dateFilter': dates}
     module = p.get('module', 'rx')
     res = _with_downloader(module, p.get('tags', ''), list(p.get('args', [])), fn)
     _learn_from_preview(module, res.get('items', []))
@@ -679,9 +753,20 @@ def _int_param(p: dict, key: str, default: int) -> int:
         raise RpcError(-32602, f'invalid \'{key}\'') from None
 
 
+def _recover_moves(index) -> None:
+    """Trash moves a stopped core left half done are finished before the library or the trash is shown (recover_moves: one
+    indexed query when there is nothing to do). A locked or broken index still shows what it has"""
+    import sqlite3
+    try:
+        index.recover_moves()
+    except sqlite3.Error:
+        pass
+
+
 def m_index_search(p: dict) -> dict:
-    """{tags, module, dateFrom, dateTo, page, pageSize, order} -> {total, page, pageSize, items: [...], terms}.
+    """{tags, module, dateFrom, dateTo, page, pageSize, order, trash} -> {total, page, pageSize, items: [...], terms}.
     tags: 'tag -tag pre* rating:e md5:<hash> id:<n>' (all must match); dates: post date 'YYYY-MM-DD' (inclusive); pages from 0.
+    trash: true lists the files in the trash (items: trashedAt, origPath) instead of the library.
     Reads only the index: no request to any website. Each call has its own connection (the rpc pool is multi-threaded)"""
     from .dlindex import DownloadIndex
     tags = p.get('tags') or ''
@@ -690,9 +775,10 @@ def m_index_search(p: dict) -> dict:
     if module and not re_index_module.fullmatch(module):
         raise RpcError(-32602, 'invalid module')
     with DownloadIndex() as index:
+        _recover_moves(index)
         return index.search(tags[:INDEX_QUERY_MAX_LEN], module=module, date_from=str(p.get('dateFrom') or ''),
                             date_to=str(p.get('dateTo') or ''), page=_int_param(p, 'page', 0), page_size=_int_param(p, 'pageSize', 50),
-                            order=str(p.get('order') or 'downloaded'))
+                            order=str(p.get('order') or 'downloaded'), trash=p.get('trash') is True)
 
 
 def _model_server_params(p: dict) -> tuple[str, str]:
@@ -734,6 +820,7 @@ def m_index_stats(_: dict) -> dict:
     """Totals of the download index (files, posts, tags, sizes, per module), exists: False until the first file is recorded"""
     from .dlindex import DownloadIndex
     with DownloadIndex() as index:
+        _recover_moves(index)
         return index.stats()
 
 
@@ -847,6 +934,78 @@ def m_index_clean_cancel(_: dict) -> dict:
 
 
 METHODS.update({'index.clean': m_index_clean, 'index.cleanCancel': m_index_clean_cancel})
+
+
+# ----- trash of the library (lustra/dlindex.py). The app calls these from main only (library:* handlers), never the renderer -----
+
+INDEX_PATHS_MAX = 1000
+INDEX_ROOTS_MAX = 8
+INDEX_PATH_MAX_LEN = 4096
+TRASH_DAYS_MAX = 3650
+
+
+def _paths_param(p: dict, key: str, max_count: int, required: bool = True) -> list[str]:
+    """A list of absolute paths (the index compares them as stored: they come from index.search items)"""
+    raw = p.get(key)
+    if raw is None and not required:
+        return []
+    if not isinstance(raw, list) or (required and not raw) or len(raw) > max_count:
+        raise RpcError(-32602, f'invalid \'{key}\'')
+    for x in raw:
+        if not isinstance(x, str) or not x or len(x) > INDEX_PATH_MAX_LEN or '\x00' in x or not os.path.isabs(x):
+            raise RpcError(-32602, f'invalid \'{key}\': absolute paths only')
+    return raw
+
+
+def m_index_trash(p: dict) -> dict:
+    """{paths, roots?} -> {trashed: [{path, trashPath}], failed: [{path, error}], refused: [path]}. Moves files of the library into
+    the trash (renamed on the same drive, never copied; roots: the download folders, see DownloadIndex.trash_folders). Only files
+    the index has as rows of the library: any other path is refused, never touched"""
+    from .dlindex import DownloadIndex
+    paths = _paths_param(p, 'paths', INDEX_PATHS_MAX)
+    roots = _paths_param(p, 'roots', INDEX_ROOTS_MAX, required=False)
+    with DownloadIndex() as index:
+        return index.trash(paths, roots=roots)
+
+
+def m_index_restore(p: dict) -> dict:
+    """{paths: paths in the trash} -> {restored: [{path, restoredPath}], failed, refused}: files back where they were"""
+    from .dlindex import DownloadIndex
+    paths = _paths_param(p, 'paths', INDEX_PATHS_MAX)
+    with DownloadIndex() as index:
+        return index.restore(paths)
+
+
+def m_index_purge_trash(p: dict) -> dict:
+    """{days} | {paths} | {all: true} -> {purged, files, bytes, failed, kept}: deletes files of the trash for good (trashed more
+    than `days` days ago, the given paths of the trash, or all of them), then their rows. Cannot be undone: the app asks first"""
+    from .dlindex import DownloadIndex
+    ways = [k for k in ('days', 'paths', 'all') if p.get(k) is not None and p.get(k) is not False]
+    if len(ways) != 1:
+        raise RpcError(-32602, 'one of \'days\', \'paths\' or \'all\'')
+    with DownloadIndex() as index:
+        if ways[0] == 'days':
+            days = p['days']
+            if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= TRASH_DAYS_MAX:
+                raise RpcError(-32602, f'invalid \'days\': 0..{TRASH_DAYS_MAX:d}')
+            return index.purge_trash(older_than_days=days)
+        if ways[0] == 'paths':
+            return index.purge_trash(paths=_paths_param(p, 'paths', INDEX_PATHS_MAX))
+        if p['all'] is not True:
+            raise RpcError(-32602, 'invalid \'all\'')
+        return index.purge_trash(all=True)
+
+
+def m_index_forget(p: dict) -> dict:
+    """{paths} -> {removed, refused}: drops the rows of files that are no longer on disk (rows only)"""
+    from .dlindex import DownloadIndex
+    paths = _paths_param(p, 'paths', INDEX_PATHS_MAX)
+    with DownloadIndex() as index:
+        return index.forget(paths)
+
+
+METHODS.update({'index.trash': m_index_trash, 'index.restore': m_index_restore, 'index.purgeTrash': m_index_purge_trash,
+                'index.forget': m_index_forget})
 
 
 def main() -> int:

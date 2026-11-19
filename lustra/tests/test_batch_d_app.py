@@ -3,7 +3,8 @@
 Lustra: regression tests for audit batch D, desktop app side (docs/reports/audit-2026-11-16.md, D3 / D4), offline
 - frozen core entry (lustra/frozen_main.py): 'server' / 'cli' dispatch used by the packaged app
 - headers / cookies with '"' or '\\' as the app passes them ('-header name=value' / '-cookie name=value', see app/main.js connectionArgs)
-- tools/build_core.py data staging: everything the frozen core needs at run time
+- tools/build_core.py data staging: everything the frozen core needs at run time; the catalog extensions without a tag source carry
+  their 2tags/ list, which an install from that catalog brings to the core
 - tools/check_selftest.py: a failed step names its false checks and shows each value on a line of its own
 Run: python -m unittest lustra.tests.test_batch_d_app
 """
@@ -15,10 +16,11 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from lustra.logger import Logger
 
@@ -105,10 +107,79 @@ class BuildCoreTests(TestCase):
             catalog = data['extensions']
             self.assertTrue(all((d / 'manifest.json').is_file() for d in catalog.iterdir() if d.is_dir()))
             self.assertFalse(any(catalog.rglob('__pycache__')))
+            self.assertTrue((catalog / 'rule34hentai' / 'rn_tags.json').is_file())  # _stage_catalog, below
+            self.assertFalse((catalog / 'bbooru' / 'bb_tags.json').exists())
             self.assertEqual(['all_tag_aliases.json'], sorted(f.name for f in data['2tags'].iterdir()))
         with tempfile.TemporaryDirectory() as tmp:
             data = dict((dest, src) for src, dest in bc._stage_data(pathlib.Path(tmp), 'none'))
             self.assertNotIn('2tags', data)
+
+    def test_catalog_extensions_without_a_tag_source_carry_their_list(self) -> None:
+        # Rule34Hentai, Paheal, Rule34.us read no list from their site (no tagUpdate, not reviewed, no engine): the bundled catalog
+        # holds their 2tags/ list next to the manifest. Bbooru, e621, Xbooru read theirs (the core stays small)
+        bc = _load_build_core()
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = bc._stage_catalog(pathlib.Path(tmp) / 'extensions')
+            with_list = {p.parent.name: p.name for p in catalog.glob('*/*_tags.json')}
+            self.assertEqual({'rule34hentai': 'rn_tags.json', 'paheal': 'rp_tags.json', 'rule34us': 'rs_tags.json'}, with_list)
+            for ext_id, name in with_list.items():
+                self.assertEqual((ROOT / '2tags' / name).stat().st_size, (catalog / ext_id / name).stat().st_size)
+                manifest = json.loads((catalog / ext_id / 'manifest.json').read_text(encoding='utf-8'))
+                self.assertEqual((name, '1.0.2'), (manifest['tagList'], manifest['version']))  # 1.0.1 installs are offered the update
+            for ext_id in ('bbooru', 'e621', 'xbooru'):
+                self.assertEqual([], list((catalog / ext_id).glob('*_tags.json')))
+            self._install_staged(catalog, pathlib.Path(tmp) / 'data')
+
+    def _install_staged(self, catalog: pathlib.Path, data_dir: pathlib.Path) -> None:
+        """An install (or an update of 1.0.1) from the staged catalog brings the list, the core uses it; the others fit the limits"""
+        from lustra import tagsdb
+        from lustra.denylist import denied_in_extension
+        from lustra.downloaders import DOWNLOADERS_BY_PROC_MODULE
+        from lustra.extensions import Extensions
+        from lustra.module import ProcModule
+        from lustra.tagsdb import TagsDB
+        loaded, downloaders, catalog_loaded = dict(Extensions.loaded), dict(DOWNLOADERS_BY_PROC_MODULE), Extensions._catalog_loaded
+
+        def restore() -> None:
+            Extensions.loaded.clear()
+            Extensions.loaded.update(loaded)
+            DOWNLOADERS_BY_PROC_MODULE.clear()
+            DOWNLOADERS_BY_PROC_MODULE.update(downloaders)
+            Extensions._catalog_loaded = catalog_loaded
+            TagsDB.clear()
+
+        self.addCleanup(restore)
+        # the registry lives for the whole test process: an earlier test may have loaded the catalog's 1.0.2 (test_tag_sources), and
+        # the 1.0.1 installed below would then not register (Extensions._register keeps a loaded id)
+        if (stale := Extensions.loaded.pop('rule34hentai', None)) is not None:
+            DOWNLOADERS_BY_PROC_MODULE.pop(ProcModule.PROC_MODULES_BY_NAME.get(stale.abbr, -1), None)
+        # the frozen core has no 2tags/rn_tags.json (tools/build_core.py bundles the aliases only): its tagsdb.py is elsewhere
+        frozen_tagsdb = (data_dir.parent / 'core' / 'lustra' / 'tagsdb.py').as_posix()
+        with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': data_dir.as_posix(), 'LUSTRA_CATALOG_DIR': catalog.as_posix()}), \
+                mock.patch.object(tagsdb, '__file__', frozen_tagsdb):
+            os.environ.pop('LUSTRA_TAGS_DIR', None)  # restored by the patch
+            old = data_dir.parent / 'old' / 'rule34hentai'  # 1.0.1 as installed before: no list
+            shutil.copytree(catalog / 'rule34hentai', old, ignore=shutil.ignore_patterns('*_tags.json'))
+            manifest = json.loads((old / 'manifest.json').read_text(encoding='utf-8'))
+            (old / 'manifest.json').write_text(json.dumps({**manifest, 'version': '1.0.1'}), encoding='utf-8')
+            Extensions.install_from_dir(old)
+            TagsDB.clear()
+            TagsDB.locate_default_lists()
+            self.assertIsNone(TagsDB.get_file('rn'))
+            row = next(r for r in Extensions.list_all() if r['id'] == 'rule34hentai')
+            self.assertEqual((True, '1.0.2'), (row['updateAvailable'], row['catalogVersion']))  # "có bản v1.0.2"
+            m = Extensions.install_from_catalog('rule34hentai')  # "Cập nhật lên v1.0.2"
+            self.assertEqual(('rn', '1.0.2'), (m.abbr, m.version))
+            installed = Extensions.user_dir() / 'rule34hentai' / 'rn_tags.json'
+            self.assertTrue(installed.is_file())
+            TagsDB.clear()
+            TagsDB.locate_default_lists(reload=('rn',))
+            self.assertEqual(installed, TagsDB.get_file('rn'))
+            self.assertGreater(TagsDB.count('rn'), 10000)
+            for ext_id in ('paheal', 'rule34us'):  # within the installer's limits (size, files, denied domains)
+                Extensions._check_tree(catalog / ext_id)
+                self.assertIsNone(denied_in_extension(catalog / ext_id))
+            Extensions.uninstall('rule34hentai')
 
 
 

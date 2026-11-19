@@ -28,7 +28,6 @@ from typing import Any
 
 from .defines import (
     CONNECT_TIMEOUT_BASE,
-    DATE_MAX_DEFAULT,
     DATE_MIN_DEFAULT,
     INT_BOUNDS_DEFAULT,
     PLATFORM_WINDOWS,
@@ -1231,7 +1230,7 @@ class Downloader(DownloaderBase):
         if not self.default_sort:
             if self._tasks_count() > 1:
                 thread_exit('Error: cannot use non-default sorting with multi-task query!')
-            if self.date_min != DATE_MIN_DEFAULT or self.date_max != DATE_MAX_DEFAULT:
+            if self._has_date_limits():
                 thread_exit('Error: cannot use both sort tag and date filter at the same time!')
         # non-fatal
         ret = False
@@ -1262,9 +1261,9 @@ class Downloader(DownloaderBase):
             trace(f'Warning (W1): \'{abbr}\' module is unable to collect sources. Disabled!')
             self.dump_sources = False
             ret = True
-        if not self._has_capability(ModuleCaps.DATE_FILTER) and (self.date_min != DATE_MIN_DEFAULT or self.date_max != DATE_MAX_DEFAULT):
+        if not self._has_capability(ModuleCaps.DATE_FILTER) and self._has_date_limits():
             trace(f'Warning (W1): \'{abbr}\' module is unable to filter by date. Disabled!')
-            self.date_min, self.date_max = DATE_MIN_DEFAULT, DATE_MAX_DEFAULT
+            self.date_min, self.date_max = DATE_MIN_DEFAULT, self.date_max_default
             ret = True
         if not self._has_capability(ModuleCaps.COMMENTS) and self.dump_comments:
             trace(f'Warning (W1): \'{abbr}\' module comments collection is disabled.')

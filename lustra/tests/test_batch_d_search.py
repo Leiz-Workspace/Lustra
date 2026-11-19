@@ -8,12 +8,14 @@ Run: python -m unittest lustra.tests.test_batch_d_search
 #
 #
 
+import datetime
 import fnmatch
 import json
 import os
 import random
 import statistics
 import string
+import sys
 import tempfile
 import threading
 import time
@@ -257,6 +259,8 @@ class FakeSite:
     def __init__(self, posts: list[dict], page_size: int) -> None:
         self.posts, self.page_size = posts, page_size
         self.urls: list[str] = []
+        self.rx_created = 'Sat Jan 04 12:00:00 +0000 2020'
+        '''created_at of the rule34 posts (a post's own 'created' wins)'''
 
     def db_fetch(self, url: str, **_) -> HTMLContent:
         self.urls.append(url)
@@ -278,7 +282,7 @@ class FakeSite:
             f'<post height="10" score="1" file_url="https://cdn.example/images/{p["id"]}.jpg" parent_id="" '
             f'sample_url="https://cdn.example/samples/{p["id"]}.jpg" preview_url="https://cdn.example/thumbs/{p["id"]}.jpg" '
             f'rating="e" tags=" {" ".join(p["tags"])} " id="{p["id"]}" width="10" change="1" md5="{p["id"]:032x}" creator_id="1" '
-            f'has_children="false" created_at="Sat Jan 04 12:00:00 +0000 2020" status="active" source="" has_notes="false" '
+            f'has_children="false" created_at="{p.get("created", self.rx_created)}" status="active" source="" has_notes="false" '
             f'has_comments="false" preview_width="10" preview_height="10"/>' for p in res[pid * limit:(pid + 1) * limit])
         return HTMLContent(None, f'<?xml version="1.0" encoding="UTF-8"?><posts count="{len(res)}" offset="{pid * limit}">{posts}</posts>'
                            .encode())
@@ -394,8 +398,112 @@ class PreviewTests(_SiteEnv):
             self.assertEqual(['neg'] if neg else [], it['excludedBy'])
             self.assertEqual(neg, it['excluded'])
         self.assertTrue(any(it['excluded'] for it in by_id.values()))
-        for key in ('requiredTags', 'site', 'genderStats', 'blockedCount', 'hiddenNoTags', 'genderEnabled'):
+        for key in ('requiredTags', 'site', 'genderStats', 'blockedCount', 'hiddenNoTags', 'genderEnabled', 'dateFilter'):
             self.assertIn(key, res)
+        self.assertEqual('', res['dateFilter'])
+
+    def test_dates_hide_posts_without_native_filter(self) -> None:
+        # rule34 has no date search: the dates are not in the site query, posts outside them are excluded on the page
+        # (fake rule34 posts are all from 04-01-2020)
+        res = server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': ['-mindate', '01-01-2021'], 'pageSize': 20})
+        self.assertNotIn('date', self.site.query_params()['tags'])
+        self.assertEqual('local', res['dateFilter'])
+        self.assertTrue(res['items'])
+        for it in res['items']:
+            self.assertEqual((True, ['date']), (it['excluded'], it['excludedBy']))
+        res = server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': ['-maxdate', '31-12-2019'], 'pageSize': 20})
+        self.assertTrue(all(it['excludedBy'] == ['date'] for it in res['items']))
+        res = server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': ['-mindate', '01-01-2020', '-maxdate', '04-01-2020'], 'pageSize': 20})
+        self.assertEqual(('local', []), (res['dateFilter'], [it['id'] for it in res['items'] if it['excluded']]), 'limits are inclusive')
+        # a listing without post dates: nothing can be checked, nothing is hidden, the app says so
+        with mock.patch.object(DownloaderGelbooru, '_can_extract_item_info_without_fetch', return_value=False):
+            res = server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': ['-mindate', '01-01-2021'], 'pageSize': 20})
+        self.assertEqual(('unchecked', False), (res['dateFilter'], any(it.get('excluded') for it in res['items'])))
+
+    def test_dates_of_a_listing_without_dates_are_unchecked(self) -> None:
+        # rule34hentai lists tags but no post dates: the page cannot be checked, the app must say so (not 'local' with 0 hidden)
+        real = DownloaderGelbooru._extract_item_info
+
+        def undated(dwn, h: str):
+            info = real(dwn, h)
+            info.date = ''
+            return info
+        with mock.patch.object(DownloaderGelbooru, '_extract_item_info', undated):
+            res = server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': ['-mindate', '01-01-2021'], 'pageSize': 20})
+        self.assertTrue(res['items'])
+        self.assertEqual(('unchecked', False), (res['dateFilter'], any(it.get('excluded') for it in res['items'])))
+        first = {it['id'] for it in res['items'][:3]}
+
+        def some_dated(dwn, h: str):
+            info = real(dwn, h)
+            if dwn._extract_id(dwn._local_addr_from_string(h)) not in first:
+                info.date = ''
+            return info
+        with mock.patch.object(DownloaderGelbooru, '_extract_item_info', some_dated):
+            res = server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': ['-mindate', '01-01-2021'], 'pageSize': 20})
+        hidden = [it['id'] for it in res['items'] if it['excludedBy'] == ['date']]
+        self.assertEqual('local', res['dateFilter'], 'some posts were checked: the page was filtered')
+        self.assertEqual(sorted(first), sorted(hidden))
+
+    def test_dates_follow_the_day_of_each_request(self) -> None:
+        # the app's core runs for days: a 'Đến ngày' left empty must not turn into the day the core started (an upper limit that
+        # hides the newest posts), and a 'Đến ngày' on that day is a real limit. The download runs in its own process and agrees
+        today = datetime.date.today()
+        started = today - datetime.timedelta(days=1)
+        stale = started.strftime('%d-%m-%Y')
+        patches = [mock.patch.object(mod, name, value) for mod in list(sys.modules.values())
+                   if getattr(mod, '__name__', '').startswith('lustra')
+                   for name, value in (('DATE_MAX_DEFAULT', stale), ('LAUCH_DATE', started)) if name in vars(mod)]
+        self.assertTrue(patches)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        site_day = lambda d: d.strftime('%a %b %d 12:00:00 +0000 %Y')  # noqa: E731
+        preview = lambda *args: server.m_search_preview({'module': 'rx', 'tags': 'a', 'args': list(args), 'pageSize': 20})  # noqa: E731
+        for day in (today, today + datetime.timedelta(days=1)):  # a site ahead of the user's time zone: its newest posts are 'tomorrow'
+            self.site.rx_created = site_day(day)
+            res = preview('-mindate', '01-01-2021')
+            self.assertEqual('local', res['dateFilter'])
+            self.assertTrue(res['items'])
+            self.assertFalse(any(it['excluded'] for it in res['items']), day)
+            res = preview('-maxdate', today.strftime('%d-%m-%Y'))  # today: no limit, as in the download (_filter_first_items)
+            self.assertFalse(any(it['excluded'] for it in res['items']), day)
+        self.site.rx_created = site_day(today)
+        res = preview('-maxdate', stale)
+        self.assertEqual('local', res['dateFilter'], 'the day the core started is a real limit')
+        self.assertTrue(res['items'])
+        self.assertTrue(all(it['excludedBy'] == ['date'] for it in res['items']))
+        dwn_day = []
+        server._with_downloader('rx', 'a', [], lambda dwn, args: dwn_day.append((dwn.date_today, dwn.date_max, dwn._has_date_limits())))
+        self.assertEqual([(today, today.strftime('%d-%m-%Y'), False)], dwn_day)
+        # danbooru's 'date:' metatag ends today, not on the day the core started
+        server.m_search_preview({'module': 'db', 'tags': 'a', 'args': ['-mindate', '01-01-2021'], 'pageSize': 20})
+        self.assertIn(f'date:2021-01-01..{today.isoformat()}', self.site.query_params()['tags'].split(' '))
+        server.m_search_preview({'module': 'db', 'tags': 'a', 'args': [], 'pageSize': 20})
+        self.assertFalse(any(t.startswith('date:') for t in self.site.query_params()['tags'].split(' ')))
+
+    def test_dates_native_on_danbooru(self) -> None:
+        # danbooru turns the dates into a 'date:' metatag: the site filters, the page is not filtered again
+        res = server.m_search_preview({'module': 'db', 'tags': 'a', 'args': ['-mindate', '01-01-2021', '-maxdate', '31-12-2021'], 'pageSize': 20})
+        self.assertIn('date:2021-01-01..2021-12-31', self.site.query_params()['tags'].split(' '))
+        self.assertEqual('native', res['dateFilter'])
+        self.assertTrue(res['items'])
+        self.assertFalse(any(it['excluded'] for it in res['items']))
+
+    def test_dates_in_count(self) -> None:
+        from lustra.download_rx import DownloaderRx
+        count = lambda module, args: server.m_search_count({'module': module, 'tags': 'a', 'args': args})  # noqa: E731
+        with mock.patch.object(DownloaderGelbooru, '_get_items_query_size_or_html', lambda self, url, tries=None: 7), \
+                mock.patch.object(DownloaderDb, '_get_items_query_size_or_html', lambda self, url, tries=None: 5):
+            r = count('rx', ['-mindate', '01-01-2021'])
+            self.assertEqual((7, True, 'local'), (r['count'], r['approximate'], r['dateFilter']), 'the site counted every date')
+            r = count('rx', [])
+            self.assertEqual((False, ''), (r['approximate'], r['dateFilter']))
+            r = count('db', ['-mindate', '01-01-2021'])
+            self.assertEqual((5, False, 'native'), (r['count'], r['approximate'], r['dateFilter']))
+            with mock.patch.object(DownloaderRx, 'CAPABILITIES', DownloaderRx.CAPABILITIES - {'date_filter'}):
+                r = count('rx', ['-mindate', '01-01-2021'])
+            self.assertEqual((False, 'unsupported'), (r['approximate'], r['dateFilter']))
 
 
 # ----- search.related -----

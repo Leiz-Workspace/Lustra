@@ -233,8 +233,35 @@ class ClientBackendTests(TestCase):
             again = verdicts_for(dwn, [('1', 'a.png'), ('2', 'b.mp4')])
             self.assertEqual(calls, s.tagger.calls)  # cached per post and model id
             self.assertEqual(str(out['1'].result.label), str(again['1'].result.label))
-            self.assertIsNotNone(self.cache.get('zz:1', 'stub-tagger-1'))
-            self.assertIsNone(self.cache.get('zz:1'))  # another model: not reused
+            self.assertIsNotNone(self.cache.get('zz:1', gender_model.verdict_cache_model('stub-tagger-1')))
+            self.assertIsNone(self.cache.get('zz:1', gender_model.verdict_cache_model(gender_model.MODEL_ID)))  # another model: not reused
+
+    def test_cached_verdicts_follow_the_rules(self) -> None:
+        # the cache keeps labels, not the predicted tags: a verdict made before a change of the 'db' rules is made again
+        # (here: female body parts became female evidence; before, 1boy + penis + breasts was only_male)
+        from lustra.gender import RULES_DIR, GenderRules
+
+        class Tagger(_StubTagger):
+            def predict(self, image: bytes) -> dict[str, float]:
+                self.calls += 1
+                return {'1boy': 0.95, 'penis': 0.93, 'breasts': 0.9, '1girl': 0.2}
+        tagger = Tagger()
+        raw = json.loads((RULES_DIR / 'db.json').read_text(encoding='utf-8'))
+        raw.pop('femaleBodypart', None)
+        old_rules = GenderRules.from_dict(raw, 'db')
+        dwn = _FakeDownloader('', '')
+        with mock.patch.object(gender_model, '_shared_cache', lambda: self.cache), \
+                mock.patch.object(gender_model, 'backend', lambda *_: tagger), \
+                mock.patch.object(gender_model, 'image_url_for', lambda _d, raw: 'https://img.example/x.png'), \
+                mock.patch.object(gender_model, '_fetch_image', lambda _d, url: PNG):
+            with mock.patch.object(gender_model, 'rules_for_module', lambda _abbr: old_rules):
+                self.assertEqual('only_male', str(verdicts_for(dwn, [('1', 'a.png')])['1'].result.label))
+                self.assertEqual('only_male', str(verdicts_for(dwn, [('1', 'a.png')])['1'].result.label))
+            self.assertEqual(1, tagger.calls, 'same rules: cached')
+            self.assertEqual('both', str(verdicts_for(dwn, [('1', 'a.png')])['1'].result.label))
+            self.assertEqual(2, tagger.calls, 'other rules: looked at again')
+            self.assertEqual('both', str(verdicts_for(dwn, [('1', 'a.png')])['1'].result.label))
+            self.assertEqual(2, tagger.calls)
 
     def test_server_down_stops_the_filter(self) -> None:
         with _Server() as s:

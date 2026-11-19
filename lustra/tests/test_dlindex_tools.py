@@ -7,6 +7,7 @@ Lustra: download index tools (lustra/dlindex_tools.py, docs/plans/search-engine.
   per post elsewhere, pacing), records, already indexed files skipped, unknown names listed, not found / failed requests, md5 check,
   cancel, the IPC job protocol (dry run in a subprocess)
 - re-tag: tags from the index (info files as fallback), renamed / sorted files keep their rows, the CLI entry
+- trash: clean on rows of the trash, the import never reads a trash folder, 'trash list' / 'trash purge'
 - desktop app wiring: no direct rpc for clean, folder from the native dialog only, multi-site jobs (forced -skip_known / -prefix)
 Run: python -m unittest lustra.tests.test_dlindex_tools
 """
@@ -14,7 +15,9 @@ Run: python -m unittest lustra.tests.test_dlindex_tools
 #
 #
 
+import contextlib
 import hashlib
+import io
 import itertools
 import json
 import os
@@ -145,6 +148,19 @@ class CleanTests(_Tmp):
         res = dlindex_tools.clean_index(index_path=self.db_path)
         self.assertEqual((0, 0), (res.total, res.removed))
         self.assertFalse(self.db_path.exists())
+
+    def test_rows_of_the_trash(self) -> None:
+        # a row of the trash is kept while its file is in the trash folder, dropped once that file is gone
+        keep, vanish = self._file('a/1.jpg'), self._file('a/2.jpg')
+        self._write([_rec('rx', 1, keep, tags='one'), _rec('rx', 2, vanish, tags='two')])
+        with dlindex.DownloadIndex(self.db_path) as index:
+            moved = {x['path']: x['trashPath'] for x in index.trash([str(keep), str(vanish)])['trashed']}
+        self.assertEqual(str(self.tmp / 'data' / dlindex.TRASH_DIR_NAME), os.path.dirname(moved[str(keep)]))
+        os.remove(moved[str(vanish)])  # deleted from the trash folder by hand
+        res = dlindex_tools.clean_index(index_path=self.db_path)
+        self.assertEqual((2, 1, 0, 1), (res.checked, res.missing, res.missing_dirs, res.removed))
+        with dlindex.DownloadIndex(self.db_path) as index:
+            self.assertEqual([moved[str(keep)]], [x['path'] for x in index.search('', trash=True)['items']])
 
     def test_cli(self) -> None:
         self._fill()
@@ -519,6 +535,62 @@ class RetagTests(_Tmp):
         self.assertTrue(any(p.name.startswith('rx_7_(+4)') for p in (self.tmp / 'lib').iterdir()))
         with mock.patch('builtins.print'), mock.patch.object(Logger, 'init'):
             self.assertEqual(dlindex_tools.EXIT_ARGS, dlindex_tools.main(['retag', str(self.tmp / 'lib'), '--types', 'nope']))
+
+
+# ---------------- trash ----------------
+
+class TrashToolTests(_Tmp):
+    def test_import_skips_the_trash_folder(self) -> None:
+        a = self._file('db_1.jpg')
+        b = self._file('sub/db_2.jpg')
+        self._write([_rec('db', 2, b, tags='two')])
+        real = dlindex._device
+        trash_dir = str(self.tmp / 'data' / dlindex.TRASH_DIR_NAME)
+        # the data dir on another drive: the file goes to '.lustra-trash' at the root of the download folder
+        with dlindex.DownloadIndex(self.db_path) as index, mock.patch.object(dlindex, '_device', lambda p: -1 if p == trash_dir else real(p)):
+            moved = index.trash([str(b)], roots=[str(self.tmp / 'lib')])['trashed'][0]['trashPath']
+        self.assertEqual(self.tmp / 'lib' / dlindex.TRASH_HIDDEN_NAME / '1_db_2.jpg', pathlib.Path(moved))
+        self._file('sub/.lustra-trash/7_db_3.jpg')  # one next to a file
+        self.assertEqual([a.name], [f.rel for f in dlindex_tools.scan_library(self.tmp / 'lib')])
+
+    def _run(self, *args: str) -> tuple[int, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(Logger, 'init'):
+            code = dlindex_tools.main(list(args))
+        return code, out.getvalue()
+
+    def test_cli(self) -> None:
+        a, b = self._file('rx_1.jpg'), self._file('rx_2.jpg')
+        self._write([_rec('rx', 1, a, tags='one'), _rec('rx', 2, b, tags='two')])
+        with dlindex.DownloadIndex(self.db_path) as index:
+            index.trash([str(a)], now=time.time() - 40 * dlindex.DAY_SECONDS)
+            index.trash([str(b)])
+        code, out = self._run('trash', 'list', '--json')
+        listed = json.loads(out)
+        self.assertEqual((dlindex_tools.EXIT_OK, 2), (code, listed['total']))
+        self.assertEqual([str(b), str(a)], [x['origPath'] for x in listed['items']])  # most recently deleted first
+        code, out = self._run('trash', 'purge', '--days', '30', '--json')
+        self.assertEqual((dlindex_tools.EXIT_OK, 1, 1), (code, json.loads(out)['purged'], json.loads(out)['files']))
+        code, out = self._run('trash', 'list')
+        self.assertIn(str(b), out)
+        self.assertNotIn(str(a), out)
+        self.assertIn('Trash: 1 file(s)', out)
+        with mock.patch('sys.stderr', io.StringIO()):
+            self.assertEqual(dlindex_tools.EXIT_ARGS, self._run('trash', 'purge', '--days', '-1')[0])
+            for args in (['trash', 'purge'], ['trash', 'purge', '--days', '1', '--all'], ['trash']):
+                with self.subTest(args=args), self.assertRaises(SystemExit):
+                    self._run(*args)
+        code, out = self._run('trash', 'purge', '--all')
+        self.assertEqual(dlindex_tools.EXIT_OK, code)
+        self.assertIn('1 file(s) deleted', out)
+        self.assertFalse(any((self.tmp / 'data' / dlindex.TRASH_DIR_NAME).iterdir()))
+        self.assertTrue(self.db_path.exists())
+
+    def test_cli_without_an_index(self) -> None:
+        self.assertEqual((dlindex_tools.EXIT_OK, 0), (self._run('trash', 'purge', '--days', '0', '--json')[0],
+                                                      json.loads(self._run('trash', 'purge', '--days', '0', '--json')[1])['purged']))
+        self.assertIn('Trash: 0 file(s)', self._run('trash', 'list')[1])
+        self.assertFalse(self.db_path.exists())
 
 
 # ---------------- frontends ----------------
