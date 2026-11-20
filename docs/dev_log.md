@@ -999,7 +999,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 Chủ repo báo 11 lỗi rồi đi ngủ, dặn: chỗ nào cần chọn thì chọn theo khuyến nghị. Các lựa chọn đó ghi ở cuối mục. Mục 1, 4, 5, 11 làm trực tiếp (commit `e4c11fd`). Mục 2, 3, 6–10 chia ba nhánh làm song song trong worktree riêng (tìm kiếm, danh sách tag, thùng rác), gộp lại. Sau đó 5 người rà soát theo 5 góc, mỗi phát hiện được hai người kiểm chéo: 20 lỗi được xác nhận và sửa, 12 bị bác.
 - **1. Preview còn ảnh sau khi xoá hết tag.** Xoá tag cuối cùng thì lưới, lựa chọn và dòng kết quả được dọn; câu trả lời đến muộn bị bỏ (`S.preview.seq`). Đổi tag, module, ngày, bộ lọc giới tính hay ô chặn nội dung thì lưới cũ bị làm mờ, kèm ghi chú "kết quả của truy vấn hoặc bộ lọc trước: bấm Preview để xem lại". Đặt lại giá trị cũ thì lưới hết mờ. Một lần lật trang lỗi cũng làm mờ lưới.
 - **2. "Chỉ nam" + `amputee` vẫn ra post có nữ.** Bộ lọc không dùng "hoặc": nó lọc kết quả của truy vấn. Lỗi nằm ở bảng luật: post `amputee 1boy 1girl breasts` trên Rule34 bị xếp "chỉ nam", vì bảng của rx thiếu `1girl` và không coi bộ phận cơ thể nữ là bằng chứng (`penis` thì có).
-  - **Đính chính (7bb):** chủ repo chọn **Loại** "Chỉ nam" (bỏ post chỉ nam), không phải giữ "Chỉ nam"; phần trên đọc nhầm thiết lập. Bản sửa bảng luật vẫn đúng, nhưng chưa giải thích được điều chủ repo thấy: post không có `amputee` mà có tag nữ trong Preview. Truy vấn gửi lên site đã kiểm là đúng `tags=amputee` (bộ lọc giới tính chỉ lọc kết quả trong lõi, không thêm gì vào truy vấn). Đang chờ id post để kiểm.
+  - **Đính chính (7bb, 7bc):** chủ repo chọn **Loại** "Chỉ nam" (bỏ post chỉ nam), không phải giữ "Chỉ nam"; phần trên đọc nhầm thiết lập. Bản sửa bảng luật vẫn đúng. Truy vấn gửi lên site đã kiểm là đúng `tags=amputee` (bộ lọc giới tính chỉ lọc kết quả trong lõi, không thêm gì vào truy vấn). Ngày 2026-11-20 chủ repo xác nhận đã chạy đúng.
   - Bảng rx / bb / gelbooru_generic / db: thêm `1girl`, `female_focus` (rx thêm cả `male_focus`) và khoá mới `femaleBodypart` (`pussy`, `vagina`, `breasts` mọi cỡ, `faceless_female`, `female_pov`…), đối xứng với bên nam. Cờ futa thêm `gynomorph`, `herm`; futaMale thêm `andromorph`, `maleherm`, `male_with_breasts` (db: `cuntboy`), để các nhân vật này không thành "cả hai".
   - e621 chỉ thêm `female_pov`, `faceless_female`, như danh sách nam của nó.
   - Kết quả model đã lưu cache được tính lại khi bảng luật của db đổi (khoá cache có mã băm của bảng).
@@ -1098,7 +1098,55 @@ Chủ repo hỏi về các dòng Tags A–Z của RN / RP / RS và RV, và về 
 - **Rà soát ghi chú 2.0.10** (3 góc, mỗi phát hiện hai người cố bác bỏ; phần nâng phiên bản không có lỗi): sửa câu "chỉ ghi khi có tag mới" (tag đã học thêm được đếm thêm cũng ghi), bỏ ví dụ Rule34Video (không có trong catalog nào), mô tả đúng cột của bản cũ, giờ của file khi cài từ zip, số post của tag học thêm là số đã thấy ở đây, post âm thanh không có ảnh vẫn hiện ♪, catalog chính thức có thêm bb / xb / en 1.0.1.
 - **Bản rc đầu tiên của 2.0.10 không build được:** self-test của gói Windows x64 / arm64 và macOS arm64 hỏng ở bước mới `contract.thumbPlaceholder`. Ảnh trên lưới tải lười (`loading="lazy"`). Trên runner Windows / macOS, hệ điều hành báo cửa sổ app bị che, nên Chromium không dựng lưới trong vùng nhìn thấy và không bao giờ xin ảnh hỏng, không có `onerror`. Linux dưới xvfb không bị. Tái hiện trên Linux bằng cách ẩn cửa sổ trong bước đó: đúng kết quả của CI (2 ô, 1 `<img>`). Bước self-test nay chuyển ảnh sang `eager` trước khi chờ; đã đạt khi cửa sổ ẩn và khi hiện. App không đổi: người dùng nhìn thấy lưới thì ảnh được tải. Lượt build hỏng không phát hành gì.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7bb)
+### 7bc. Khảo sát nguồn danh sách tag cho RN / RP / RS; cột "Cập nhật" của danh sách đi kèm có nguồn — 2026-11-20
+Chủ repo hỏi: "Khảo sát RN, RP, RS để thêm tags.py đi, và RN, RP, RS giờ có tag chưa?"
+- **RN / RP / RS đã có tag chưa:** có danh sách, chưa có nguồn cập nhật.
+  - Từ 1.0.2 (7ba, mục 10), cả ba mang danh sách `2tags/` trong catalog đi kèm app và trong zip của catalog chính thức: rn 55.393 tag (≥ 1 post), rp 162.526 tag (≥ 5 post), rs 543.814 tag (≥ 5 post). Thư mục dữ liệu của chủ repo có đúng các số này (đọc, không sửa).
+  - Lõi học thêm tag từ post đã xem / đã tải trên danh sách đó (7bb); máy chủ repo chưa có post nào được học cho rn, rp.
+  - `source_for_manifest` trả `None` cho cả ba, nên Tags A–Z không có nút "Cập nhật" cho chúng. Sau khảo sát này vẫn vậy.
+- **Khảo sát** (workflow: mỗi site một người khảo sát, hai người cố bác bỏ kết luận theo hai góc luật và đúng sai). Chỉ qua fetcher của lõi / trình tạo, robots.txt áp chặt theo RFC 9309, không cookie. Quyền đổi thứ tự tham số quanh một luật robots (2026-11-20) chỉ dành cho rule34video, không dùng ở đây.
+  - **rn (rule34hentai.net): không làm được (R5).**
+    - robots.txt do Cloudflare quản lý: `User-agent: *` `Allow: /`, kèm `Content-Signal`; chỉ các bot AI có tên bị chặn.
+    - Mọi trang khác đều trả bot challenge của Cloudflare (`cf-mitigated: challenge`): `/`, `/tags/popularity`, `/tags/alphabetic`, `api/danbooru/find_tags`, `/api/internal/autocomplete`, `/wiki/rules`. Không đọc được điều khoản.
+    - Lustra không vượt challenge. Job của lõi không gửi cookie, nên cũng không dùng được `cf_clearance` mà người dùng tự thêm cho site.
+    - Log của fetcher ghi 8 request. rn giữ danh sách đi kèm và việc học thêm.
+  - **rp (rule34.paheal.net): luật cho phép, nhưng site không trả nổi trang cần đọc.**
+    - robots.txt: `User-agent: *`, `Crawl-delay: 3`, `Disallow:` `/comment`, `/thumb/`, `/_thumbs/`, `/source_history`, `/tag_history`, `/post/next`, `/post/prev`. Các trang tag được phép.
+    - Điều khoản (`/wiki/Terms_of_use`, `/wiki/rules`, `/help`): không có điều nào về truy cập tự động, bot, scraping, crawl hay giới hạn request, nên R3 không áp dụng.
+    - Trang duy nhất có đủ tag kèm số post: `tags/popularity?mincount=N`, một trang html, mọi tag có ≥ N post, sắp theo số post giảm dần (site link tới nó: "Show All" là `mincount=1`). Không phân trang.
+    - Không dùng được: `/tags` (`/tags/map`) và `/tags/alphabetic` không có số post; `api/danbooru/find_tags` không tham số trả cả bảng tag trong một câu trả lời (vượt giới hạn 32 MB một trang của lõi, nặng cho site); `/api/internal/autocomplete` mỗi lần một tiền tố.
+    - Đo được: ≥ 20.000 post có 98 tag (44 KB); ≥ 1.000 post có 3.200 tag (586 KB, khoảng 175 byte một tag); ≥ 100 post có 26.343 tag (4,54 MB, 2,75 giây).
+    - Muốn thay danh sách đi kèm (162.526 tag), lần cập nhật phải qua sanity check 50 % (≥ 81.263 tag), tức N ≤ khoảng 18 (ước từ danh sách đi kèm: ≥ 18 post khoảng 83 nghìn tag, 14,5 MB; ≥ 10 post khoảng 116 nghìn tag, 20 MB).
+    - Chạy thật job (bản thử `tags.py`, paheal 1.0.3 cài vào thư mục dữ liệu tạm, qua `update_tag_list` như nút "Cập nhật"): `mincount=10` trả **HTTP 500**, thân rỗng, sau 3,7 giây; thử lại một lần qua fetcher của trình tạo: vẫn 500. `mincount=18` cũng 500. Không thử thêm ngưỡng nào.
+    - Kết luận: không có ngưỡng nào vừa đủ tag để qua sanity check vừa được site trả. Hạ sanity check, hay đọc ≥ 100 post (26 nghìn tag) rồi gộp lên danh sách đi kèm, là thay đổi luật của lõi: để chủ repo quyết. rp giữ 1.0.2, danh sách đi kèm và việc học thêm.
+    - Bản thử (job `tags.py`, manifest 1.0.3, luật build mang `2tags/` cho extension có job chỉ chạy khi bấm, 10 test, fixture) nằm ở nhánh cục bộ `wip/rp-tag-job-500`, không push.
+  - **rs (rule34.us): không làm được, vì site không có danh sách tag nào để đọc.**
+    - robots.txt: HTTP 404, không có file. Theo RFC 9309, 4xx nghĩa là không giới hạn. Không có `Crawl-delay`, nên nhịp là sàn 1 giây của trang html, như downloader.
+    - Điều khoản: site không có trang điều khoản hay luật nào. Menu (Images, Comments, Top Character List, Settings, Help) và chân trang (chỉ có "DMCA") không link tới trang như vậy.
+      - Đã đọc `/`, `index.php?r=posts/index`, `r=help/index` (chuyển sang `r=help/search`, chỉ hướng dẫn cú pháp tìm), `r=account/home`, `r=account/register` (form đăng ký, không có điều khoản kèm theo) và `r=dmca/index`.
+      - Không trang nào có điều về truy cập tự động, bot, scraping, crawl hay giới hạn request, nên R3 không áp dụng.
+    - Site chạy "modified Gelbooru 0.1.11" với route `index.php?r=…`. `survey` không thấy API nào (DAPI `page=dapi` trả trang chủ; `posts.json`, `post.json`, API của Philomena, Szurubooru, Shimmie đều 404), nên engine là `custom`.
+    - Không có trang danh sách tag:
+      - menu và chân trang không link tới trang tag nào;
+      - `index.php?page=tags&s=list` (danh sách tag của Gelbooru) trả trang chủ; `r=tags/index` và `r=tags/list` chuyển về trang chủ;
+      - `r=statistics/ranking` là 50 nhân vật nhiều điểm nhất (lượt thích, upvote), không có số post.
+    - Chỉ có `index.php?r=autocomplete&term=<tiền tố>&limit=10`, mà script ô tìm kiếm của site gọi. Nó trả JSON `name`, `post_count`, `category`: mỗi request một tiền tố, 10 tag.
+      - Chép lại danh sách đi kèm (543.814 tag) theo cách này cần ít nhất khoảng 54.400 request.
+      - Chỉ để qua sanity check 50 % (271.907 tag) cũng cần ít nhất khoảng 27.200 request, hơn 5 lần ngân sách 5.000 request của lõi.
+      - `limit` không đổi được số dòng: lượt khảo sát đầu thử `limit=5`, `100`, `1000`, đều 10 dòng; `page=2`, `offset=10` bị bỏ qua. Lượt sau không thử `limit` nào khác mức site dùng.
+    - Danh sách đi kèm (`2tags/rs_tags.json`, 543.814 tag ≥ 5 post) có từ commit đầu tiên của repo, không ghi nguồn. Các loại của nó (`tag`, `character`, `artist`, `copyright`, `metadata`) trùng với `category` của autocomplete.
+    - rs giữ danh sách đi kèm và việc học thêm.
+- **Cột "Cập nhật" của danh sách đi kèm extension có nguồn** (phát hiện khi rà soát bản thử rp, giữ lại vì đúng cho mọi extension như vậy):
+  - Extension có nguồn tag (job riêng, engine của trình tạo, module đã duyệt) mà mang sẵn danh sách: khi chưa bấm "Cập nhật" ở máy này, danh sách đang dùng là file trong thư mục extension, và cột "Cập nhật" ghi giờ của file (lúc build catalog đi kèm app, hoặc lúc cài từ zip), điều 2.0.10 đã bỏ cho danh sách đi kèm không có nguồn. Máy chủ repo có 4 extension như vậy: naughtymachinima, rule34comic, rule34gen, yande.re.
+  - `tags.status` thêm `shipped`: danh sách đang dùng vẫn là danh sách đi kèm một extension đã cài có nguồn tag; `version` lúc đó là version của extension (`lustra/server.py`).
+  - App ghi "theo extension v<phiên bản>" (tooltip: chưa cập nhật ở máy này, không rõ ngày của dữ liệu) và giữ nút "Cập nhật". Sau lần cập nhật đầu tiên, danh sách đang dùng là file ở `<thư mục dữ liệu>/tags/`, cột ghi giờ của lần đó. Mock của trình duyệt: dòng tb có `shipped`.
+  - Test: `test_a_shipped_list_with_a_source_reads_as_shipped_until_it_is_updated_here` (đi kèm → `shipped`; cập nhật → không còn; danh sách `2tags/` không bao giờ `shipped`); `test_modules_with_a_source_never_learn_on_top_of_their_list` kiểm `shipped` cho engine, job và module đã duyệt.
+  - Ghi chú 2.0.10, `docs/specs.md` (`tags.status`), `docs/operations.md` (Tags A–Z) có dòng tương ứng.
+- **Request tới site:** rule34hentai.net 11 theo người khảo sát (log của fetcher còn 8); rule34.us hai lượt khảo sát, 27 và 23 request (lượt sau: 8 của `python -m lustra.extgen survey`, 15 qua `fetcher_for`, 4 trong đó là robots.txt), cách nhau ≥ 1 giây trừ request đầu của `survey` (`SafeFetcher` không tính lần đọc robots.txt vào nhịp); rule34.paheal.net: khảo sát và người kiểm qua fetcher của trình tạo, cách nhau ≥ 3 giây, cộng 3 lần chạy job qua lõi (≥ 100, ≥ 10, ≥ 18 post, mỗi lần robots.txt + 1 trang) và 1 lần thử lại ≥ 10 qua fetcher. Test, build và cài thử đều chạy offline (`unshare -rn`).
+- **Ghi chú cho skill** (nằm ngoài repo, chưa sửa): template `reference/tag-jobs/shimmie_api.py` chỉ khớp thuộc tính trong nháy kép; trên paheal (nháy đơn) nó đọc ra 0 tag.
+- **Lọc giới tính, mục 2 của 7ba:** ngày 2026-11-20 chủ repo xác nhận "Loại Chỉ nam" + `amputee` đã chạy đúng; dòng đính chính ở 7ba đã ghi lại.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7bc)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
@@ -1113,3 +1161,4 @@ Chủ repo hỏi về các dòng Tags A–Z của RN / RP / RS và RV, và về 
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
   - danh sách tag: chạy thử updater với một site thật cho mỗi engine mới (trình tạo đã đọc robots.txt bằng `lustra/robots.py` như updater, 7aw).
+  - danh sách tag của rn / rp / rs: không có nguồn cập nhật, giữ danh sách đi kèm và việc học thêm (7bc). rn: bot challenge của Cloudflare (R5). rs: không có trang danh sách tag. rp: trang `tags/popularity` đủ lớn để qua sanity check trả HTTP 500; đọc ≥ 100 post rồi gộp lên danh sách đi kèm là thay đổi của lõi, chờ chủ repo quyết.
