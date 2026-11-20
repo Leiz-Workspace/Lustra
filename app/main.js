@@ -1830,9 +1830,11 @@ async function fetchNewTagList(abbr) {
 }
 
 function learnTagList(module) {
-  // after a download job: the module's downloaded posts teach its list when it has none from a source (no request)
-  sidecar.call('tags.learn', { module }, 60000).then((r) => {
-    if (r?.newPosts && r.learned) send('sidecar:notify', { method: 'tags.learned', params: r });
+  // after a download job: the module's downloaded posts teach its list when it has none from a source (no request). written: the
+  // list served for it changed, also the tags learned on top of a list (rn, rs; rp, whose own update merges: 'learned' stays false
+  // for those)
+  return sidecar.call('tags.learn', { module }, 60000).then((r) => {
+    if (r?.written) send('sidecar:notify', { method: 'tags.learned', params: r });
   }).catch(() => { /* sidecar not running: the next job or preview learns it */ });
 }
 
@@ -2869,6 +2871,36 @@ async function selfTestContract(js, quick) {
     jobs.pump = realPump;
   }
   out.selectedDownload = await selfTestSelectedDownload(js);
+  // posts without a preview address, or whose preview does not load (here a loopback address, refused by lustra-thumb without
+  // a request): a placeholder tile instead of the broken image icon, and the card still selects. The grid's images load lazily,
+  // and a window the system reports hidden or occluded (the Windows and macOS CI runners) never lays them out in view: the test
+  // asks for them now (loading = eager), the error path is the app's own
+  try {
+    out.thumbPlaceholder = await js(`(async () => {
+      const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelector('[data-page="search"]').click();
+      Object.assign(S.preview, { module: 'db', tags: 'selftest_thumbs', site: '', page: 0, hasMore: false, dateFilter: 'native',
+        items: [{ id: '1', excludedBy: [] }, { id: '2', isVideo: true, mediaKind: 'video', excludedBy: [] },
+          { id: '3', preview: 'http://127.0.0.1:9/x.jpg', excludedBy: [] }] });
+      S.preview.key = previewKey();
+      S.preview.selected.clear();
+      renderGrid();
+      document.querySelectorAll('#grid img').forEach((img) => { img.loading = 'eager'; });
+      for (let i = 0; i < 50 && document.querySelectorAll('#grid .thumb-ph').length < 3; i++) await pause(100);
+      const tiles = [...document.querySelectorAll('#grid .thumb-ph')].map((e) => e.dataset.kind + ':' + e.textContent);
+      const first = document.querySelector('#grid .card');
+      first.click();
+      const r = { tiles, selected: S.preview.selected.has('1') && first.classList.contains('sel'), images: document.querySelectorAll('#grid img').length };
+      S.preview.selected.clear();
+      clearPreview();
+      return r;
+    })()`);
+    out.thumbPlaceholder.ok = out.thumbPlaceholder.tiles.join('|')
+      === 'image:không có ảnh xem trước|video:không có ảnh xem trước|image:không tải được ảnh xem trước'
+      && out.thumbPlaceholder.selected === true && out.thumbPlaceholder.images === 0;
+  } catch (e) {
+    out.thumbPlaceholder = { ok: false, error: String(e.message || e) };
+  }
   // a core that exits during a tag update never sends tags.updateDone: once it is back, the Tags A-Z row is usable again
   try {
     out.tagRestart = await js(`(async () => {
@@ -2889,8 +2921,73 @@ async function selfTestContract(js, quick) {
   } catch (e) {
     out.tagRestart = { ok: false, error: String(e.message || e) };
   }
+  out.tagLearned = await selfTestTagLearned(js);
   await js(`document.querySelector('[data-page="search"]').click()`).catch(() => {});
   saveSettings();
+  return out;
+}
+
+async function selfTestTagLearned(js) {
+  // after a download job, tags learned on top of a list (rn, rs; rp, whose own update merges: tags.learn says learned: false) reach
+  // the window
+  // (tags.learned), and only when the list changed (written). The chip shown keeps its hints while it is asked again (no blink),
+  // the module's other cached answers are dropped. tags.learn is faked here; tags.resolve is the real core's
+  const out = {};
+  const wc = mainWindow.webContents;
+  const realCall = sidecar.call;
+  const realSend = wc.send;
+  const told = [];
+  try {
+    const m = await js('S.module');
+    const answers = [{ module: m, newPosts: 2, learned: false, bundled: true, added: 1, written: true },
+      { module: m, newPosts: 1, learned: false, bundled: true, added: 1, written: false }];
+    sidecar.call = function (method, params, ...rest) {
+      if (method === 'tags.learn' && params?.module === m && answers.length) return Promise.resolve(answers.shift());
+      return realCall.call(this, method, params, ...rest);
+    };
+    wc.send = function (channel, payload, ...rest) {
+      if (channel === 'sidecar:notify' && payload?.method === 'tags.learned') told.push(Boolean(payload.params?.written));
+      return realSend.call(this, channel, payload, ...rest);
+    };
+    await js(`(() => {
+      document.querySelector('[data-page="search"]').click();
+      window.__selftestChips = S.chips;
+      const m = S.module;
+      S.chips = [{ kind: 'tag', text: 'zz_selftest_learned', id: ++S.chipSeq }];
+      window.__selftestRow = { tag: 'zz_selftest_learned', known: false, posts: 0, type: 'general' };
+      resolveCache.set(rkey(m, 'zz_selftest_learned'), window.__selftestRow);
+      resolveCache.set(rkey(m, 'zz_selftest_hidden'), { tag: 'zz_selftest_hidden', known: true, posts: 3, type: 'general' });
+      renderChips();
+    })()`);
+    await learnTagList(m);
+    out.shown = await js(`(async () => {
+      const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+      const m = S.module;
+      for (let i = 0; i < 100 && resolveCache.has(rkey(m, 'zz_selftest_hidden')); i++) await pause(5);
+      const r = { dropped: !resolveCache.has(rkey(m, 'zz_selftest_hidden')), kept: resolveCache.get(rkey(m, 'zz_selftest_learned')) === window.__selftestRow };
+      for (let i = 0; i < 60 && resolveCache.get(rkey(m, 'zz_selftest_learned')) === window.__selftestRow; i++) await pause(50);
+      r.askedAgain = resolveCache.get(rkey(m, 'zz_selftest_learned')) !== window.__selftestRow;
+      return r;
+    })()`);
+    await learnTagList(m); // newPosts but nothing written: the window is not told
+    await new Promise((r) => setTimeout(r, 100));
+    out.told = told;
+    out.ok = told.join(',') === 'true' && out.shown.dropped === true && out.shown.kept === true && out.shown.askedAgain === true;
+  } catch (e) {
+    out.ok = false;
+    out.error = String(e.message || e);
+  } finally {
+    sidecar.call = realCall;
+    wc.send = realSend;
+    await js(`(() => {
+      if (!window.__selftestChips) return;
+      resolveCache.delete(rkey(S.module, 'zz_selftest_learned'));
+      S.chips = window.__selftestChips;
+      delete window.__selftestChips;
+      delete window.__selftestRow;
+      renderChips();
+    })()`).catch(() => {});
+  }
   return out;
 }
 

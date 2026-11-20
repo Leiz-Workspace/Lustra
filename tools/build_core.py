@@ -9,9 +9,9 @@ usage: python tools/build_core.py [--tags aliases|none|all|rx,db,...] [--out DIR
 The running interpreter needs the runtime requirements and PyInstaller:
   python -m pip install -r requirements.txt 'pyinstaller>=6.21'
 Bundled data: builtin extension manifests, gender rules, the domain denylist and trusted catalog keys (lustra/safety_data), the
-local extension catalog (extensions/, with the 2tags/ list of each extension that has no tag source next to its manifest: rn, rp,
-rs, ~26 MB), tag aliases and optionally tag lists (2tags/, large: ~124 MB for all modules; the app can download fresh lists into its
-data dir instead).
+local extension catalog (extensions/, with the 2tags/ list next to the manifest of each extension the app cannot make the whole list
+of by itself: rn, rs with no tag source, rp whose own update merges, ~26 MB), tag aliases and optionally tag lists (2tags/, large:
+~124 MB for all modules; the app can download fresh lists into its data dir instead).
 """
 #########################################
 #
@@ -89,16 +89,18 @@ def _extension_imports() -> list[str]:
 
 def _stage_catalog(dest: pathlib.Path, src: pathlib.Path = ROOT / 'extensions', tags_dir: pathlib.Path = TAGS_DIR) -> pathlib.Path:
     """The local extension catalog of the core: extensions/ without the tag lists a maintainer keeps next to the manifests (they go
-    into the catalog zips, tools/build_catalog.py). An extension whose manifest names a tagList and that has no tag source (no
-    'tagUpdate', not a reviewed module, no engine with a tag listing: lustra/tags_updater.py source_for_manifest) gets its list
-    from 2tags/ next to its manifest, so installing it (or updating it from the catalog) gives the module its list. Today rn, rp
-    and rs; the others read theirs from their source, which keeps the core small"""
+    into the catalog zips, tools/build_catalog.py). An extension whose manifest names a tagList and whose whole list the app cannot
+    make by itself gets its list from 2tags/ next to its manifest, so installing it (or updating it from the catalog) gives the
+    module its list: one with no tag source (no 'tagUpdate', not a reviewed module, no engine with a tag listing:
+    lustra/tags_updater.py source_for_manifest; rn, rs), or one whose own update reads only the most used tags and merges them into
+    that list (tagUpdate.merge; rp). The others read theirs from their source, which keeps the core small"""
     sys.path.insert(0, str(ROOT))
     from lustra.extensions import SOURCE_CATALOG, Extensions
     from lustra.tags_updater import source_for_manifest
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.*', '*_tags.json'))
     for m in Extensions._scan(dest, SOURCE_CATALOG):
-        if not m.tagList or source_for_manifest(m) is not None:
+        source = source_for_manifest(m)
+        if not m.tagList or (source is not None and not source.merge):
             continue
         lst = tags_dir / f'{m.abbr}_tags.json'
         if m.tagList != lst.name or not lst.is_file():  # the app uses '<abbr>_tags.json' only (TagsDB.extension_lists)

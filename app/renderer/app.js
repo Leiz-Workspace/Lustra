@@ -576,6 +576,22 @@ const flushResolve = debounce(async () => {
   }
   if (resolveCache.size > 5000) for (const [k, v] of resolveCache) if (v !== null) resolveCache.delete(k);
 }, 180);
+function reresolveTags(module) {
+  // the module's list changed (tags learned, an update, the "Học từ file đã tải" button): the tags of the chips shown are asked
+  // again and keep their hints until the answers arrive (no blink); its other cached answers are dropped
+  resolveHasList.delete(module);
+  const shown = new Set(module === S.module ? S.chips.flatMap(chipTags) : []);
+  let queued = false;
+  for (const k of [...resolveCache.keys()]) {
+    if (!k.startsWith(`${module}\n`)) continue;
+    const t = k.slice(module.length + 1);
+    if (!shown.has(t) || unsupported.has('tags.resolve')) { resolveCache.delete(k); continue; }
+    if (!resolveQueue.has(module)) resolveQueue.set(module, new Set());
+    resolveQueue.get(module).add(t);
+    queued = true;
+  }
+  if (queued) flushResolve();
+}
 function chipHints(c) {
   const module = S.module;
   // "unknown tag" only means something when the module has a tag list
@@ -1130,8 +1146,10 @@ function renderGrid() {
   gridCards.clear();
   $('#grid').replaceChildren(...items.map((it) => {
     const audio = it.mediaKind === 'audio';
-    const img = it.preview || !audio ? h('img', { loading: 'lazy', alt: '', src: it.preview ? L.thumbUrl(it.preview, P.site) : '' })
-      : h('div', { class: 'audio-ph', 'aria-hidden': 'true' }, '♪');
+    const kind = audio ? 'audio' : it.isVideo ? 'video' : 'image';
+    const img = it.preview
+      ? h('img', { loading: 'lazy', alt: '', src: L.thumbUrl(it.preview, P.site), onerror: (e) => e.target.replaceWith(thumbPlaceholder(kind, true)) })
+      : audio ? h('div', { class: 'audio-ph', 'aria-hidden': 'true' }, '♪') : thumbPlaceholder(kind, false);
     const g = it.gender;
     const why = [...new Set((it.excludedBy || []).map((x) => REASON_VI[x] || 'lọc cục bộ'))].join(', ');
     const gTitle = g ? `Giới tính: ${GENDER_VI[g.label] || g.label}${g.conf ? ` · tin cậy ${CONF_VI[g.conf]}` : ''}`
@@ -1159,6 +1177,19 @@ function renderGrid() {
 }
 // post id -> its card(s) in the current grid: selection changes touch only those nodes, never rebuild the grid
 const gridCards = new Map();
+// a post without a preview address, or whose preview did not load (the site or its CDN refused it): a neutral tile in the
+// theme's colors instead of the browser's broken image icon. The card stays clickable and selectable
+const THUMB_ICONS = {
+  image: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="15.5" cy="8.5" r="1.5"/></svg>',
+  video: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4m10 0h4M3 15h4m10 0h4"/></svg>',
+  audio: '<svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>',
+};
+function thumbPlaceholder(kind, failed) {
+  const icon = h('span', { class: 'thumb-ph-icon', 'aria-hidden': 'true' });
+  icon.innerHTML = THUMB_ICONS[kind] || THUMB_ICONS.image; // static markup above, nothing from the site
+  return h('div', { class: 'thumb-ph', dataset: { kind } }, icon,
+    h('span', {}, failed ? 'không tải được ảnh xem trước' : 'không có ảnh xem trước'));
+}
 function toggleSel(id) {
   const s = S.preview.selected;
   if (s.has(id)) s.delete(id); else s.add(id);
@@ -1236,7 +1267,8 @@ function lightboxMedia(it) {
       h('audio', { controls: true, autoplay: true, preload: 'metadata', src: L.mediaUrl(media, site) }));
   }
   const src = it.sample && !it.isVideo ? it.sample : it.preview;
-  return h('img', { src: src ? L.thumbUrl(src, site) : '', alt: '' });
+  return src ? h('img', { src: L.thumbUrl(src, site), alt: '', onerror: (e) => e.target.replaceWith(thumbPlaceholder(kind, true)) })
+    : thumbPlaceholder(kind, false);
 }
 function openLightbox(it) {
   const addTag = (t, ex) => { addChip(ex ? `-${t}` : t); toast(`Đã thêm ${ex ? '−' : ''}${t}`); };
@@ -2396,8 +2428,19 @@ const TAG_KEY_NOTE = { required: 'Cần API key của bạn', optional: 'Dùng A
 const LEARNED_TITLE = 'Site không có danh sách tag dùng được (không có API, hoặc robots.txt cấm): Lustra học dần từ tag của các post '
   + 'đã xem trong Preview và đã tải, không gửi thêm request. Số post là số post đã thấy ở đây, không phải số trên site.';
 const ON_DEMAND_NOTE = 'Job cập nhật của chính extension: chỉ chạy khi bạn bấm Cập nhật, không chạy theo lịch, khi mở app hay khi cài.';
+// tags.sources merge: the extension's own job reads only the tags with mergeMinPosts+ posts and the core merges them into the list in
+// use (Paheal from 1.0.3, manifest tagUpdate.merge)
+const mergeNote = (n) => `Job chỉ đọc các tag có từ ${nf.format(n)} post trở lên rồi gộp vào danh sách đang dùng: các tag đó lấy số post mới, `
+  + 'tag mới được thêm, mọi tag khác giữ nguyên.';
+// a list shipped inside an extension that has no tag source (tags.status bundled: Rule34Hentai, Rule34.us; Paheal until 1.0.2): the
+// core adds the tags learned from previewed / downloaded posts that it lacks (lustra/tags_learned.py)
+const bundledTitle = (v) => `Site không có nguồn danh sách tag mà Lustra đọc được. Danh sách này đi kèm extension${v ? ` v${v}` : ''} `
+  + 'và không tự cập nhật. Tag mới được học thêm từ các post bạn xem trong Preview hoặc tải về (không gửi thêm request).';
+const NOT_LEARNED_TITLE = 'Lustra chưa thấy post nào của site này. Xem Preview hoặc tải vài post của site để Lustra học tag (không gửi thêm request).';
+const fmtListSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 function tagSourceTitle(src) {
-  const rule = `${src.onDemand ? `${ON_DEMAND_NOTE} ` : ''}${src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.'}`;
+  const rule = `${src.onDemand ? `${ON_DEMAND_NOTE} ` : ''}${src.merge ? `${mergeNote(src.mergeMinPosts)} ` : ''}`
+    + `${src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.'}`;
   const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
   return `${src.site} — ${src.description}. ${rule}${key}`;
 }
@@ -2439,24 +2482,32 @@ async function refreshTagStatus() {
   table.replaceChildren(
     h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'Nguồn'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Cập nhật'),
       h('th', {}, '')),
-    ...mods.map(({ abbr: m, name }) => {
+    ...mods.map(({ abbr: m, name, version }) => {
       const r = byMod[m];
       const src = srcByMod[m];
       const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
       const run = src ? tagUpdates.get(m) : undefined;
+      const bundled = !src && r?.bundled;
+      // shipped: the list in use is still the one inside an extension that has a source (its own job, an engine of the generator),
+      // not updated here yet: the 'Cập nhật' button stays, the column gives the extension version like a bundled list
+      const shipped = bundled || (!!src && !!r?.shipped);
+      const ver = shipped ? r.version || version || '' : '';
       let action;
       if (run) action = tagRunningButton(run.message);
-      else if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
+      else if (!src && r && !r.learned && !bundled) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
       else if (!src) {
         action = h('button', { class: 'btn sm', title: 'Đọc tag của các file đã tải (index), không gửi request tới site', onclick: async (e) => {
           e.currentTarget.disabled = true;
           try {
             const res = await L.rpc('tags.learn', { module: m });
-            // mayLearn false: the module has a list from a source (or learning is off); indexed false: nothing downloaded yet
+            // mayLearn false: the module has a list from a source (or learning is off); indexed false: nothing downloaded yet;
+            // bundled: the learned tags go on top of the extension's list (added: those it lacks)
+            const onTop = res.bundled ? ` (${nf.format(res.added || 0)} tag chưa có trong danh sách đi kèm)` : '';
             if (res.mayLearn === false) toast(res.sourceList ? `Tag ${m}: đã có danh sách tag từ nguồn, không cần học` : `Tag ${m}: chức năng học tag đang tắt`);
-            else if (res.newPosts) toast(`Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải`);
+            else if (res.newPosts) toast(`Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải${onTop}`);
             else if (res.indexed === false) toast(`Chưa có post nào của ${name || m} trong index: tải vài post (hoặc xem Preview) để Lustra học tag`);
             else toast(`Tag ${m}: không có post đã tải mới`);
+            if (res.written) reresolveTags(m); // a chip shown as unknown may be known now
             refreshTagStatus();
             loadTagLists();
           } catch (err) { toast(errMsg(err), 'err'); }
@@ -2479,16 +2530,38 @@ async function refreshTagStatus() {
           ? h('span', { class: 'row' },
             h('button', { class: 'btn sm', title: 'Chỉ đọc các trang cuối, nơi có tag mới và tag vừa đổi số post (vài phút). Cứ 30 ngày tự đọc lại toàn bộ một lần', onclick: update(false) }, 'Cập nhật'),
             h('button', { class: 'btn sm ghost', title: 'Đọc lại cả danh sách (Rule34: khoảng 1,5–2 giờ; đóng app giữa chừng thì lần sau đọc tiếp)', onclick: update(true) }, 'Đọc lại toàn bộ'))
-          : h('button', { class: 'btn sm', title: src.onDemand ? ON_DEMAND_NOTE : '', onclick: update(false) }, 'Cập nhật');
+          : h('button', { class: 'btn sm', title: [src.onDemand && ON_DEMAND_NOTE, src.merge && mergeNote(src.mergeMinPosts)].filter(Boolean).join(' '),
+            onclick: update(false) }, 'Cập nhật');
       }
+      const written = r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : '';
+      // bundled / shipped: the file's time is the build's (installed from the catalog bundled in the app, copied with its time) or
+      // the install's (a zip, the remote catalog): neither says how old the data is, so the extension version only. After the
+      // first 'Cập nhật' the list in use is the one written here, and its time is the update's (a merge: of the tags it read only)
+      const shippedTitle = src?.merge
+        ? `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ` Bấm "Cập nhật" để lấy số post mới của các tag có từ ${nf.format(src.mergeMinPosts)} post và thêm tag mới; các tag khác giữ nguyên.`}`
+        : `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ' Bấm "Cập nhật" để đọc danh sách mới từ site.'}`;
+      // merged: the core says an update that merges wrote this list (a list of 2tags/, when the app runs from the source, is not one)
+      const writtenTitle = src?.merge && r?.merged
+        ? `Giờ của lần cập nhật gần nhất. Tag site liệt kê ở mức từ ${nf.format(src.mergeMinPosts)} post: số post của site lúc đó. Tag khác: số post của danh sách trước đó.`
+        : '';
+      const [updText, updTitle] = run ? [tagRunningText(run.count), run.message || '']
+        : shipped ? [`theo extension${ver ? ` v${ver}` : ''}`, bundled
+          ? 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.'
+          : shippedTitle]
+          : written ? [written, writtenTitle]
+            : !src && !r ? ['chưa học tag nào', NOT_LEARNED_TITLE] : ['chưa có', ''];
+      // added: learned tags served on top of the list (the core sets it only for a list the learning adds to: a bundled list, or
+      // the list of a merge source, shipped or merged)
+      const addedTitle = bundled ? 'Tag học từ post đã xem / đã tải mà danh sách đi kèm chưa có'
+        : 'Tag học từ post đã xem / đã tải mà danh sách chưa có (thường là tag ít post). Lần "Cập nhật" sau có tag nào thì tag đó lấy số post của site.';
+      const added = r?.added ? h('span', { class: 'muted tag-added', title: addedTitle }, ` +${nf.format(r.added)} tag học thêm`) : null;
       return h('tr', {},
         h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),
-        h('td', { title: src ? tagSourceTitle(src) : (r && !r.learned ? '' : LEARNED_TITLE) },
-          src ? (src.name || name || m) : (r && !r.learned ? '—' : 'học từ post đã xem / đã tải')),
-        h('td', { class: 'mono', title: r?.path || '' }, r ? r.path.split(/[\\/]/).slice(-2).join('/') : '—'),
-        h('td', { title: r?.learned ? 'Danh sách học từ post đã xem / đã tải' : '' }, r ? `${r.size >= 1048576 ? `${(r.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(r.size / 1024))} KB`}${r.learned ? ' (đã học)' : ''}` : '—'),
-        h('td', { id: `tagupd-${m}`, title: run?.message || '' },
-          run ? tagRunningText(run.count) : r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
+        h('td', { title: src ? tagSourceTitle(src) : bundled ? bundledTitle(ver) : (r && !r.learned ? '' : LEARNED_TITLE) },
+          src ? (src.name || name || m) : bundled ? 'đi kèm extension' : (r && !r.learned ? '—' : 'học từ post đã xem / đã tải')),
+        h('td', { title: r?.path || '' }, r ? h('span', { class: 'mono' }, r.path.split(/[\\/]/).slice(-2).join('/')) : '—', added),
+        h('td', { title: r?.learned ? 'Danh sách học từ post đã xem / đã tải' : '' }, r ? `${fmtListSize(r.size)}${r.learned ? ' (đã học)' : ''}` : '—'),
+        h('td', { id: `tagupd-${m}`, title: updTitle }, updText),
         h('td', { id: `tagact-${m}` }, action));
     }));
   $('#tags-autoupdate').checked = !!S.settings.tags.autoUpdate;
@@ -3484,17 +3557,15 @@ function listen() {
       // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');
     } else if (method === 'tags.learned') {
-      // a module without a tag list learned it from previewed / downloaded posts (core, lustra/tags_learned.py)
-      resolveHasList.delete(params.module);
+      // a module without a tag list learned it from previewed / downloaded posts (core, lustra/tags_learned.py), or learned tags
+      // its bundled list lacks: a tag shown as unknown before may be known now. Sent only when the list changed
+      reresolveTags(params.module);
       loadTagLists();
       if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
       tagUpdates.delete(params.module);
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
-      if (params.written) {
-        for (const k of [...resolveCache.keys()]) if (k.startsWith(`${params.module}\n`)) resolveCache.delete(k);
-        resolveHasList.delete(params.module);
-      }
+      if (params.written) reresolveTags(params.module);
       refreshTagStatus();
       loadTagLists();
     }
