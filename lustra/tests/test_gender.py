@@ -55,6 +55,13 @@ CASES = [
     ('db', 'furry_female solo', F, H, {'anthro'}),
     ('db', '1girl disembodied_penis', B, H, set()),
     ('db', 'photo_(medium) 1girl', F, H, {'real'}),
+    # female body parts mirror the male ones: with male evidence the post is 'both', never only_male
+    ('db', '1boy pussy', B, H, set()),
+    ('db', '1boy large_breasts', B, H, set()),
+    ('db', 'breasts', F, H, set()),
+    ('db', '1boy male_with_breasts breasts', MA, H, {'futaMale'}),  # the breasts belong to the man
+    ('db', 'cuntboy 1boy pussy', MA, H, {'futaMale'}),
+    ('db', '1girl futanari penis pussy', F, H, {'futa'}),
     # rule34 (completeness .85: count tags alone only reach medium)
     ('rx', '1girls female_only', F, H, set()),
     ('rx', '1girls solo', F, M_, set()),
@@ -72,6 +79,21 @@ CASES = [
     ('rx', 'female penis futanari', F, M_, {'futa'}),
     ('rx', 'lesbian', F, M_, set()),
     ('rx', 'ambiguous_gender', N, M_, {'other'}),
+    # owner report 2026-11-20 ('chỉ nam' + amputee showed women): danbooru style count tags and female body parts count
+    ('rx', 'amputee 1boy 1girl breasts', B, H, set()),
+    ('rx', 'amputee penis pussy breasts', B, H, set()),
+    ('rx', '1girl', F, M_, set()),
+    ('rx', 'female_focus 1boy', B, H, set()),
+    ('rx', 'male_focus', MA, M_, set()),
+    ('rx', '1boy vagina', B, H, set()),
+    ('rx', '1boy female_pov', B, H, {'pov'}),
+    ('rx', 'pussy breasts', F, M_, set()),  # like 'penis' alone -> only_male medium
+    ('rx', 'cuntboy 1boy pussy', MA, M_, {'futaMale'}),
+    ('rx', 'male_with_breasts male big_breasts', MA, M_, {'futaMale'}),
+    ('rx', 'andromorph male pussy', MA, M_, {'futaMale'}),
+    ('rx', 'gynomorph penis breasts', F, M_, {'futa'}),  # her penis is not a man (was 'both' before gynomorph was a futa flag)
+    ('rx', 'femboy 1boy breasts', B, H, {'trap'}),  # conservative: not only_male
+    ('rx', 'male_only big_breasts', F, L_, set()),  # evidence wins over the marker with confidence low, like 'female_only 1boy'
     # bbooru (aggregator: the rule34 table plus danbooru's count tags; posts measured on 2026-11-19)
     ('bb', '1girls female solo', F, M_, set()),
     ('bb', 'female_only 1girls', F, H, set()),
@@ -83,6 +105,8 @@ CASES = [
     ('bb', '4girls futanari multiple_girls penis', F, M_, {'futa'}),
     ('bb', '1other', N, M_, {'other'}),
     ('bb', 'futa_with_male 1boy', B, H, {'futa'}),
+    ('bb', 'amputee penis pussy breasts', B, H, set()),
+    ('bb', 'female_focus 1boy', B, H, set()),
     # e621 (completeness .92, pair tags, solo marker)
     ('en', 'male solo anthro', MA, H, {'anthro'}),
     ('en', 'female solo', F, H, set()),
@@ -94,8 +118,13 @@ CASES = [
     ('en', 'andromorph', MA, H, {'futaMale'}),
     ('en', 'ambiguous_gender solo', N, M_, {'other'}),
     ('en', 'female male_pov', B, H, {'pov'}),
+    ('en', 'male female_pov', B, H, {'pov'}),
+    ('en', 'male solo faceless_female', B, H, set()),
+    ('en', 'gynomorph/male breasts penis', B, H, {'futa'}),  # e621 body part tags stay neutral (intersex characters are common)
     # generic / unmeasured sites
     ('xb', '1girl solo', F, M_, set()),
+    ('xb', 'amputee penis pussy breasts', B, H, set()),
+    ('rs', 'female_focus 1boy', B, H, set()),
     ('rp', 'Some_Character Series_Name', U, None, set()),
     ('rp', 'yuri', F, M_, set()),
 ]
@@ -117,9 +146,33 @@ class GenderRulesTests(TestCase):
         for name in ('female', 'male'):  # every rule34 count tag is kept
             for conf in (H, M_):
                 self.assertLessEqual(getattr(rx, name)[conf], getattr(bb, name)[conf])
-        # danbooru-style post: rule34's table misses '1girl'
-        self.assertEqual(MA, infer_from_tags(['1girl', 'penis'], rx).label)
-        self.assertEqual(B, infer_from_tags(['1girl', 'penis'], bb).label)
+        # danbooru-style post: rule34's table misses 'furry_female' ('1girl' is in both since 2026-11-20)
+        self.assertEqual(MA, infer_from_tags(['furry_female', 'penis'], rx).label)
+        self.assertEqual(B, infer_from_tags(['furry_female', 'penis'], bb).label)
+        for name in ('female_bodypart', 'male_bodypart'):
+            self.assertLessEqual(getattr(rx, name), getattr(bb, name))
+
+    def test_female_and_male_evidence_are_symmetric(self) -> None:
+        # every table that reads male body parts reads the female ones too, and the gelbooru-like tables know both count styles
+        for module in ('db', 'rx', 'bb', 'en', 'xb', 'rp'):
+            with self.subTest(module=module):
+                rules = rules_for_module(module)
+                self.assertTrue(rules.male_bodypart)
+                self.assertIn('female_pov', rules.female_bodypart)
+                self.assertIn('faceless_female', rules.female_bodypart)
+        for module in ('rx', 'bb', 'xb'):
+            with self.subTest(module=module):
+                rules = rules_for_module(module)
+                self.assertTrue({'1girl', '1girls', 'female_focus'} <= rules.female[H])
+                self.assertTrue({'1boy', 'male_focus'} <= rules.male[H])
+
+    def test_female_body_part_evidence(self) -> None:
+        rx = rules_for_module('rx')
+        res = infer_from_tags(['amputee', 'penis', 'pussy', 'breasts'], rx)
+        self.assertEqual(['penis', 'breasts', 'pussy'], list(res.evidence))
+        self.assertFalse(decide(res, {'only_male'}, M_, False)[0])
+        # a body part next to a count tag adds no evidence: the model's verdict rests on the weakest evidence tag
+        self.assertEqual(('1girl',), infer_from_tags(['1girl', 'breasts'], rules_for_module('db')).evidence)
 
     def test_evidence_and_case(self) -> None:
         res = infer_from_tags(['1Girl', '1BOY', 'hetero'], rules_for_module('db'))

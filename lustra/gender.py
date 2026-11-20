@@ -81,6 +81,7 @@ class GenderRules:
     none: frozenset[str]
     flags: dict[str, frozenset[str]]
     male_bodypart: frozenset[str]
+    female_bodypart: frozenset[str] = frozenset()
     aliases: dict[str, str] = field(default_factory=dict)
 
 
@@ -103,6 +104,7 @@ class GenderRules:
             none=fs(d.get('none')),
             flags={k: fs(v) for k, v in (d.get('flags') or {}).items()},
             male_bodypart=fs(d.get('maleBodypart')),
+            female_bodypart=fs(d.get('femaleBodypart')),
             aliases={str(k).lower(): str(v).lower() for k, v in (d.get('aliases') or {}).items()},
         )
 
@@ -202,6 +204,12 @@ def infer_from_tags(tags: Iterable[str], rules: GenderRules) -> GenderResult:
     if (bp := sorted(t & rules.male_bodypart)) and not futa:
         M = GenderConf.HIGH
         evidence += bp
+    # the female mirror (pussy, breasts, female_pov...): a woman is in the picture, so a post with male evidence is 'both', never
+    # only_male. With a futa / cuntboy / male_with_breasts flag the part may belong to that character: not counted. Evidence only
+    # when the part is what makes F high (a redundant part must not lower the confidence of the model's verdict, gender_model.classify)
+    if (fbp := sorted(t & rules.female_bodypart)) and not futa and F != GenderConf.HIGH:
+        F = GenderConf.HIGH
+        evidence += fbp
     if t & rules.other:
         flags.add('other')
     other = 'other' in flags

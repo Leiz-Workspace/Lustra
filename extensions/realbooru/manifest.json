@@ -1,0 +1,37 @@
+{
+  "id": "realbooru",
+  "name": "Realbooru",
+  "abbr": "rb",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "kind": "downloader",
+  "default": false,
+  "site": "https://realbooru.com/",
+  "media": [
+    "image",
+    "video"
+  ],
+  "tagList": "rb_tags.json",
+  "entry": "downloader.py:DownloaderRb",
+  "minSdkVersion": "1.1",
+  "description": "Realbooru, Gelbooru 0.2 HTML pages (its API is offline): listing pages + one post page per downloaded post. No favorites / pools / comments / date filter.",
+  "syntax": {
+    "concat": "+",
+    "idSep": ":",
+    "maxTagsStringLen": 3300,
+    "metaCount": ":(?:(?:[<>]=?|=)?[a-z\\d\\-_]+?|[a-z\\d_]+:[a-z\\d_]+?)",
+    "sort": "sort(?::[^:]+?){1,2}",
+    "fav": "",
+    "pool": ""
+  },
+  "$generator": {
+    "tool": "lustra.extgen",
+    "toolVersion": "2.0 r7",
+    "engine": "custom",
+    "sourceUrl": "https://realbooru.com/",
+    "createdAt": "2026-11-19T03:17:06Z"
+  },
+  "tagUpdate": {
+    "entry": "tags.py:read_tags"
+  }
+}

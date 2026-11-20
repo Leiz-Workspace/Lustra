@@ -20,8 +20,6 @@ from urllib import parse as url_parse
 from bs4 import BeautifulSoup
 
 from .defines import (
-    DATE_MAX_DEFAULT,
-    DATE_MIN_DEFAULT,
     FILE_NAME_FULL_MAX_LEN,
     FILE_NAME_PREFIX_DB,
     FMT_DATE,
@@ -196,7 +194,7 @@ class DownloaderDb(Downloader):
             if re_favorited_by_tag.fullmatch(tag):
                 taglist[tidx] = f'fav:{tag[tag.find(":") + 1:]}'
         # date limits are converted into 'date:' metatag which does not count towards tags limit
-        if self.date_min != DATE_MIN_DEFAULT or self.date_max != DATE_MAX_DEFAULT:
+        if self._has_date_limits():
             dmin = as_date(self.date_min).isoformat()
             dmax = as_date(self.date_max).isoformat()
             if not any(t.startswith('date:') for t in taglist):

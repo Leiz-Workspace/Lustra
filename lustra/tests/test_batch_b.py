@@ -48,6 +48,7 @@ class _FakePages:
     """Search pages newest first, each page a list of dates (descending). Uses the real search code of DownloaderBase"""
     _get_page_boundary_by_date = DownloaderBase._get_page_boundary_by_date
     _num_pages = DownloaderBase._num_pages
+    date_today = datetime.date.today()
 
     def __init__(self, pages: list[list[str]], date_min: str, date_max: str) -> None:
         self.pages = pages
@@ -69,6 +70,7 @@ class _FakeItems:
     _first_index_by_date = DownloaderBase._first_index_by_date
     _filter_last_items = DownloaderBase._filter_last_items
     _filter_first_items = DownloaderBase._filter_first_items
+    date_today = datetime.date.today()
 
     def __init__(self, dates: list[str | None], date_min: str, date_max: str, per_page: int = 1000) -> None:
         self.items_raw_per_task = [f'item{i}' for i in range(len(dates))]

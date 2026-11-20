@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import TestCase, mock
 
 from lustra.logger import Logger
@@ -409,6 +410,41 @@ class BuildCatalogTests(TestCase):
         with mock.patch.object(self.tool, 'ARCHIVE_SIZE_MAX', 100), self.assertRaises(SystemExit) as ctx:
             self.tool.build(exts, self.root / 'e', self.tool.OFFICIAL_BASE_URL, lists)
         self.assertIn('over the installer limits', str(ctx.exception))
+
+    def test_extensions_without_a_tag_source_take_the_repository_list(self) -> None:
+        # Rule34Hentai reads no list from its site: without a list in its zip, an update from the catalog would leave rn with none.
+        # Its list comes from 2tags/ (as in the catalog bundled with the core), and a build without it anywhere stops
+        exts = self.root / 'ext'
+        shutil.copytree(ROOT / 'extensions' / 'rule34hentai', exts / 'rule34hentai', ignore=shutil.ignore_patterns('__pycache__', '*_tags.json'))
+        tags = self.root / '2tags'
+        tags.mkdir()
+        (tags / 'rn_tags.json').write_text('{"blue_sky": "12 posts (general)"}\n', encoding='utf-8')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            index = self.tool.build(exts, self.root / 'a', self.tool.OFFICIAL_BASE_URL, None, tags)
+        entry = index['extensions'][0]
+        zpath = self.root / 'a' / f"{entry['id']}-{entry['version']}.zip"
+        self.assertIn('rn_tags.json', zipfile_names(zpath))
+        self.assertEqual('', err.getvalue())
+        with zipfile.ZipFile(zpath) as zf:
+            self.assertEqual((tags / 'rn_tags.json').read_bytes(), zf.read('rn_tags.json'))
+        lists = self.root / 'lists'  # a list given with --lists wins
+        lists.mkdir()
+        (lists / 'rn_tags.json').write_text('{"red_sky": "3 posts (general)"}\n', encoding='utf-8')
+        self.tool.build(exts, self.root / 'b', self.tool.OFFICIAL_BASE_URL, lists, tags)
+        with zipfile.ZipFile(self.root / 'b' / zpath.name) as zf:
+            self.assertEqual((lists / 'rn_tags.json').read_bytes(), zf.read('rn_tags.json'))
+        (tags / 'rn_tags.json').unlink()
+        with self.assertRaises(SystemExit) as ctx:
+            self.tool.build(exts, self.root / 'c', self.tool.OFFICIAL_BASE_URL, None, tags)
+        self.assertIn('rule34hentai: no rn_tags.json', str(ctx.exception))
+        # the repository's own lists: the official build of rn, rp and rs carries them
+        for ext_id, name in (('rule34hentai', 'rn_tags.json'), ('paheal', 'rp_tags.json'), ('rule34us', 'rs_tags.json')):
+            manifest = json.loads((ROOT / 'extensions' / ext_id / 'manifest.json').read_text(encoding='utf-8'))
+            in_folder = (ROOT / 'extensions' / ext_id / name).is_file()  # a maintainer's copy next to the manifest is used as is
+            self.assertEqual(None if in_folder else ROOT / '2tags' / name, self.tool.tag_list_source(ROOT / 'extensions' / ext_id, manifest, None))
+        manifest = json.loads((ROOT / 'extensions' / 'bbooru' / 'manifest.json').read_text(encoding='utf-8'))
+        self.assertIsNone(self.tool.tag_list_source(ROOT / 'extensions' / 'bbooru', manifest, None), 'bbooru reads its list from its source')
 
     def test_repository_extensions_carry_no_tag_list(self) -> None:
         # a list is data, not code: it goes into the catalog zips (tools/build_catalog.py), not into the repository, which the app

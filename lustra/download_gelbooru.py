@@ -14,8 +14,6 @@ from multiprocessing.dummy import current_process
 from bs4 import BeautifulSoup
 
 from .defines import (
-    DATE_MAX_DEFAULT,
-    DATE_MIN_DEFAULT,
     FILE_NAME_FULL_MAX_LEN,
     FMT_DATE,
     DownloadModes,
@@ -248,7 +246,7 @@ class DownloaderGelbooru(Downloader):
         # gelbooru 0.2 (checked on xbooru 2026-11-17): 'id:<N' -> posts below N, newest first; 'id:>N sort:id:asc' -> posts above N,
         # oldest first. Date filters are not native here: they need page numbers (date bisection), so no cursor with them
         return (not self.favorites_search_user and not self.pool_search_str
-                and self.date_min == DATE_MIN_DEFAULT and self.date_max == DATE_MAX_DEFAULT
+                and not self._has_date_limits()
                 and not any(t.startswith('sort:') for t in ''.join(self.tags_str_arr[:1]).split(self._get_tags_concat_char())))
 
     def _form_cursor_page_address(self, cursor: int | None, ascending: bool) -> str:

@@ -983,7 +983,80 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
   - Test chặn chỉ xét file được git theo dõi (`git ls-files`), và kiểm rằng `.gitignore` bỏ qua đúng mẫu đó.
   - Workflow Release coi `tools/build_catalog.py`, `tools/sign_catalog.py`, `tools/check_selftest.py` như tài liệu (không file phát hành nào sinh ra từ chúng). Vì vậy đưa các thay đổi này lên `staging` / `production` không đăng bản mới và không cần nâng version.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-19, sau 7x–7ay)
+### 7az. Thử "Cài từ file .zip…" với 15 extension mới — 2026-11-19
+- **Cách thử:**
+  - App chạy từ mã nguồn của `develop` (cùng cây commit với `v2.0.8`), dưới xvfb, với thư mục dữ liệu tạm; điều khiển giao diện qua DevTools.
+  - Chỉ hai hộp thoại của hệ điều hành được trả lời sẵn trong tiến trình chính: chọn file (đường dẫn zip) và xác nhận ("Đồng ý").
+  - Mọi bước khác chạy thật: nút "Cài từ file .zip…", ô SHA-256, lệnh `ext.install` của lõi, trang Extensions, Tags A–Z, autocomplete.
+- **Kết quả:**
+  - Cả 15 zip trong `.extgen-drafts/` (10 ext của PR #37, rule34video, rule34comic, rule34gen, naughtymachinima 1.0.0 và 1.1.0) đều cài được.
+  - SHA-256 sai bị từ chối (`archive checksum mismatch`).
+  - Tags A–Z liệt kê đủ ext có danh sách đi kèm, mỗi ext có nút "Cập nhật" (job của ext, chỉ chạy khi bấm). Gelbooru: "chưa có", cần khoá.
+  - Autocomplete trả tag ngay, không gửi request (sf, yr, zc, rz, na, ru, rg, tb).
+- **Lỗi tìm ra và đã sửa:** cài zip đè lên một ext mà lần chạy này đã nạp (naughtymachinima 1.0.0 → 1.1.0) chỉ báo "Đã cài extension". Thẻ ext vẫn hiện v1.0.0 cho tới khi mở lại app; mở lại thì đúng 1.1.0. Hai đường cài từ catalog vốn đã báo cần khởi động lại. Nay đường zip cũng báo "Đã cài <tên> v<phiên bản>. Khởi động lại app để dùng phiên bản mới." (`restartRequired` của lõi). Không báo lỗi khi người dùng huỷ ở hộp xác nhận.
+
+### 7ba. Sửa 11 lỗi app chủ repo báo, bản 2.0.9 — 2026-11-20
+Chủ repo báo 11 lỗi rồi đi ngủ, dặn: chỗ nào cần chọn thì chọn theo khuyến nghị. Các lựa chọn đó ghi ở cuối mục. Mục 1, 4, 5, 11 làm trực tiếp (commit `e4c11fd`). Mục 2, 3, 6–10 chia ba nhánh làm song song trong worktree riêng (tìm kiếm, danh sách tag, thùng rác), gộp lại. Sau đó 5 người rà soát theo 5 góc, mỗi phát hiện được hai người kiểm chéo: 20 lỗi được xác nhận và sửa, 12 bị bác.
+- **1. Preview còn ảnh sau khi xoá hết tag.** Xoá tag cuối cùng thì lưới, lựa chọn và dòng kết quả được dọn; câu trả lời đến muộn bị bỏ (`S.preview.seq`). Đổi tag, module, ngày, bộ lọc giới tính hay ô chặn nội dung thì lưới cũ bị làm mờ, kèm ghi chú "kết quả của truy vấn hoặc bộ lọc trước: bấm Preview để xem lại". Đặt lại giá trị cũ thì lưới hết mờ. Một lần lật trang lỗi cũng làm mờ lưới.
+- **2. "Chỉ nam" + `amputee` vẫn ra post có nữ.** Bộ lọc không dùng "hoặc": nó lọc kết quả của truy vấn. Lỗi nằm ở bảng luật: post `amputee 1boy 1girl breasts` trên Rule34 bị xếp "chỉ nam", vì bảng của rx thiếu `1girl` và không coi bộ phận cơ thể nữ là bằng chứng (`penis` thì có).
+  - Bảng rx / bb / gelbooru_generic / db: thêm `1girl`, `female_focus` (rx thêm cả `male_focus`) và khoá mới `femaleBodypart` (`pussy`, `vagina`, `breasts` mọi cỡ, `faceless_female`, `female_pov`…), đối xứng với bên nam. Cờ futa thêm `gynomorph`, `herm`; futaMale thêm `andromorph`, `maleherm`, `male_with_breasts` (db: `cuntboy`), để các nhân vật này không thành "cả hai".
+  - e621 chỉ thêm `female_pov`, `faceless_female`, như danh sách nam của nó.
+  - Kết quả model đã lưu cache được tính lại khi bảng luật của db đổi (khoá cache có mã băm của bảng).
+  - 27 ca mới trong `test_gender`, gồm hai ca của chủ repo; số ca AC lên 86.
+- **3. Lọc theo ngày không chạy.** Chỉ Danbooru tìm được theo ngày (`date:`). Các site khác chỉ lọc ngày lúc tải, nên Preview và Đếm bỏ qua ngày.
+  - Nay Preview ẩn / làm mờ post ngoài khoảng ngày, thẻ ghi "lọc ngày", dòng kết quả nói số post bị ẩn. Trang không còn post nào trong khoảng thì nói rõ lý do.
+  - Site có danh sách không ghi ngày: báo "chưa kiểm được ngày". Đếm ghi "≤ N" và "(chưa trừ post ngoài khoảng ngày: site không đếm theo ngày)".
+  - Lỗi phụ tìm ra khi rà soát: ngày "hôm nay" của lõi bị cố định lúc lõi khởi động, nên lõi chạy qua đêm ẩn mất post mới nhất. Nay mỗi lần tải / Preview lấy ngày của chính nó.
+  - Không nhảy thẳng tới trang đầu tiên trong khoảng ngày: tìm trang đó tốn khoảng 10 request mỗi lần lật trang.
+- **4. "Giới hạn (0 = không)" khó hiểu.** Đổi thành "Số post tối đa (0 = tất cả)", kèm chú thích: N post đầu theo ô Thứ tự (ID tăng dần = cũ nhất), đếm sau khi lọc. Tóm tắt bộ lọc ghi "5 post mới nhất / cũ nhất".
+- **5. Nút chọn ngày và nút tăng / giảm số khó thấy.** `color-scheme` theo theme (tối cho Ember / Graphite / OLED, sáng cho Paper), biểu tượng lịch và nút số có màu rõ.
+- **6. Tab "Đã tải" không xoá thật.** Thêm xoá thật và thùng rác.
+  - Chọn (bấm; bấm đúp để xem), nút Xoá hoặc phím Delete (macOS: cả Backspace) chuyển file vào thùng rác, kèm toast "Hoàn tác" 10 giây.
+  - Nút "Thư viện | Thùng rác (N)": khôi phục, xoá vĩnh viễn, dọn sạch (hộp xác nhận của hệ điều hành). Mỗi file có nhãn "còn X ngày".
+  - Cài đặt → Index: "Tự dọn thùng rác sau" 7 / 14 / 30 / 60 / 90 ngày hoặc "Không tự xoá", mặc định 30. Tự dọn chạy 60 giây sau khi mở app, rồi tối đa 12 giờ một lần.
+  - Thùng rác do app quản lý, chỉ đổi tên file (không chép): `trash/` trong thư mục dữ liệu nếu cùng ổ, nếu không thì `.lustra-trash` ở gốc thư mục tải.
+  - Index lên schema 3 (`trashed_at`, `orig_path`, `moving_to`). Mỗi lần chuyển ghi kế hoạch trước, đổi tên trong một transaction, nên app tắt giữa chừng thì lần sau làm nốt hoặc trả lại.
+  - Post trong thùng rác không còn tính là "đã tải", nên tải lại được.
+  - Thùng rác trên ổ đã rút ra thì dòng được giữ, không mất dấu file.
+  - Các lệnh xoá không có trong danh sách RPC giao diện gọi thẳng được: phải qua tiến trình chính, có hộp xác nhận.
+  - CLI: `python -m lustra.dlindex_tools trash list` và `trash purge --days N`.
+- **7. Tải ảnh đã chọn ra ảnh khác** (Danbooru #12579374 → #2806, rồi #2923). Nút "Tải xuống" chính luôn tải cả truy vấn, theo bộ lọc của bảng: "ID tăng dần" với giới hạn 1 cho ra post cũ nhất của truy vấn, dù trên lưới đang chọn post khác.
+  - Nay khi có post được chọn trong một Preview còn đúng truy vấn, nút chính (và Ctrl+Enter) hỏi: "Tải N post đã chọn" / "Tải cả truy vấn" / Huỷ.
+  - "Tải đã chọn" bỏ qua giới hạn, ngày và bộ lọc giới tính: chọn post nào thì tải đúng post đó (`-- id:N`). Vẫn giữ: bỏ qua file đã có, kèm post cha/con, chặn nội dung, các tuỳ chọn file.
+  - Self-test mới `contract.selectedDownload`: chọn db 12579374 với giới hạn 1, có ngày, "chỉ nữ", rồi kiểm tham số của job.
+- **8. Tags A–Z: cập nhật Bbooru / Xbooru "dừng" khi sang tab khác.** Job vẫn chạy, nhưng trang được dựng lại từ ngày của file nên trông như đã dừng, và tiến độ chỉ gửi mỗi 5.000 tag.
+  - Lõi giữ danh sách job đang chạy. `tags.sources` trả `running` / số tag / dòng tiến độ; dòng hiện "đang cập nhật… N tag" với nút "Đang cập nhật…" bị khoá, kể cả sau khi tải lại giao diện.
+  - Tiến độ gửi ít nhất mỗi 2 giây.
+  - Lõi khởi động lại giữa chừng thì dòng không kẹt.
+- **9. e621 không có danh sách tag** ("no recent tag export found"). e621 chuyển `/db_export/` sang trang `/db_exports`, file không còn ghi ngày. Bộ đọc nay đọc trang đó, lấy link `tags.csv.gz` và SHA-256 cùng hàng, kiểm mã băm (sai thì từ chối), rồi đọc như cũ. Không có link thì quay về đường cũ có ngày. Test với bản rút gọn của trang thật.
+- **10. rn / rp / rs không có danh sách tag; "Học từ file đã tải" báo "không có post đã tải mới".** Ba site này không có nguồn tag nào app đọc được, và lõi đóng gói không mang danh sách.
+  - `build_core.py` nay chép `2tags/<abbr>_tags.json` vào catalog đi kèm lõi cho ext không có nguồn tag. `build_catalog.py` làm tương tự cho zip của catalog từ xa, và dừng nếu thiếu file.
+  - rn / rp / rs lên 1.0.2, để bản 1.0.1 đã cài thấy có cập nhật.
+  - Danh sách từ nguồn luôn thắng danh sách học được.
+  - Thông báo của "Học từ file đã tải" nay đúng từng trường hợp: chưa có post nào của site trong index; site đã có danh sách từ nguồn; hoặc chức năng học đang tắt.
+- **11. Cài đặt nhiều khoảng trống.** Hai cột xếp khít (CSS columns, panel không bị cắt). Khoá API và giới hạn tag tách thành panel riêng. Các ô JSON headers / cookies xếp thành cặp.
+- **Rà soát (20 lỗi được xác nhận, đã sửa):**
+  - thùng rác: lỗi khi BEGIN bị khoá; app tắt giữa lúc đổi tên và ghi dòng; dọn thùng rác lúc đang khôi phục; ổ bị rút; self-test dọn nhầm thùng rác của hồ sơ thật (nay chỉ chạy khi có `LUSTRA_USER_DATA`);
+  - `trashDays` hỏng (file cài đặt hỏng, giá trị sửa tay ngoài 0..365): tắt tự dọn và báo, không tự quay về 30;
+  - thùng rác "trống" khi bộ lọc ẩn hết file; toast Hoàn tác nằm trên lightbox; phím delete của macOS; độ tương phản nhãn trên theme Paper (WCAG 4,5:1); số đếm của toast dọn;
+  - ngày "hôm nay" cố định lúc lõi khởi động; danh sách không ghi ngày; cache model theo bảng luật; lật trang lỗi; dòng Tags kẹt sau khi lõi khởi động lại; zip rn/rp/rs của catalog từ xa thiếu danh sách; một test phụ thuộc thứ tự chạy.
+- **Kiểm:**
+  - danh sách unittest của CI: 434 test OK (1 bỏ qua: model thật); `tests.py`; ruff; `npm run check`; `icon-utils`.
+  - Self-test nhanh qua `check_selftest.py`, gồm các bước mới: `selectedDownload`, `tagRestart`, `indexTools.trash`, `indexTools.ui.trash`.
+  - Chạy app thật dưới xvfb, trong network namespace riêng (0 request ra ngoài), điều khiển qua DevTools: mục 1, 4, 5, 11, thùng rác (xoá → Hoàn tác → khôi phục → dọn sạch, kiểm trên đĩa), dòng Tags đang chạy. 18 ảnh chụp.
+  - Mục 2, 3, 9, 10 chỉ kiểm bằng unittest (cần site thật). Mục 7 kiểm bằng self-test.
+- **Lựa chọn thay chủ repo:**
+  - giữ thùng rác 30 ngày;
+  - thùng rác do app quản lý (không dùng thùng rác của hệ điều hành, vì cần khôi phục và tự dọn theo hạn);
+  - post trong thùng rác được tải lại;
+  - "Tải đã chọn" giữ các tuỳ chọn file;
+  - nút chính hỏi khi có lựa chọn;
+  - bộ phận cơ thể nữ là bằng chứng mạnh như bên nam; `femboy 1boy breasts` thành "cả hai" để "chỉ nam" chặt;
+  - rn / rp / rs mang danh sách `2tags/` và lên 1.0.2.
+- **Phát hành:** version 2.0.9 (lõi `2.0 r9`), ghi chú `docs/releases/v2.0.9.md`. Bản này còn có PR #37: 10 extension mới trong catalog đi kèm app, không cài sẵn (7ay, 7az). Nó cũng có PR #49: báo cần khởi động lại khi cài zip đè lên extension đang chạy. Đưa lên `staging` (theo lời chủ repo) để có bản rc cho chủ repo thử. Lên `production` là quyết định của chủ repo.
+- **Sau khi phát hành:** build và ký lại catalog chính thức (`build_catalog.py --lists`), để bản đã cài nhận rn / rp / rs 1.0.2 có danh sách. Việc này cần khoá ký của chủ repo.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7ba)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
