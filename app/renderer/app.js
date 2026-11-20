@@ -576,6 +576,22 @@ const flushResolve = debounce(async () => {
   }
   if (resolveCache.size > 5000) for (const [k, v] of resolveCache) if (v !== null) resolveCache.delete(k);
 }, 180);
+function reresolveTags(module) {
+  // the module's list changed (tags learned, an update, the "Học từ file đã tải" button): the tags of the chips shown are asked
+  // again and keep their hints until the answers arrive (no blink); its other cached answers are dropped
+  resolveHasList.delete(module);
+  const shown = new Set(module === S.module ? S.chips.flatMap(chipTags) : []);
+  let queued = false;
+  for (const k of [...resolveCache.keys()]) {
+    if (!k.startsWith(`${module}\n`)) continue;
+    const t = k.slice(module.length + 1);
+    if (!shown.has(t) || unsupported.has('tags.resolve')) { resolveCache.delete(k); continue; }
+    if (!resolveQueue.has(module)) resolveQueue.set(module, new Set());
+    resolveQueue.get(module).add(t);
+    queued = true;
+  }
+  if (queued) flushResolve();
+}
 function chipHints(c) {
   const module = S.module;
   // "unknown tag" only means something when the module has a tag list
@@ -2483,6 +2499,7 @@ async function refreshTagStatus() {
             else if (res.newPosts) toast(`Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải${onTop}`);
             else if (res.indexed === false) toast(`Chưa có post nào của ${name || m} trong index: tải vài post (hoặc xem Preview) để Lustra học tag`);
             else toast(`Tag ${m}: không có post đã tải mới`);
+            if (res.written) reresolveTags(m); // a chip shown as unknown may be known now
             refreshTagStatus();
             loadTagLists();
           } catch (err) { toast(errMsg(err), 'err'); }
@@ -3518,18 +3535,14 @@ function listen() {
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');
     } else if (method === 'tags.learned') {
       // a module without a tag list learned it from previewed / downloaded posts (core, lustra/tags_learned.py), or learned tags
-      // its bundled list lacks: a tag shown as unknown before may be known now
-      for (const k of [...resolveCache.keys()]) if (k.startsWith(`${params.module}\n`)) resolveCache.delete(k);
-      resolveHasList.delete(params.module);
+      // its bundled list lacks: a tag shown as unknown before may be known now. Sent only when the list changed
+      reresolveTags(params.module);
       loadTagLists();
       if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
       tagUpdates.delete(params.module);
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
-      if (params.written) {
-        for (const k of [...resolveCache.keys()]) if (k.startsWith(`${params.module}\n`)) resolveCache.delete(k);
-        resolveHasList.delete(params.module);
-      }
+      if (params.written) reresolveTags(params.module);
       refreshTagStatus();
       loadTagLists();
     }

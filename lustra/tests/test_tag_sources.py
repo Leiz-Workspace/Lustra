@@ -897,7 +897,7 @@ class LearnedTagListTests(_DataDirTest):
         self.assertEqual(['sky'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'zq', 'prefix': 'sk'})])
         row = next(r for r in server.m_tags_status({}) if r['module'] == 'zq')
         self.assertTrue(row['learned'])
-        self.assertEqual(0, tags_learned.learn('zq', [('2', ['sky'])]))  # seen before: counted once
+        self.assertEqual((0, False), tags_learned.learn('zq', [('2', ['sky'])]))  # seen before: counted once
 
     def test_downloads_teach_it_from_the_index(self) -> None:
         tags_learned.learn('zq', [('1', ['sky'])])  # seen in Preview first
@@ -921,7 +921,7 @@ class LearnedTagListTests(_DataDirTest):
         tags_updater.write_tag_list(real, {'sky': (5000, 'general'), 'skyline': (40, 'general')})  # the updater got the real list
         TagsDB.locate_default_lists(reload=('zq',))
         self.assertFalse(tags_learned.may_learn('zq'))
-        self.assertEqual(0, tags_learned.learn('zq', [('2', ['sky', 'new'])]))
+        self.assertEqual((0, False), tags_learned.learn('zq', [('2', ['sky', 'new'])]))
         self.assertEqual({'sky': '5000 posts (general)', 'skyline': '40 posts (general)'}, _read_list(real))
         self.assertFalse(tags_learned.status('zq')['learned'])
         self.assertFalse(tags_learned.may_learn('rp'))  # a list bundled in 2tags/
@@ -929,7 +929,7 @@ class LearnedTagListTests(_DataDirTest):
         self.assertFalse(tags_learned.may_learn('zm'))  # a list registered in memory
         with mock.patch.dict(os.environ, {'LUSTRA_TAGS_LEARN': '0'}):
             self.assertFalse(tags_learned.may_learn('zn'))
-            self.assertEqual(0, tags_learned.learn('zn', [('1', ['sky'])]))
+            self.assertEqual((0, False), tags_learned.learn('zn', [('1', ['sky'])]))
         self.assertFalse(tags_learned.may_learn('../x'))
         with mock.patch.object(server.threading, 'Thread') as thread:  # Preview: nothing to learn, no thread
             server._learn_from_preview('rp', [{'id': '1', 'tags': ['a']}])
@@ -954,7 +954,7 @@ class LearnedTagListTests(_DataDirTest):
         self.assertEqual(['sky', 'skyline'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sk'})])
         self.assertFalse(tags_learned.may_learn('fq'))
         self.assertTrue(tags_learned.has_source_list('fq'))
-        self.assertEqual(0, tags_learned.learn('fq', [('2', ['sky', 'new'])]))
+        self.assertEqual((0, False), tags_learned.learn('fq', [('2', ['sky', 'new'])]))
         shutil.rmtree(folder)  # uninstalled: the learned list is the module's list again
         TagsDB.locate_default_lists(reload=('fq',))
         self.assertEqual(learned, TagsDB.get_file('fq'))
@@ -1044,10 +1044,13 @@ class BundledListLearningTests(_DataDirTest):
             thread.assert_called_once()
         notes = self._learn([('1', ['Sky', 'new tag', 'tree']), ('2', ['new_tag', 'skyfall']), ('1', ['again'])])
         self.assertEqual(('tags.learned', {'module': 'fq', 'learned': False, 'posts': 2, 'tags': 4}), notes[-1])
-        # its file holds only what the bundled list lacks, the bundled list is untouched
-        self.assertEqual({'new_tag': '2 posts (unknown)', 'skyfall': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        # its own file holds only what the bundled list lacks, out of the lists' names; the bundled list is untouched
+        added = tags_learned.additions_path('fq')
+        self.assertEqual(self.data / 'tags' / 'learned' / 'fq_added.json', added)
+        self.assertEqual({'new_tag': '2 posts (unknown)', 'skyfall': '1 posts (unknown)'}, _read_list(added))
+        self.assertFalse(tags_learned.list_path('fq').exists())
         self.assertEqual((before.st_size, before.st_mtime_ns), (bundled.stat().st_size, bundled.stat().st_mtime_ns))
-        self.assertEqual((bundled, tags_learned.list_path('fq')), (TagsDB.get_file('fq'), TagsDB.get_additions('fq')))
+        self.assertEqual((bundled, added), (TagsDB.get_file('fq'), TagsDB.get_additions('fq')))
         # autocompletion and Tags A-Z: the bundled list plus the learned tags, the bundled counts stay
         self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'new_tag': 2, 'skyfall': 1}, self._all())
         rows = server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sky'})
@@ -1058,8 +1061,8 @@ class BundledListLearningTests(_DataDirTest):
         self.assertEqual([True, True, False], [r['known'] for r in res['items']])
         self.assertEqual({'bundled': True, 'version': '1.0.2', 'added': 2, 'learned': False, 'path': bundled.as_posix()},
                          {k: self._row()[k] for k in ('bundled', 'version', 'added', 'learned', 'path')})
-        self._learn([('3', ['tree', 'new_tag'])])
-        self.assertEqual({'new_tag': '3 posts (unknown)', 'skyfall': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        self.assertEqual('tags.learned', self._learn([('3', ['tree', 'new_tag'])])[-1][0])  # the count of an addition went up
+        self.assertEqual({'new_tag': '3 posts (unknown)', 'skyfall': '1 posts (unknown)'}, _read_list(added))
         self.assertEqual(3, self._all()['new_tag'])
         self.assertEqual([], self._learn([('3', ['tree', 'other'])]))  # counted before: nothing written, nothing told
 
@@ -1077,13 +1080,14 @@ class BundledListLearningTests(_DataDirTest):
             self._learn([('2', ['tree', 'new_b']), ('3', ['new_b'])])
             self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'old_a': 1, 'new_b': 2}, self._all())
         self.assertEqual([['new_b', 'tree']], looked)  # the tags of the posts counted now, not the whole learned set
-        self.assertEqual([tags_learned.list_path('fq')], parsed)  # the learned file only (small): the bundled list comes from its cache
-        self.assertEqual(tags_learned.list_path('fq'), TagsDB.get_additions('fq'))
+        self.assertEqual([tags_learned.additions_path('fq')], parsed)  # the additions only (small): the bundled list comes from its cache
+        self.assertEqual(tags_learned.additions_path('fq'), TagsDB.get_additions('fq'))
 
     def test_an_update_of_the_extension_keeps_the_additions_its_new_list_lacks(self) -> None:
         self._install()
         self._learn([('1', ['sky', 'new_a', 'new_b'])])
-        self.assertEqual({'new_a': '1 posts (unknown)', 'new_b': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        added = tags_learned.additions_path('fq')
+        self.assertEqual({'new_a': '1 posts (unknown)', 'new_b': '1 posts (unknown)'}, _read_list(added))
         newer = {**self.BUNDLED, 'new_a': (77, 'character')}
         # the new list alone, before the learned file is written again: no duplicate, the bundled count wins
         shutil.rmtree(self.folder)
@@ -1094,22 +1098,23 @@ class BundledListLearningTests(_DataDirTest):
         # ext.install of the update: the learned file drops what the new list has
         res = self._install(newer, '1.0.4')
         self.assertEqual('1.0.4', res['version'])
-        self.assertEqual({'new_b': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        self.assertEqual({'new_b': '1 posts (unknown)'}, _read_list(added))
         self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'new_a': 77, 'new_b': 1}, self._all())
         self.assertEqual({'version': '1.0.4', 'added': 1}, {k: self._row()[k] for k in ('version', 'added')})
         # a newer list that has every learned tag: the learned file is emptied, not left with stale additions
         self._install({**newer, 'new_b': (9, 'general')}, '1.0.5')
-        self.assertEqual({}, _read_list(tags_learned.list_path('fq')))
+        self.assertEqual({}, _read_list(added))
         self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'new_a': 77, 'new_b': 9}, self._all())
         self.assertEqual(0, self._row()['added'])
 
     def test_uninstalling_the_extension_leaves_the_whole_learned_list(self) -> None:
         self._install()
         self._learn([('1', ['sky', 'new_a']), ('2', ['sky'])])
-        self.assertEqual({'new_a': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        self.assertEqual({'new_a': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
         self.assertEqual({'ok': True}, server.m_ext_uninstall({'id': 'fakebooru'}))
         self.assertFalse(self.folder.exists())
         self.assertEqual(tags_learned.list_path('fq'), TagsDB.get_file('fq'))
+        self.assertFalse(tags_learned.additions_path('fq').exists())
         self.assertIsNone(TagsDB.bundled('fq'))
         self.assertEqual({'sky': '2 posts (unknown)', 'new_a': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
         self.assertEqual({'sky': 2, 'new_a': 1}, self._all())
@@ -1123,9 +1128,13 @@ class BundledListLearningTests(_DataDirTest):
         old = time.time() - 30 * 86400
         os.utime(src / 'fq_tags.json', (old, old))
         tags_learned.learn('fq', [('1', ['sky', 'mine'])])
+        self.assertTrue(tags_learned.is_learned('fq'))
         self._install(src=src)
         self.assertEqual(self.folder / 'fq_tags.json', TagsDB.get_file('fq'))
-        self.assertEqual({'mine': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        # the learned list moved onto the bundled one: only what it lacks, in the additions file; the whole list is gone from the
+        # lists' names (written again from the learning's state when the extension is uninstalled)
+        self.assertEqual({'mine': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        self.assertFalse(tags_learned.list_path('fq').exists())
         self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'mine': 1}, self._all())
 
     def test_modules_with_a_source_never_learn_on_top_of_their_list(self) -> None:
@@ -1142,8 +1151,9 @@ class BundledListLearningTests(_DataDirTest):
                 self.assertIsNone(TagsDB.bundled(module))
                 self.assertFalse(tags_learned.may_learn(module))
                 self.assertTrue(tags_learned.has_source_list(module))
-                self.assertEqual(0, tags_learned.learn(module, [('1', ['sky', 'new'])]))
+                self.assertEqual((0, False), tags_learned.learn(module, [('1', ['sky', 'new'])]))
                 self.assertFalse(tags_learned.list_path(module).exists())
+                self.assertFalse(tags_learned.additions_path(module).exists())
                 self.assertEqual((False, '', 0), tuple(self._row(module)[k] for k in ('bundled', 'version', 'added')))
                 res = server.m_tags_learn({'module': module})
                 self.assertEqual((False, True, False), (res['mayLearn'], res['sourceList'], res['bundled']))
@@ -1153,25 +1163,111 @@ class BundledListLearningTests(_DataDirTest):
         self._install()
         with mock.patch.dict(os.environ, {'LUSTRA_TAGS_LEARN': '0'}):
             self.assertFalse(tags_learned.may_learn('fq'))
-            self.assertEqual(0, tags_learned.learn('fq', [('1', ['new'])]))
+            self.assertEqual((0, False), tags_learned.learn('fq', [('1', ['new'])]))
             res = server.m_tags_learn({'module': 'fq'})
             self.assertEqual((False, False), (res['mayLearn'], res['sourceList']))  # the app says the learning is off
             self.assertFalse(tags_learned.refresh('fq'))
         self.assertFalse(tags_learned.list_path('fq').exists())
+        self.assertFalse(tags_learned.additions_path('fq').exists())
 
     def test_learn_from_downloads_on_top(self) -> None:
         # "Học từ file đã tải" (Tags A-Z) on a bundled list
         self._install()
-        keys = ('mayLearn', 'sourceList', 'indexed', 'newPosts', 'bundled', 'added')
-        self.assertEqual((True, False, False, 0, True, 0), tuple(server.m_tags_learn({'module': 'fq'})[k] for k in keys))
+        keys = ('mayLearn', 'sourceList', 'indexed', 'newPosts', 'bundled', 'added', 'written')
+        self.assertEqual((True, False, False, 0, True, 0, False), tuple(server.m_tags_learn({'module': 'fq'})[k] for k in keys))
         with DownloadIndex(create=True) as index:
             index.add_many([IndexRecord(module='fq', post_id='1', path='/x/fq_1.jpg', tags='sky downloaded_tag'),
                             IndexRecord(module='fq', post_id='2', path='/x/fq_2.jpg', tags='tree')])
+        # after a download job main forwards it as tags.learned when written (app/main.js learnTagList): 'learned' stays False here
         res = server.m_tags_learn({'module': 'fq'})
-        self.assertEqual((True, False, True, 2, True, 1), tuple(res[k] for k in keys))
-        self.assertEqual({'downloaded_tag': '1 posts (unknown)'}, _read_list(tags_learned.list_path('fq')))
+        self.assertEqual((True, False, True, 2, True, 1, True, False), tuple(res[k] for k in (*keys, 'learned')))
+        self.assertEqual({'downloaded_tag': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
         self.assertEqual(1, self._all()['downloaded_tag'])
-        self.assertEqual((True, False, True, 0, True, 1), tuple(server.m_tags_learn({'module': 'fq'})[k] for k in keys))
+        self.assertEqual((True, False, True, 0, True, 1, False), tuple(server.m_tags_learn({'module': 'fq'})[k] for k in keys))
+        with DownloadIndex(create=True) as index:  # downloaded posts whose tags the bundled list has: nothing to tell the app
+            index.add_many([IndexRecord(module='fq', post_id='3', path='/x/fq_3.jpg', tags='sky tree')])
+        res = server.m_tags_learn({'module': 'fq'})
+        self.assertEqual((True, False, True, 1, True, 1, False), tuple(res[k] for k in keys))
+
+    def test_a_preview_whose_tags_the_bundled_list_has_rewrites_nothing(self) -> None:
+        # rule34.us: most Preview pages bring only tags its 544k list has; the additions file, the loaded list and the app's chip
+        # hints stay as they are
+        self._install()
+        self._learn([('1', ['sky', 'old_a'])])
+        added = tags_learned.additions_path('fq')
+        stamp = (added.stat().st_size, added.stat().st_mtime_ns)
+        self.assertEqual(1, self._all()['old_a'])
+        self.assertTrue(TagsDB.is_loaded('fq'))
+        writes: list[pathlib.Path] = []
+        write = tags_learned.write_tag_list
+        with mock.patch.object(tags_learned, 'write_tag_list', lambda path, tags: writes.append(path) or write(path, tags)), \
+                mock.patch.object(TagsDB, 'unload', wraps=TagsDB.unload) as unload:
+            self.assertEqual([], self._learn([('2', ['sky', 'tree']), ('3', ['Skyline'])]))
+            self.assertEqual((2, False), tags_learned.learn('fq', [('4', ['tree']), ('5', ['sky'])]))
+            unload.assert_not_called()
+        self.assertEqual([], writes)
+        self.assertEqual(stamp, (added.stat().st_size, added.stat().st_mtime_ns))
+        self.assertTrue(TagsDB.is_loaded('fq'))
+        self.assertEqual(5, tags_learned.status('fq')['posts'])  # still counted (an uninstall writes the whole learned list)
+        notes = self._learn([('6', ['sky', 'old_a'])])  # an addition's count went up: written, the app is told
+        self.assertEqual(['tags.learned'], [m for m, _ in notes])
+        self.assertEqual({'old_a': '2 posts (unknown)'}, _read_list(added))
+        self.assertEqual({'ok': True}, server.m_ext_uninstall({'id': 'fakebooru'}))
+        self.assertEqual({'sky': 4, 'tree': 2, 'skyline': 1, 'old_a': 2}, self._all())
+
+    def test_a_lost_stamp_never_hides_the_bundled_list(self) -> None:
+        # the learning's stamp (its sqlite state) can be lost: a quit while it wrote, a profile copied without its file times, the
+        # state removed. Neither the additions nor a whole learned list from before the bundled one then takes the module's list
+        later = time.time() + 60
+        tags_learned.learn('fq', [('0', ['sky', 'old'])])  # learned before the extension shipped its list
+        whole = tags_learned.list_path('fq')
+        kept = whole.read_bytes()
+        self._install()
+        self._learn([('1', ['sky', 'new_a'])])
+        added = tags_learned.additions_path('fq')
+        self.assertEqual({'old': '1 posts (unknown)', 'new_a': '1 posts (unknown)'}, _read_list(added))
+        whole.write_bytes(kept)  # left behind (a quit before it was removed), its stamp lost
+        for f in (whole, added):
+            os.utime(f, (later, later))
+        shutil.rmtree(self.data / 'tags' / 'learned' / 'fq.sqlite', ignore_errors=True)
+        (self.data / 'tags' / 'learned' / 'fq.sqlite').unlink(missing_ok=True)
+        TagsDB.clear()
+        TagsDB.locate_default_lists()  # a restart
+        bundled = self.folder / 'fq_tags.json'
+        self.assertEqual((bundled, added), (TagsDB.get_file('fq'), TagsDB.get_additions('fq')))
+        self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'old': 1, 'new_a': 1}, self._all())
+        self.assertEqual(['sky'], [r['tag'] for r in server.m_tags_autocomplete({'module': 'fq', 'prefix': 'sky'})][:1])
+        self.assertEqual({'bundled': True, 'path': bundled.as_posix()}, {k: self._row()[k] for k in ('bundled', 'path')})
+        self.assertTrue(tags_learned.may_learn('fq'))  # the learning goes on on top of it
+        self.assertFalse(tags_learned.has_source_list('fq'))
+        self.assertEqual('tags.learned', self._learn([('2', ['tree', 'new_b'])])[-1][0])
+        self.assertEqual({'new_b': '1 posts (unknown)'}, _read_list(added))  # learned again from here (its state was lost)
+        self.assertEqual(bundled, TagsDB.get_file('fq'))
+        self.assertEqual(kept, whole.read_bytes())  # not the learning's any more: never removed or overwritten
+
+    def test_a_write_cut_short_is_done_by_the_next_learn(self) -> None:
+        # the counts are committed before the additions file is written: a quit in between (learning runs on a daemon thread) is
+        # caught up by the next Preview, even one that brings nothing new
+        self._install()
+        self._learn([('1', ['sky', 'new_a'])])
+        write = tags_learned.write_tag_list
+
+        def quit_while_writing(path, tags):
+            raise SystemExit('quit')
+
+        with mock.patch.object(tags_learned, 'write_tag_list', quit_while_writing), self.assertRaises(SystemExit):
+            tags_learned.learn('fq', [('2', ['new_a', 'new_b'])])
+        self.assertEqual({'new_a': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        TagsDB.clear()
+        TagsDB.locate_default_lists()  # a restart
+        self.assertEqual(TagsDB.get_file('fq'), self.folder / 'fq_tags.json')
+        with mock.patch.object(tags_learned, 'write_tag_list', wraps=write) as written:
+            self.assertEqual('tags.learned', self._learn([('3', ['sky'])])[-1][0])
+            self.assertEqual(1, written.call_count)
+            self.assertEqual([], self._learn([('4', ['tree'])]))  # done: nothing written again
+            self.assertEqual(1, written.call_count)
+        self.assertEqual({'new_a': '2 posts (unknown)', 'new_b': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'new_a': 2, 'new_b': 1}, self._all())
 
     def test_with_additions_merges_bytes_in_order(self) -> None:
         base = tagsdb._TagList.from_mapping({'b': (TagTypes.TAG_TYPE_GENERAL, 5), 'd': (TagTypes.TAG_TYPE_ARTIST, 7),

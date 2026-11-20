@@ -320,16 +320,17 @@ def m_tags_status(_: dict) -> list[dict]:
 
 def m_tags_learn(p: dict) -> dict:
     """Learns a module's tag list from its downloaded files (download index) when it has no list from a source; the app calls it
-    after each download job. No request is made. -> {module, learned, posts, tags (status), newPosts, mayLearn (False: nothing is
-    learned, the module has a list from a source, see sourceList), sourceList, indexed (the download index holds posts of the module),
-    bundled (the learning adds to a list shipped inside the extension), added (learned tags that list lacks)}"""
+    after each download job. No request is made. -> {module, learned, posts, tags (status), newPosts, written (the list served for
+    the module changed: the app asks its tags again), mayLearn (False: nothing is learned, the module has a list from a source, see
+    sourceList), sourceList, indexed (the download index holds posts of the module), bundled (the learning adds to a list shipped
+    inside the extension), added (learned tags that list lacks)}"""
     module = str(p.get('module', ''))
     if not re_abbr.fullmatch(module):
         raise RpcError(-32602, f'invalid module \'{module}\'')
     may = tags_learned.may_learn(module)
-    new = tags_learned.learn_from_index(module) if may else 0
+    res = tags_learned.learn_from_index(module) if may else tags_learned.Learned(0, False)
     bundled = tags_learned.base_list(module) is not None
-    return {'module': module, **tags_learned.status(module), 'newPosts': new, 'mayLearn': may,
+    return {'module': module, **tags_learned.status(module), 'newPosts': res.posts, 'written': res.written, 'mayLearn': may,
             'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module), 'bundled': bundled,
             'added': tags_learned.added_count(module) if bundled else 0}
 
@@ -343,7 +344,7 @@ def _learn_from_preview(module: str, items: list[dict]) -> None:
 
 def _learn_quietly(module: str, posts: list) -> None:
     try:
-        if tags_learned.learn(module, posts):
+        if tags_learned.learn(module, posts).written:  # not when the posts only had tags a bundled list has: nothing changed
             notify('tags.learned', {'module': module, **tags_learned.status(module)})  # the app reloads its list of lists
     except Exception as err:
         Logger.log(f'Warning: tag list of {module} not learned: {err}', False, False)

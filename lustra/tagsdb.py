@@ -623,6 +623,16 @@ def _is_learned_list(module: str, path: pathlib.Path) -> bool:
         return False
 
 
+def _learned_additions(module: str) -> pathlib.Path | None:
+    """The tags lustra/tags_learned.py learned on top of the module's bundled list (additions_path), when there are any"""
+    try:
+        from .tags_learned import additions_path
+        path = additions_path(module)
+        return path if path.is_file() else None
+    except Exception:  # an unreadable data dir: nothing is added
+        return None
+
+
 def _has_no_tag_source(manifest) -> bool:
     """The extension has no tag list source Lustra can read (lustra/tags_updater.py source_for_manifest: not a reviewed module, no
     'tagUpdate', no engine with a tag listing): its bundled list is not updated, the learning adds to it"""
@@ -648,7 +658,8 @@ class TagsDB:
     Bundled: dict[str, BundledList] = {}
     '''modules whose located list ships inside an installed extension that has no tag source (lustra/tags_learned.py adds to it)'''
     Additions: dict[str, pathlib.Path] = {}
-    '''module -> its learned list, served on top of its bundled list: the names the bundled list lacks are added at load'''
+    '''module -> the tags learned on top of its bundled list (lustra/tags_learned.py additions_path; before the learning first wrote
+    them there, its whole learned list): the names the bundled list lacks are added at load'''
     AuxDB: dict[str, pathlib.Path] = {}
     AuxDBFiles: dict[str, pathlib.Path] = {}
     MaxLoaded = TAGS_MAX_LOADED
@@ -872,8 +883,10 @@ class TagsDB:
         """LUSTRA_TAGS_DIR wins, otherwise the most recently updated list per module among <data dir>/tags, the lists shipped
         inside installed extensions (extension_lists) and repo 2tags/. A list learned from the posts seen here (lustra/tags_learned.py)
         is used only for a module that has no other list, however recent it is: a list from a source always wins. When the module's
-        list ships inside an extension that has no tag source (TagsDB.Bundled), the learned list is served on top of it: the names it
-        lacks are added (TagsDB.Additions). Loaded lists stay in memory unless their file changed or they are listed in 'reload'"""
+        list ships inside an extension that has no tag source (TagsDB.Bundled), the learned tags are served on top of it: the names it
+        lacks are added (TagsDB.Additions), and no other file of <data dir>/tags outranks it (nothing but the learning writes there for
+        such a module: a learned list that lost its stamp is not taken for a newer list). Loaded lists stay in memory unless their file
+        changed or they are listed in 'reload'"""
         from .extensions import data_dir
         env = os.environ.get('LUSTRA_TAGS_DIR')
         env_dir = pathlib.Path(env).expanduser() if env else None
@@ -890,6 +903,7 @@ class TagsDB:
                 files[module] = f
 
         ext_lists = TagsDB._extension_list_manifests()
+        no_source = {module for module, (_, m) in ext_lists.items() if _has_no_tag_source(m)}
         for module, (f, _) in ext_lists.items():
             consider(module, f, False)
         for d in reversed(dirs):
@@ -897,15 +911,18 @@ class TagsDB:
                 continue
             for f in d.glob('*_tags.json'):
                 module = f.name[:-len('_tags.json')]
-                if d == learned_dir and d != env_dir and _is_learned_list(module, f):
-                    learned[module] = f
-                    continue
+                if d == learned_dir and d != env_dir:
+                    if _is_learned_list(module, f):
+                        learned[module] = f
+                        continue
+                    if module in no_source and files.get(module) == ext_lists[module][0]:
+                        continue  # no source writes there for it: a learned list whose stamp was lost (a quit while it was written)
                 consider(module, f, d == env_dir)
             if alias_file is None and (alias := d / FILE_NAME_ALIASES).is_file():
                 alias_file = alias
         bundled = {module: BundledList(f, m.id, m.version) for module, (f, m) in ext_lists.items()
-                   if files.get(module) == f and _has_no_tag_source(m)}
-        additions = {module: f for module, f in learned.items() if module in bundled}
+                   if module in no_source and files.get(module) == f}
+        additions = {module: f for module in bundled if (f := _learned_additions(module) or learned.get(module)) is not None}
         for module, f in learned.items():
             files.setdefault(module, f)
         with TagsDB._lock:

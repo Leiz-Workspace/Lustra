@@ -8,12 +8,14 @@ with the tag here, not the site's count. A list from a source always wins: once 
 source or 2tags/ gives the module a list, the learning stops writing (the file it wrote last is stamped; any other file at that
 path, or another list located for the module, means it is not ours any more).
 On top of a bundled list: a list shipped inside an installed extension that has no tag source (TagsDB.Bundled: Rule34Hentai,
-Paheal, Rule34.us) is never updated, so the learning goes on and its file holds only the learned tags that list lacks (its
-'additions'); TagsDB serves the bundled list plus those, the bundled counts stay. The bundled list is never rewritten or parsed
-again for it (rule34.us: 18.9 MB): only the tags of the newly counted posts are looked up in it, the whole learned set only when
-the bundled list changed (an extension update, its uninstall: then the learned list is the module's whole list again).
+Paheal, Rule34.us) is never updated, so the learning goes on and writes only the learned tags that list lacks (its 'additions'),
+to '<data dir>/tags/learned/<abbr>_added.json' (additions_path): out of the '*_tags.json' names, so they are never taken for the
+module's whole list. TagsDB serves the bundled list plus those, the bundled counts stay. The bundled list is never rewritten or
+parsed again for it (rule34.us: 18.9 MB): only the tags of the newly counted posts are looked up in it, the whole learned set only
+when the bundled list changed (an extension update, its uninstall: then the learned list is the module's whole list again). The
+additions file is written only when they changed (a tag the bundled list lacks was seen), not on every Preview.
 State: '<data dir>/tags/learned/<abbr>.sqlite' (posts counted, tag counts, the index cursor, the stamp of the last write, the
-bundled list the additions were computed for and those additions)
+bundled list the additions were computed for and those additions, a write still to do)
 """
 #########################################
 #
@@ -28,13 +30,14 @@ import pathlib
 import sqlite3
 import threading
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from .modspec import re_abbr
 from .tags_updater import write_tag_list
 from .tagsdb import TagsDB
 
-__all__ = ('ENV_TAGS_LEARN', 'LEARNED_TYPE', 'added_count', 'base_list', 'enabled', 'has_source_list', 'indexed', 'is_learned', 'learn',
-           'learn_from_index', 'list_path', 'may_learn', 'refresh', 'status')
+__all__ = ('ENV_TAGS_LEARN', 'LEARNED_TYPE', 'Learned', 'added_count', 'additions_path', 'base_list', 'enabled', 'has_source_list',
+           'indexed', 'is_learned', 'learn', 'learn_from_index', 'list_path', 'may_learn', 'refresh', 'status')
 
 ENV_TAGS_LEARN = 'LUSTRA_TAGS_LEARN'
 '''0: nothing is learned (the offline tests set it, lustra/tests/__init__.py; the learning tests turn it on)'''
@@ -52,6 +55,17 @@ CREATE TABLE IF NOT EXISTS added (name TEXT PRIMARY KEY) WITHOUT ROWID;
 '''
 '''added: the learned tags the bundled list lacks (meta 'base': that list's path and stamp; empty without one)'''
 
+
+class Learned(NamedTuple):
+    """What learn / learn_from_index did"""
+    posts: int
+    '''posts counted now (not counted before)'''
+    written: bool
+    '''the list TagsDB serves for the module changed (the learned list or the additions were written): the app asks again'''
+
+
+_NOTHING = Learned(0, False)
+
 _guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
 
@@ -68,6 +82,12 @@ def _tags_dir() -> pathlib.Path:
 
 def list_path(module: str) -> pathlib.Path:
     return _tags_dir() / f'{module}_tags.json'
+
+
+def additions_path(module: str) -> pathlib.Path:
+    """The learned tags a bundled list lacks (served on top of it): next to the learning's state, not a '*_tags.json' of
+    <data dir>/tags, so a file that lost its stamp is never taken for the module's whole list and never hides the bundled one"""
+    return _tags_dir() / 'learned' / f'{module}_added.json'
 
 
 def _store_path(module: str) -> pathlib.Path:
@@ -133,7 +153,7 @@ def _path_is_ours(module: str) -> bool:
 
 def may_learn(module: str) -> bool:
     """No list from a source: none located (and nothing else at the learned path), the located one is the learned list, or it is a
-    bundled list without a source (base_list: the learning adds the tags it lacks)"""
+    bundled list without a source (base_list: the learning adds the tags it lacks, in their own file)"""
     if not enabled() or not re_abbr.fullmatch(str(module or '')):
         return False
     located = TagsDB.get_file(module)
@@ -142,21 +162,20 @@ def may_learn(module: str) -> bool:
             return False  # a list registered in memory (tools, tests)
         return _path_is_ours(module)
     if base_list(module) is not None:
-        return _path_is_ours(module)
+        return True
     return is_learned(module, located)
 
 
 def has_source_list(module: str) -> bool:
     """The module has a list that is not the learned one: from the updater, an installed extension with a tag source, 2tags/ or
-    registered in memory (learning it is not needed). A bundled list without a source is not one (the learning adds to it), unless
-    another list took the learned path"""
+    registered in memory (learning it is not needed). A bundled list without a source is not one (the learning adds to it)"""
     if not re_abbr.fullmatch(str(module or '')):
         return False
     located = TagsDB.get_file(module)
     if located is None:
         return TagsDB.is_loaded(module) or (list_path(module).exists() and not is_learned(module))
     if base_list(module) is not None:
-        return not _path_is_ours(module)
+        return False
     return not is_learned(module, located)
 
 
@@ -197,7 +216,8 @@ def _base_stamp(base: pathlib.Path | None) -> list | None:
 
 def _sync_base(module: str, conn: sqlite3.Connection, base: pathlib.Path | None, seen: set[str]) -> bool:
     """Keeps 'added' right for the list the learning adds to (base_list): the tags seen now that it lacks are added; when the
-    bundled list changed (or is gone), the whole learned set is checked again. -> True: it changed (the written list must be redone)"""
+    bundled list changed (or is gone), the whole learned set is checked again. -> True: what is written must be redone (the bundled
+    list changed, or a tag seen now is one it lacks: a new addition, or the count of one went up)"""
     stamp = _base_stamp(base)
     changed = stamp != _meta(conn, 'base')
     if changed:
@@ -205,74 +225,101 @@ def _sync_base(module: str, conn: sqlite3.Connection, base: pathlib.Path | None,
         _set_meta(conn, 'base', stamp)
         if base is not None:
             seen = {name for (name,) in conn.execute('SELECT name FROM tags')}
-    if base is not None and seen:
-        conn.executemany('INSERT OR IGNORE INTO added (name) VALUES (?)', [(n,) for n in TagsDB.lacking(module, sorted(seen))])
+    if base is not None and seen and (lacking := TagsDB.lacking(module, sorted(seen))):
+        conn.executemany('INSERT OR IGNORE INTO added (name) VALUES (?)', [(n,) for n in lacking])
+        changed = True
     return changed
 
 
 def _write(module: str, conn: sqlite3.Connection, on_base: bool) -> bool:
-    """on_base: only the learned tags the bundled list lacks (an empty list replaces additions the bundled list now has)"""
-    target = list_path(module)
-    current = _stamp(target)
-    if current is not None and current != _meta(conn, 'export'):
+    """on_base: only the learned tags the bundled list lacks, to additions_path (an empty list replaces additions the bundled list
+    now has); the whole list the learning wrote before at list_path is removed. Else the whole learned list to list_path (unless
+    another list took that path) and the additions are removed. -> written"""
+    full, extra = list_path(module), additions_path(module)
+    current = _stamp(full)
+    ours = current is not None and current == _meta(conn, 'export')
+    if not on_base and current is not None and not ours:
         return False  # another list took this path (the updater): the learning does not write any more
     rows = conn.execute('SELECT tags.name, tags.posts FROM added JOIN tags ON tags.name = added.name' if on_base else
                         'SELECT name, posts FROM tags')
     tags = {name: (posts, LEARNED_TYPE) for name, posts in rows}
-    if not tags and not (on_base and current is not None):
+    if not tags and not (on_base and (ours or extra.exists())):
         return False
+    target, stale = (extra, full if ours else None) if on_base else (full, extra)
     target.parent.mkdir(parents=True, exist_ok=True)
     write_tag_list(target, tags)
-    _set_meta(conn, 'export', _stamp(target))
-    conn.commit()
+    if not on_base:
+        _set_meta(conn, 'export', _stamp(target))
+        conn.commit()
+    if stale is not None and stale.exists():
+        with contextlib.suppress(OSError):  # the learned list moved onto a bundled list, or back to being the module's list
+            stale.unlink()
+        if on_base:
+            conn.execute("DELETE FROM meta WHERE k = 'export'")
+            conn.commit()
     return True
 
 
-def learn(module: str, posts: Iterable[tuple[object, Iterable[str]]]) -> int:
-    """Counts the posts (post id, tags) not counted before and writes the list. -> new posts (0: nothing new, or the module has a
-    list from a source)"""
+def _flush(module: str, conn: sqlite3.Connection, base: pathlib.Path | None, changed: bool) -> bool:
+    """Commits what was counted, then writes when what the learning serves changed, or a write was cut short before (meta 'pending'
+    is committed with the change and cleared after the write: a quit in between never leaves the file behind). -> written"""
+    if changed:
+        _set_meta(conn, 'pending', True)
+    conn.commit()
+    if not _meta(conn, 'pending', False):
+        return False
+    written = _write(module, conn, base is not None)
+    conn.execute("DELETE FROM meta WHERE k = 'pending'")
+    conn.commit()
+    return written
+
+
+def learn(module: str, posts: Iterable[tuple[object, Iterable[str]]]) -> Learned:
+    """Counts the posts (post id, tags) not counted before and writes the list when it changed. -> Learned (posts 0: nothing new,
+    or the module has a list from a source)"""
     if not may_learn(module):
-        return 0
+        return _NOTHING
     base = base_list(module)
     with _lock(module):
         conn = _connect(module)
         with contextlib.closing(conn):
             seen: set[str] = set()
             new = _add(conn, posts, seen)
-            rebased = _sync_base(module, conn, base, seen)
-            conn.commit()
-            written = bool(new or rebased) and _write(module, conn, base is not None)
+            changed = _sync_base(module, conn, base, seen) or (base is None and new > 0)
+            written = _flush(module, conn, base, changed)
     if written:
         TagsDB.locate_default_lists(reload=(module,))
-    return new
+    return Learned(new, written)
 
 
-def learn_from_index(module: str) -> int:
-    """The tags of this module's downloaded files (download index), from where the previous call stopped. -> new posts"""
+def learn_from_index(module: str) -> Learned:
+    """The tags of this module's downloaded files (download index), from where the previous call stopped. -> Learned"""
     if not may_learn(module):
-        return 0
+        return _NOTHING
     from .dlindex import DownloadIndex
     base = base_list(module)
     new = 0
     with _lock(module):
         conn = _connect(module)
         with contextlib.closing(conn), DownloadIndex() as index:
-            rebased = _sync_base(module, conn, base, set())
+            if _sync_base(module, conn, base, set()):
+                _set_meta(conn, 'pending', True)
             cursor = int(_meta(conn, 'index', 0) or 0)
             while rows := index.posts_after(module, cursor, INDEX_STEP):
                 seen: set[str] = set()
-                new += _add(conn, ((post_id, tags.split()) for _, post_id, tags in rows), seen)
-                _sync_base(module, conn, base, seen)
+                step = _add(conn, ((post_id, tags.split()) for _, post_id, tags in rows), seen)
+                new += step
+                if _sync_base(module, conn, base, seen) or (base is None and step > 0):
+                    _set_meta(conn, 'pending', True)
                 cursor = rows[-1][0]
                 _set_meta(conn, 'index', cursor)
                 conn.commit()
                 if len(rows) < INDEX_STEP:
                     break
-            conn.commit()
-            written = bool(new or rebased) and _write(module, conn, base is not None)
+            written = _flush(module, conn, base, False)
     if written:
         TagsDB.locate_default_lists(reload=(module,))
-    return new
+    return Learned(new, written)
 
 
 def refresh(module: str) -> bool:
@@ -287,9 +334,7 @@ def refresh(module: str) -> bool:
         if conn is None:
             return False
         with contextlib.closing(conn):
-            rebased = _sync_base(module, conn, base, set())
-            conn.commit()
-            written = rebased and _write(module, conn, base is not None)
+            written = _flush(module, conn, base, _sync_base(module, conn, base, set()))
     if written:
         TagsDB.locate_default_lists(reload=(module,))
     return written
