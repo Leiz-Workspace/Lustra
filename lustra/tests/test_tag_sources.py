@@ -22,11 +22,13 @@ import functools
 import gzip
 import hashlib
 import html
+import importlib.util
 import io
 import itertools
 import json
 import os
 import pathlib
+import re
 import shutil
 import tempfile
 import threading
@@ -1993,6 +1995,249 @@ class MergeSourceLearningTests(_ShippedListTest):
         got = _read_list(self.data / 'tags' / 'fq_tags.json')
         self.assertEqual(('40 posts (general)', '6000 posts (general)'), (got['skyline'], got['sky']))  # merged into the shipped list
         self.assertNotIn('old', got)
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+PAHEAL = ROOT / 'extensions' / 'paheal'
+PAHEAL_SITE = 'https://rule34.paheal.net/'
+PAHEAL_FIXTURES = FIXTURES / 'paheal'
+PAHEAL_SECTION = 'tags_popularity_mincount=20000.section.html'
+'''the list's <section> of tags/popularity?mincount=20000, cut unchanged out of the recorded page (fixtures/paheal/SOURCES.json)'''
+re_paheal_row = re.compile(r"<a href='/post/list/([^']*)/1' class='tag' title='View all posts tagged ([^']*)'>([^<]*)</a> \((\d+)\)")
+
+
+def _paheal_url(mincount: int) -> str:
+    return f'{PAHEAL_SITE}tags/popularity?mincount={mincount:d}'
+
+
+def _paheal_page(section: str) -> str:
+    """The page around the list as the site writes it: the menu and the other sections have links too, they are not tags"""
+    return ("<!doctype html><html lang='en'><head><title>Tag List</title></head><body><nav><a href='/post/list'>Posts</a> "
+            f"<a href='/tags/popularity?mincount=1'>Show All</a></nav>{section}<section id='unknownmain'><div class='blockbody'>"
+            "<a href='/wiki/Terms_of_use'>Terms of use</a> (2007)</div></section></body></html>")
+
+
+def _paheal_list(*rows: tuple[str, int], link: str = "class='tag'") -> str:
+    """A list written by a test (never a fixture), in the site's markup: (name as on the page, post count)"""
+    spans = ''.join(f"<span style='margin-right: 1em; white-space: nowrap;'><a href='/post/list/x/1' {link} "
+                    f"title='View all posts tagged {name}'>{name}</a> ({count:d})</span> " for name, count in rows)
+    return _paheal_page(f"<section id='unknownmain'><div class='blockbody'>Results grouped by log<sub>10</sub>(n)<br /><br />5<br />"
+                        f"{spans}</div></section>")
+
+
+class PahealTagJobTests(_DataDirTest):
+    """Rule34 Paheal (rp) updates its list with its own update (extensions/paheal/tags.py, from 1.0.3): one page of the site, every
+    tag with at least 100 posts sorted by count, through the core (robots.txt, its Crawl-delay of 3 s, no cookies), merged into the
+    list in use (manifest tagUpdate.merge): the site cannot answer a page big enough to replace it. Pages of the site recorded on
+    2026-11-20 (lustra/tests/fixtures/paheal/, SOURCES.json holds their sha256); the pages a test writes (_paheal_list) are not.
+    Rule34Hentai (rn) and Rule34.us (rs) keep no source: their shipped list, with the tags learned on top of it"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.manifest = ExtensionManifest.load(PAHEAL / 'manifest.json', 'catalog')
+        self.source = tags_updater.source_for_manifest(self.manifest)
+        self.section = (PAHEAL_FIXTURES / PAHEAL_SECTION).read_text(encoding='utf-8')
+
+    def _session(self, pages: dict[str, str]) -> FakeSession:
+        robots = (PAHEAL_FIXTURES / 'robots.txt').read_bytes()
+
+        def route(url: str, _headers: dict) -> tuple[int, bytes, dict]:
+            if url == f'{PAHEAL_SITE}robots.txt':
+                return 200, robots, {'content-type': 'text/plain'}
+            if url in pages:
+                return 200, pages[url].encode(), {'content-type': 'text/html; charset=utf-8'}
+            return 404, b'<html>not found</html>', {'content-type': 'text/html'}
+        return FakeSession(route)
+
+    def _read(self, pages: dict[str, str], min_posts: int = 1) -> tuple[list, FakeSession, PoliteClient, list[str]]:
+        """The job run by the core (TagJob, PoliteClient) with this min_posts; the clock is faked"""
+        session, clock, notes = self._session(pages), FakeClock(), []
+        client = PoliteClient(self.source, delay=0.5, allow_local=True, session=session, sleep=clock.sleep, clock=clock.clock)
+        client.notify = notes.append
+        return list(tags_updater._iter_extension_job(self.source, client, '', min_posts)), session, client, notes
+
+    def _update(self, pages: dict[str, str], **kw) -> tuple[tags_updater.UpdateResult, FakeClock, FakeSession]:
+        """update_tag_list as the app runs it (tags.update), into <root>/tags; its waits on a fake clock"""
+        clock, session = FakeClock(), self._session(pages)
+        with mock.patch.object(tags_updater, 'PoliteClient', functools.partial(PoliteClient, sleep=clock.sleep, clock=clock.clock)):
+            res = update_tag_list('rp', self.root / 'tags', source=self.source, delay=0.5, allow_local=True, session=session, **kw)
+        return res, clock, session
+
+    def _shipped(self) -> pathlib.Path:
+        shipped = ROOT / '2tags' / 'rp_tags.json'
+        if not shipped.is_file():
+            self.skipTest('no 2tags/rp_tags.json (a source archive without the lists)')
+        return shipped
+
+    def test_fixtures_are_the_recorded_pages(self) -> None:
+        files = json.loads((PAHEAL_FIXTURES / 'SOURCES.json').read_text(encoding='utf-8'))['files']
+        self.assertEqual({'robots.txt', PAHEAL_SECTION}, set(files))
+        for name, meta in files.items():
+            data = (PAHEAL_FIXTURES / name).read_bytes()
+            self.assertEqual((meta['bytes'], meta['sha256']), (len(data), hashlib.sha256(data).hexdigest()), name)
+        cut = files[PAHEAL_SECTION]['excerpt']
+        self.assertEqual(cut['end'] - cut['start'], files[PAHEAL_SECTION]['bytes'])
+        self.assertTrue(self.section.startswith("<section id='unknownmain'>") and self.section.endswith('</section>'))
+        self.assertNotIn('auth_token', self.section)
+
+    def test_its_own_update_is_a_merge_source_rn_and_rs_have_none(self) -> None:
+        self.assertEqual(('rp', '1.0.3', '1.1', 'rp_tags.json'),
+                         (self.manifest.abbr, self.manifest.version, self.manifest.minSdkVersion, self.manifest.tagList))
+        self.assertEqual({'entry': 'tags.py:read_tags', 'merge': {'minPosts': 100}}, self.manifest.tagUpdate)
+        spec = importlib.util.spec_from_file_location('lustra_test_paheal_tags', PAHEAL / 'tags.py')
+        job = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(job)
+        self.assertEqual(job.MIN_POSTS, self.manifest.tagUpdate['merge']['minPosts'])  # one page holds every tag down to it
+        src = self.source
+        self.assertEqual((tags_updater.EXTENSION_JOB, 'tags.py:read_tags', PAHEAL_SITE, True, True, 'none', True, 100),
+                         (src.engine, src.job, src.site, src.on_demand, src.robots, src.key, src.merge, src.merge_min_posts))
+        self.assertEqual(PAHEAL, pathlib.Path(src.folder))
+        self.assertTrue(src.description.endswith(': the tags with 100+ posts, merged into the list in use'))
+        # installed, as the app has it: a source the app lists, that its system schedule ('auto') never runs; named, it runs
+        self.assertNotIn('rp', [s.module for s in tags_updater.tag_sources()])
+        shutil.copytree(PAHEAL, self.data / 'extensions' / 'paheal', ignore=shutil.ignore_patterns('*_tags.json', '__pycache__'))
+        installed = {s.module: s for s in tags_updater.tag_sources()}
+        rp = installed['rp']
+        self.assertEqual((tags_updater.EXTENSION_JOB, True, True), (rp.engine, rp.on_demand, rp.merge))
+        self.assertNotIn('rp', tags_updater._modules_arg('auto'))
+        self.assertEqual(['rp'], tags_updater._modules_arg('rp'))
+        # no listing they may read (survey of 2026-11-20, docs/dev_log.md 7bc): Rule34Hentai answers a Cloudflare bot challenge on
+        # every page but robots.txt (R5); Rule34.us has no tag listing with post counts, only an autocomplete of 10 tags a prefix.
+        # Both keep the shipped list, with the tags learned on top
+        for ext_id in ('rule34hentai', 'rule34us'):
+            self.assertIsNone(tags_updater.source_for_manifest(ExtensionManifest.load(ROOT / 'extensions' / ext_id / 'manifest.json',
+                                                                                      'catalog')), ext_id)
+
+    def test_robots_txt_allows_the_listing_and_sets_the_pace(self) -> None:
+        rules = RobotsRules.parse((PAHEAL_FIXTURES / 'robots.txt').read_text(encoding='utf-8'), tags_updater.ROBOTS_AGENT)
+        self.assertEqual(3.0, rules.crawl_delay)
+        for mincount in (100, 1000, 20000):
+            self.assertTrue(rules.allows(_paheal_url(mincount)))
+        self.assertFalse(rules.allows(f'{PAHEAL_SITE}tag_history/1'))  # strict: a path the site disallows stays disallowed
+        self.assertFalse(rules.allows(f'{PAHEAL_SITE}comment/list'))
+
+    def test_the_list_through_the_core(self) -> None:
+        got, session, client, notes = self._read({_paheal_url(20000): _paheal_page(self.section)}, min_posts=20000)
+        self.assertEqual([f'{PAHEAL_SITE}robots.txt', _paheal_url(20000)], [u for u, _ in session.calls])
+        self.assertEqual((3.0, 2), (client.interval, client.used))  # robots.txt Crawl-delay; robots.txt and one page
+        self.assertEqual('text/html', session.calls[1][1].get('Accept'))
+        self.assertFalse([h for _, h in session.calls if 'Cookie' in h])
+        rows = re_paheal_row.findall(self.section)
+        self.assertEqual(98, len(rows))
+        self.assertEqual(len(rows), self.section.count("class='tag'"))  # every tag link of the page has its count
+        for href, title, text, _ in rows:  # the link text is the tag of the link's title and of its address
+            self.assertEqual(title, text)
+            self.assertEqual(url_parse.unquote(href), html.unescape(text))
+        self.assertEqual(98, len(got))
+        self.assertEqual(('porkyman', 493734, 'unknown'), got[0])  # 'Porkyman' on the page; the site has no tag types
+        self.assertEqual(('raven', 20040, 'unknown'), got[-1])
+        d = {name: posts for name, posts, _ in got}
+        self.assertEqual(len(got), len(d))
+        self.assertEqual((28562, 24078, 116819), (d["five_nights_at_freddy's"], d["jojo's_bizarre_adventure"], d['fate_(series)']))
+        self.assertEqual({'unknown'}, {t for _, _, t in got})
+        self.assertTrue(all(n == n.lower() and '&' not in n and ' ' not in n for n in d))
+        self.assertEqual(sorted(d.values(), reverse=True), [p for _, p, _ in got])
+        self.assertEqual(['tags with 20000 or more posts, one page sorted by post count', '98 tags, down to 20040 posts'], notes)
+
+    def test_most_used_tags_only(self) -> None:
+        # one page with every tag down to 100 posts: the app asks with min_posts 1, the core raises it to merge.minPosts
+        for min_posts in (0, 1, 2, 100):
+            got, session, _, _ = self._read({_paheal_url(100): _paheal_page(self.section)}, min_posts=min_posts)
+            self.assertEqual(_paheal_url(100), session.calls[-1][0])
+            self.assertEqual(98, len(got))
+        got, session, _, _ = self._read({_paheal_url(250): _paheal_page(self.section)}, min_posts=250)
+        self.assertEqual(_paheal_url(250), session.calls[-1][0])
+        # a site that would ignore mincount: tags below min_posts are left out
+        got, _, _, _ = self._read({_paheal_url(100000): _paheal_page(self.section)}, min_posts=100000)
+        expected = [(text.lower(), int(n)) for _, _, text, n in re_paheal_row.findall(self.section) if int(n) >= 100000]
+        self.assertEqual(16, len(expected))
+        self.assertEqual(expected, [(name, posts) for name, posts, _ in got])
+        # the core asks the job with merge.minPosts, whatever the job's own floor: a job that would go lower is never asked lower
+        real = tags_updater._job_function
+
+        def lower_floor(source: TagSource):
+            func = real(source)
+            func.__globals__['MIN_POSTS'] = 2
+            return func
+        with mock.patch.object(tags_updater, '_job_function', lower_floor):
+            _, _, session = self._update({_paheal_url(100): _paheal_page(self.section)}, min_posts=1, reference=self.root / 'none.json')
+        self.assertEqual(_paheal_url(100), session.calls[-1][0])
+
+    def test_names_unescaped_once_lowercase_first_of_the_same_name(self) -> None:
+        page = _paheal_list(('Foo', 300), ('foo', 200), ('AT&amp;T', 150), ('Pok&eacute;mon_X', 120), ('&amp;amp;kept', 110),
+                            ('Liara_T&#039;Soni', 100), ('two words', 100))
+        got, _, _, notes = self._read({_paheal_url(100): page})
+        self.assertEqual([('foo', 300, 'unknown'), ('at&t', 150, 'unknown'), ('pokémon_x', 120, 'unknown'),
+                          ('&amp;kept', 110, 'unknown'), ("liara_t'soni", 100, 'unknown'), ('two_words', 100, 'unknown')], got)
+        self.assertTrue(any('1 names that differ only by case kept once' in n for n in notes), notes)
+        # a tag link with another class is read like the others (never skipped)
+        got, _, _, _ = self._read({_paheal_url(100): _paheal_list(('new_tag', 120), link="class='tag new' rel='tag'")})
+        self.assertEqual([('new_tag', 120, 'unknown')], got)
+
+    def test_a_changed_page_writes_no_list(self) -> None:
+        out = self.root / 'tags'
+        cut = _paheal_page(self.section)
+        cut = cut[:cut.index('</section>')]
+        no_count = _paheal_list(('sky', 300)).replace('</div></section>', "<a href='/tags/map'>more</a></div></section>", 1)
+        for page, error in ((cut, 'cut short'), (no_count, '1 of 2 links of the tag list have no post count'),
+                            (_paheal_page(''), 'not the tag list by popularity'), (_paheal_list(), 'has no tag'),
+                            (_paheal_list(('a', 100), ('b', 200)), 'not sorted'),
+                            ((PAHEAL_FIXTURES / 'robots.txt').read_text(encoding='utf-8'), 'not the tag list by popularity')):
+            with self.subTest(error=error), self.assertRaisesRegex(RuntimeError, error):
+                self._update({_paheal_url(100): page})
+            self.assertFalse((out / 'rp_tags.json').exists())
+
+    def test_the_update_merges_into_a_shipped_list(self) -> None:
+        rows = [(text.lower(), int(n)) for _, _, text, n in re_paheal_row.findall(self.section)]
+        base = self.root / 'base' / 'rp_tags.json'  # the list in use: older counts, a tag under the page's floor, one it left
+        base.parent.mkdir()
+        lines = [*(f'{json.dumps(html.unescape(name), ensure_ascii=False)}: "{n - 1000:d} posts"' for name, n in rows),
+                 '"rare_tag": "7 posts"', '"gone_tag": "30000 posts"']
+        base.write_text('{\n' + ',\n'.join(sorted(lines)) + '\n}\n', encoding='utf-8')
+        res, clock, _ = self._update({_paheal_url(20000): _paheal_page(self.section)}, min_posts=20000, reference=base)
+        self.assertTrue(res.written, res.message)
+        self.assertEqual((2, [3.0]), (res.requests, clock.sleeps))  # robots.txt, then the page 3 s later (its Crawl-delay)
+        self.assertIn('the tags with 20000+ posts merged into the list in use: 98 read, 0 new, 98 updated, 1 no longer listed kept',
+                      res.message)
+        written = _read_list(self.root / 'tags' / 'rp_tags.json')
+        self.assertEqual((100, 100), (res.count, len(written)))
+        self.assertEqual(('493734 posts', '7 posts', '30000 posts'), (written['porkyman'], written['rare_tag'], written['gone_tag']))
+        self.assertEqual('28562 posts', written["five_nights_at_freddy's"])  # no type: the shipped list has none, the site neither
+
+    def test_the_real_shipped_list_merges_without_loss(self) -> None:
+        shipped = self._shipped()
+        before = tags_updater.read_tag_list(shipped, '')
+        page = {name: posts for name, posts, _ in self._read({_paheal_url(20000): _paheal_page(self.section)}, min_posts=20000)[0]}
+        res, _, _ = self._update({_paheal_url(20000): _paheal_page(self.section)}, min_posts=20000, reference=shipped)
+        self.assertTrue(res.written, res.message)
+        self.assertEqual((len(before), len(before)), (res.count, res.previous))  # the 98 most used tags are all in the shipped list
+        updated = sum(1 for name, posts in page.items() if before[name][0] != posts)
+        self.assertIn(f'98 read, 0 new, {updated:d} updated, 0 no longer listed kept', res.message)
+        written = tags_updater.read_tag_list(self.root / 'tags' / 'rp_tags.json', '')
+        self.assertEqual(set(before), set(written))
+        self.assertEqual({**before, **{name: (posts, before[name][1]) for name, posts in page.items()}}, written)
+        self.assertEqual((493734, ''), written['porkyman'])
+        self.assertEqual(before['!karryn!'], written['!karryn!'])  # under the page's floor: the shipped count stays
+
+    def test_names_match_the_shipped_list(self) -> None:
+        names = json.loads(self._shipped().read_text(encoding='utf-8'))
+        got, _, _, _ = self._read({_paheal_url(20000): _paheal_page(self.section)}, min_posts=20000)
+        self.assertEqual([], [n for n, _, _ in got if n not in names])  # the same names: lowercase, html-unescaped once
+
+    def test_static_rules_of_tag_jobs(self) -> None:
+        from lustra.extgen.policy import check_source
+        violations = check_source((PAHEAL / 'tags.py').read_text(encoding='utf-8'), allowed_hosts={'rule34.paheal.net', 'paheal.net'},
+                                  downloader=False)
+        self.assertEqual([], [v.to_dict() for v in violations])
+
+    def test_the_ai_generator_reference_leaves_its_tag_update_out(self) -> None:
+        # the AI generator reads paheal as the reference of shimmie_api but writes no tags.py: a copied tagUpdate would fail its draft
+        from lustra.aigen.tools import reference_text
+        text = reference_text('paheal')
+        self.assertNotIn('tagUpdate', text)
+        manifest = json.loads(text.split('### extensions/paheal/manifest.json\n', 1)[1])
+        self.assertEqual(('rp', '1.0.3', 'rp_tags.json'), (manifest['abbr'], manifest['version'], manifest['tagList']))
+        self.assertIn('class DownloaderRp', text)
 
 #
 #
