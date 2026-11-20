@@ -1200,7 +1200,7 @@ Chủ repo chọn cách gộp cho rp (7bc để ngỏ). Job của extension ch�
   - So với danh sách đi kèm (162.526 tag): không mất tag nào, 102 tag mới (nhiều nhất `kit_bodega` 2.544 post), 17.665 tag đổi số (16.904 tăng, 761 giảm, ví dụ `porkyman` 478.678 → 493.740). Không tên nào có chữ hoa. Tên mới có dấu nháy và `!` đọc đúng (`eddie_puss's_mom`, `even_the_student_council_has_its_holes!`).
   - Sau đó: `tags.status` rp `merged` true, `shipped` false; sha256 của danh sách đi kèm không đổi và bằng `onto` trong `.meta`; nạp lại thì TagsDB dùng file đã gộp (162.628 tag).
 - **Còn lại:**
-  - Chủ repo bấm thử "Cập nhật" trong app (từ nhánh này hoặc bản rc sau), rồi build lại và ký lại catalog chính thức. Paheal 1.0.3 chỉ lên catalog chính thức sau khi 2.0.10 lên production; trước đó build giữ 1.0.2 (operations mục 3d).
+  - Catalog chính thức: xong ngày 2026-11-21, sau khi 2.0.10 lên production (PR #62). Danh sách tag lấy lại từ zip của catalog đang đăng, build từ cây production (`7b4778b`), ký hạn tới 2027-05-19 (khoá `b852144452eea5dc`), đăng `paheal-1.0.3.zip`, `index.json`, `index.json.sig` lên release `catalog`. So với bản trước chỉ Paheal đổi (1.0.2 → 1.0.3); 15 extension còn lại giữ nguyên sha256. Tải lại từ URL công khai: chữ ký kiểm được, 16 mục khớp sha256. `paheal-1.0.2.zip` vẫn để trong release.
   - Skill `new-site-extension` (ngoài repo) chưa biết `merge`: cần ghi khi nào khai báo, rằng cần Lustra 2.0.10, và `build_catalog.py` khi đó cần danh sách `2tags/`.
   - Rủi ro đã nhận:
     - tag rời khỏi nhóm ≥ 100 post giữ số cũ mãi, và vẫn tính vào mẫu số của kiểm tra 50 % (phải nhiều năm mới đáng kể; bản Paheal mang danh sách đi kèm khác đặt lại nền);
@@ -1224,7 +1224,7 @@ Chủ repo chọn cách gộp cho rp (7bc để ngỏ). Job của extension ch�
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
   - danh sách tag: chạy thử updater với một site thật cho mỗi engine mới (trình tạo đã đọc robots.txt bằng `lustra/robots.py` như updater, 7aw).
-  - danh sách tag của rn / rs: không có nguồn cập nhật, giữ danh sách đi kèm và việc học thêm (7bc; lý do giữ nguyên). rp: từ 1.0.3 gộp các tag có từ 100 post vào danh sách đang dùng, tag dưới 100 post giữ số post của danh sách đi kèm, việc học thêm vẫn chạy (7bd); chủ repo bấm thử rồi mới đăng catalog chính thức, sau khi 2.0.10 lên production.
+  - danh sách tag của rn / rs: không có nguồn cập nhật, giữ danh sách đi kèm và việc học thêm (7bc; lý do giữ nguyên). rp: từ 1.0.3 gộp các tag có từ 100 post vào danh sách đang dùng, tag dưới 100 post giữ số post của danh sách đi kèm, việc học thêm vẫn chạy (7bd); 2.0.10 đã lên production và catalog chính thức có Paheal 1.0.3 từ 2026-11-21.
   - tuỳ chọn: kiểm `minSdkVersion` từ json thô trước khi kiểm manifest chặt, để lần nâng SDK sau báo rõ trên 2.0.10 trở đi;
   - tuỳ chọn: engine `philomena_json` (10.000 tag dùng nhiều nhất) cũng có thể gộp thay vì thay;
   - skill `new-site-extension`: thêm `tagUpdate.merge` (7bd, mục còn lại).
