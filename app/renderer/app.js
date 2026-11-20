@@ -122,6 +122,14 @@ function toast(msg, kind = '') {
   $('#toasts').append(el);
   setTimeout(() => el.remove(), kind === 'err' ? 7000 : 3500);
 }
+function toastAction(msg, label, fn, ms = 10000) {
+  // a toast with one button (ex. "Hoàn tác" after a delete): the button runs once, then the toast goes away
+  const el = h('div', { class: 'toast ok has-action' }, h('span', {}, msg),
+    h('button', { class: 'btn sm', onclick: () => { el.remove(); fn(); } }, label));
+  $('#toasts').append(el);
+  setTimeout(() => el.remove(), ms);
+  return el;
+}
 function errMsg(err) {
   const m = String(err?.message || err || 'lỗi');
   return m.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
@@ -169,7 +177,9 @@ const S = {
   chips: [], chipSeq: 0, selected: new Set(),
   // moved: the user picked a suggestion with the arrow keys (only then Enter takes a suggestion instead of the typed text)
   ac: { items: [], index: -1, seq: 0, moved: false, fuzzy: false },
-  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', showExcluded: false, seq: 0, hasMore: true, kind: 'all' },
+  // key: previewKey() of the query the posts on screen answer; failed: the last Preview request failed (the grid is an older
+  // answer, maybe of this same query: a page turn that did not load), see previewStale
+  preview: { page: 0, items: [], selected: new Set(), site: '', module: '', tags: '', key: '', failed: false, showExcluded: false, seq: 0, hasMore: true, kind: 'all', dateFilter: '' },
   countSeq: 0,
   tagLists: null, // modules that have a local tag list (tags.status), null until known
   jobs: new Map(),
@@ -190,6 +200,8 @@ const STATE_VI = {
 };
 const GENDER_VI = { only_female: 'Nữ', only_male: 'Nam', both: 'Nam+Nữ', none: 'Không có', unknown: '?' };
 const CONF_VI = { high: 'cao', medium: 'vừa', low: 'thấp' };
+// why a preview post is excluded (search.preview excludedBy); other reasons (neg, required) read 'lọc cục bộ'
+const REASON_VI = { gender: 'lọc giới tính', date: 'lọc ngày' };
 const JOB_VI = { queued: 'Chờ', running: 'Đang chạy', cancelling: 'Đang huỷ', cancelled: 'Đã huỷ', done: 'Xong', failed: 'Lỗi' };
 
 const moduleInfo = (abbr) => S.modules.find((m) => m.abbr === abbr);
@@ -338,6 +350,7 @@ function saveGender(patch) {
   S.settings.download.gender = g;
   saveSettings({ download: { gender: g } });
   renderGenderFilter();
+  markPreviewStale(); // the posts on screen were filtered with the previous choice
 }
 $('#f-gender').addEventListener('click', (e) => {
   const b = e.target.closest('.pill');
@@ -835,7 +848,7 @@ tagInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || (e.key === 'Tab' && tagInput.value.trim())) {
     e.preventDefault();
     if (commitTyped(e.key === 'Enter' && e.shiftKey)) return;
-    if (e.key === 'Enter' && e.ctrlKey) startDownload();
+    if (e.key === 'Enter' && e.ctrlKey) downloadClicked();
     else if (e.key === 'Enter') runPreview(0);
     return;
   }
@@ -878,6 +891,54 @@ function onQueryChanged() {
   S.countSeq++; // a count still running belongs to the previous query
   validate();
   markRelatedStale();
+  if (!queryString()) clearPreview(); // no tag left: the posts of the previous query must not stay on screen
+  else markPreviewStale();
+}
+
+// ----- preview of another query: emptied when the query is, marked stale when it changed (until the next Preview) -----
+const RESULTS_HINT = $('#results-info').innerHTML;
+// everything a preview answer depends on: posts fetched with other tags, site, dates or content filters are not this query's
+function previewKey(q = currentQuery()) {
+  const g = q.gender || {};
+  const gender = g.select?.length ? [g.op, [...g.select].sort(), g.conf, !!g.strict, g.mode] : []; // no group picked: filter off
+  return JSON.stringify([q.module, q.tags, q.dateMin || '', q.dateMax || '', gender, !!q.safetyBlacklist]);
+}
+// the posts on screen answer another query or filters, or the last Preview failed (the grid is an older answer)
+function previewStale() {
+  const P = S.preview;
+  return P.items.length > 0 && (P.failed || P.key !== previewKey());
+}
+// the posts on screen were fetched for the query and filters now in the form (a later request may have failed)
+const previewOfThisQuery = () => S.preview.items.length > 0 && S.preview.key === previewKey();
+function markPreviewStale() {
+  if (!S.preview.items.length) return;
+  $('#grid').classList.toggle('stale', previewStale());
+  if (previewStale() && !$('#results-info').dataset.stale) {
+    $('#results-info').dataset.stale = '1';
+    $('#results-info').append(h('span', { class: 'stale-note' }, S.preview.failed ? ' · các post bên dưới là kết quả cũ'
+      : ' · kết quả của truy vấn hoặc bộ lọc trước: bấm Preview để xem lại'));
+  } else if (!previewStale() && $('#results-info').dataset.stale) renderGrid();
+}
+// date fields and the safety check box change what a preview shows (the gender filter: saveGender)
+['#f-datemin', '#f-datemax'].forEach((id) => ['input', 'change'].forEach((ev) => $(id).addEventListener(ev, markPreviewStale)));
+$('#f-safety').addEventListener('change', markPreviewStale);
+function clearPreview() {
+  const P = S.preview;
+  P.seq++; // an answer still on its way belongs to the cleared query
+  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', key: '', failed: false, required: [], tasks: [], hasMore: true });
+  P.selected.clear();
+  gridCards.clear();
+  $('#grid').replaceChildren();
+  $('#grid').classList.remove('stale');
+  $('#grid-empty').hidden = true;
+  $('#kind-filter').hidden = true;
+  $('#results-tools').hidden = true;
+  delete $('#results-info').dataset.stale;
+  $('#results-info').innerHTML = RESULTS_HINT;
+  const btn = $('#btn-preview');
+  btn.disabled = false;
+  btn.textContent = 'Preview';
+  updateSelButton();
 }
 
 function currentQuery() {
@@ -898,7 +959,7 @@ function filtersSummary() {
   const parts = [
     media.length ? media.join(' + ') : 'không tải loại nào',
     q.dateMin || q.dateMax ? `${q.dateMin ? fmt(q.dateMin) : '…'} → ${q.dateMax ? fmt(q.dateMax) : '…'}` : '',
-    o.limit ? `tối đa ${o.limit} post` : '',
+    o.limit ? `${o.limit} post ${o.reverse ? 'mới' : 'cũ'} nhất` : '', // the limit keeps the first posts in the chosen order
     `${o.threads} luồng`,
     g.select.length ? `giới tính ${g.op === 'exclude' ? 'bỏ' : 'giữ'}: ${genderPicked(g)}` : '',
     g.select.length && g.mode === 'model' && g.verifyMedia && gmOn() ? 'xem lại video sau khi tải' : '',
@@ -941,8 +1002,10 @@ $('#btn-count').addEventListener('click', async () => {
     const st = $('#query-status');
     st.className = r.count > 0 ? 'ok' : 'err';
     const parts = r.taskCounts?.length > 1 ? ` (tổng ${r.taskCounts.length} truy vấn con, có thể trùng)` : '';
+    // dateFilter 'local': the site cannot search by date, its count includes every date (the download filters them)
+    const dates = { local: ' (chưa trừ post ngoài khoảng ngày: site không đếm theo ngày)', unsupported: ` (${q.module} không lọc được theo ngày)` };
     st.textContent = `${r.approximate ? '≤ ' : ''}${nf.format(r.count)} kết quả${parts}`
-      + `${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}`;
+      + `${r.requiredTags?.length ? ` (trước khi lọc cục bộ: ${r.requiredTags.join(', ')})` : ''}${dates[r.dateFilter] || ''}`;
     if (r.cfChallenge) toast('Website đang chặn bằng bot challenge. Xem mục Cài đặt → Kết nối (cookies theo site).', 'err');
   } catch (err) {
     if (seq === S.countSeq) toast(`Đếm thất bại: ${errMsg(err)}`, 'err');
@@ -971,18 +1034,26 @@ async function runPreview(page = 0) {
   try {
     const r = await L.search.preview(q, page);
     if (seq !== S.preview.seq) return;
-    Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, required: r.requiredTags || [], tasks: r.tasks || [],
+    Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, key: previewKey(q), failed: false, required: r.requiredTags || [], tasks: r.tasks || [],
       genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled, genderModel: r.genderModel || {},
-      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean' });
+      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean', dateFilter: r.dateFilter || '' });
     S.preview.selected.clear();
     renderGrid();
   } catch (err) {
     if (seq !== S.preview.seq) return;
-    $('#results-info').textContent = `Lỗi: ${errMsg(err)}`;
-    toast(`Preview thất bại: ${errMsg(err)}`, 'err');
+    previewFailed(err);
   } finally {
     if (seq === S.preview.seq) { btn.disabled = false; btn.textContent = 'Preview'; }
   }
+}
+function previewFailed(err) {
+  // the grid still on screen is not the answer to this request: dimmed until a Preview works. Its picked posts stay picked (still
+  // posts of this query when only a page turn failed: "Tải xuống" asks about them, see downloadClicked)
+  S.preview.failed = true;
+  $('#results-info').textContent = `Lỗi: ${errMsg(err)}`;
+  delete $('#results-info').dataset.stale;
+  markPreviewStale();
+  toast(`Preview thất bại: ${errMsg(err)}`, 'err');
 }
 $('#btn-preview').addEventListener('click', () => runPreview(0));
 $('#pg-prev').addEventListener('click', () => { if (S.preview.page > 0) runPreview(S.preview.page - 1); });
@@ -1017,9 +1088,16 @@ function renderGrid() {
   // merged multi-task pages hold up to pageSize posts of every sub-query
   const size = !P.pageSize ? '' : P.merged && P.tasks?.length > 1 ? ` (${P.pageSize}/trang mỗi truy vấn con)` : ` (tối đa ${P.pageSize}/trang)`;
   const parts = [`Trang ${P.page + 1}: ${P.items.length} post${size}`];
-  const byGender = P.items.filter((it) => (it.excludedBy || []).includes('gender')).length;
-  const byOther = P.items.filter((it) => it.excluded && !(it.excludedBy || []).includes('gender')).length;
+  const by = (reason) => P.items.filter((it) => (it.excludedBy || []).includes(reason)).length;
+  const byGender = by('gender');
+  const byDate = by('date');
+  const byOther = P.items.filter((it) => it.excluded && !(it.excludedBy || []).some((x) => REASON_VI[x])).length;
   if (byOther) parts.push(`${byOther} bị lọc cục bộ`);
+  // dates the site cannot search by (rule34 and most others; Danbooru can): each page hides its posts outside them, the
+  // download finds the pages by date
+  if (byDate) parts.push(`${byDate} post ngoài khoảng ngày bị ${P.showExcluded ? 'làm mờ' : 'ẩn'}`);
+  if (P.dateFilter === 'unchecked') parts.push('site không trả ngày đăng trong danh sách: preview chưa lọc theo ngày (tải xuống vẫn lọc)');
+  if (P.dateFilter === 'unsupported') parts.push(`${P.module} không lọc được theo ngày: khoảng ngày bị bỏ qua`);
   if (P.genderEnabled) {
     parts.push(`${byGender} loại theo giới tính`);
     const unknown = P.genderStats?.unknown || 0;
@@ -1037,20 +1115,25 @@ function renderGrid() {
   }
   if (!P.hasMore) parts.push('trang cuối');
   $('#results-info').textContent = parts.join(' · ');
+  delete $('#results-info').dataset.stale;
+  $('#grid').classList.remove('stale');
+  markPreviewStale(); // the query may have changed since these posts were fetched
   $('#results-tools').hidden = false;
   $('#pg-num').textContent = String(P.page + 1);
   $('#pg-prev').disabled = P.page === 0;
   $('#pg-next').disabled = !P.hasMore;
   $('#pg-next').title = P.hasMore ? 'Trang sau' : 'Không còn trang sau';
   $('#grid-empty').hidden = items.length > 0;
-  $('#grid-empty').textContent = 'Không có post nào trên trang này.';
+  $('#grid-empty').textContent = byDate && byDate === P.items.length
+    ? 'Mọi post trên trang này nằm ngoài khoảng ngày. Site này không tìm theo ngày nên Preview chỉ lọc từng trang; Tải xuống tự tìm đúng các trang.'
+    : 'Không có post nào trên trang này.';
   gridCards.clear();
   $('#grid').replaceChildren(...items.map((it) => {
     const audio = it.mediaKind === 'audio';
     const img = it.preview || !audio ? h('img', { loading: 'lazy', alt: '', src: it.preview ? L.thumbUrl(it.preview, P.site) : '' })
       : h('div', { class: 'audio-ph', 'aria-hidden': 'true' }, '♪');
     const g = it.gender;
-    const why = (it.excludedBy || []).includes('gender') ? 'lọc giới tính' : 'lọc cục bộ';
+    const why = [...new Set((it.excludedBy || []).map((x) => REASON_VI[x] || 'lọc cục bộ'))].join(', ');
     const gTitle = g ? `Giới tính: ${GENDER_VI[g.label] || g.label}${g.conf ? ` · tin cậy ${CONF_VI[g.conf]}` : ''}`
       + `${g.evidence?.length ? ` (${g.evidence.join(', ')})` : ''}${g.flags?.length ? ` · cờ: ${g.flags.join(', ')}` : ''}`
       + `${g.source === 'model' ? ' · từ ảnh (model)' : g.source === 'tags+model' ? ' · tag + ảnh (model)' : ''}${g.modelSkipped ? ' · model chưa xem' : ''}\n` : '';
@@ -1103,7 +1186,9 @@ $('#sel-invert').addEventListener('click', () => {
   S.preview.items.filter((i) => !i.excluded).forEach((i) => (S.preview.selected.has(i.id) ? S.preview.selected.delete(i.id) : S.preview.selected.add(i.id)));
   syncSelection();
 });
-$('#dl-selected').addEventListener('click', () => {
+// "Tải đã chọn" downloads exactly the picked posts: the post limit, dates and gender filter of the filters panel would drop some
+// of them (limit 1 with two picked posts downloaded one), so they are left out. Media types and file options still apply
+function downloadSelected() {
   const ids = [...S.preview.selected];
   if (!ids.length) return;
   const module = S.preview.module;
@@ -1115,8 +1200,26 @@ $('#dl-selected').addEventListener('click', () => {
     if (ids.length > 200) { toast('Tối đa 200 post mỗi lần với module này', 'err'); return; }
     tags = `(${ids.map((i) => `id:${i}`).join('~')})`;
   }
-  startDownload({ module, tags, label: `${ids.length} post đã chọn từ: ${S.preview.tags}` });
-});
+  startDownload({ module, tags, label: `${ids.length} post đã chọn từ: ${S.preview.tags}`,
+    dateMin: '', dateMax: '', gender: { ...genderState(), select: [] }, options: { limit: 0 } });
+}
+$('#dl-selected').addEventListener('click', downloadSelected);
+// "Tải xuống" (and Ctrl+Enter) with posts picked in the preview on screen: the user may mean those posts, not the whole query
+// (whose first post, in ascending order, is its oldest one): ask. Posts of another query or filters are not asked about: the query
+// is what changed. A failed page turn still asks: the grid on screen is a page of this query
+function downloadClicked() {
+  const n = S.preview.selected.size;
+  if (!n || !previewOfThisQuery()) { startDownload(); return; }
+  const done = (pick) => { closeModal(); if (pick === 'selected') downloadSelected(); else if (pick === 'query') startDownload(); };
+  openModal(h('div', { class: 'qchange dl-ask' },
+    h('h2', { text: 'Tải những gì?' }),
+    h('p', { class: 'muted' }, `Bạn đang chọn ${n} post trong Preview. Tải cả truy vấn sẽ tải mọi post khớp với tag và bộ lọc.`),
+    h('div', { class: 'modal-actions' },
+      h('button', { class: 'btn ghost', onclick: () => done(null) }, 'Huỷ'),
+      h('button', { class: 'btn', id: 'dl-ask-query', onclick: () => done('query') }, 'Tải cả truy vấn'),
+      h('button', { class: 'btn primary', id: 'dl-ask-selected', onclick: () => done('selected') }, `Tải ${n} post đã chọn`))));
+  $('#dl-ask-selected')?.focus();
+}
 
 function lightboxMedia(it) {
   // video / audio play in the app (streamed through main, see streamMedia); images show the sample
@@ -1155,7 +1258,10 @@ function openLightbox(it) {
 }
 
 // ---------------- library: offline search of the download index (index.search, no website request) ----------------
-const LIB = { page: 0, pageSize: 60, total: 0, items: [], seq: 0, ready: false };
+// view 'trash': the files deleted from the library (moved to the trash by the core, restorable until purged).
+// selected: paths of the cards picked on this page (click, shift+click for a range); anchor: index of the last plain click
+const LIB = { page: 0, pageSize: 60, total: 0, items: [], seq: 0, ready: false, view: 'library', selected: new Set(), anchor: -1,
+  cards: new Map(), trash: null };
 const LIB_KIND = (ext) => (['mp4', 'webm'].includes(ext) ? 'video' : ['mp3', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'wav'].includes(ext) ? 'audio' : 'image');
 function fileUrl(p) {
   // local file for <img> / <video> (the renderer is a file:// page, CSP allows file:)
@@ -1169,69 +1275,244 @@ async function openLibrary() {
     $('#lib-module').replaceChildren(h('option', { value: '' }, 'Mọi module'), ...mods.map((m) => h('option', { value: m.abbr }, `${m.abbr} · ${m.name}`)));
     runLibrary(0);
   }
+  refreshLibraryStats();
+}
+async function refreshLibraryStats() {
   try {
     const st = await L.rpc('index.stats');
-    setText($('#lib-stats'), st.exists ? `${nf.format(st.files || 0)} file · ${fmtBytes(st.bytes || 0)}` : 'chưa có file nào trong index');
+    LIB.trash = st.trash || { files: 0, bytes: 0, oldest: null };
+    const t = LIB.trash;
+    setText($('#lib-stats'), !st.exists ? 'chưa có file nào trong index'
+      : LIB.view === 'trash' ? `${nf.format(t.files)} file · ${fmtBytes(t.bytes)} trong thùng rác` : `${nf.format(st.files || 0)} file · ${fmtBytes(st.bytes || 0)}`);
+    setText($('#lib-trash-count'), t.files ? `(${nf.format(t.files)})` : '');
+    if (LIB.view === 'trash' && !LIB.total && !LIB.items.length) renderLibrary(); // "trống" or "không khớp bộ lọc" needs the count
+    updateLibTools();
   } catch { /* old core: no index */ }
 }
 async function runLibrary(page) {
   const seq = ++LIB.seq;
   const params = { tags: $('#lib-q').value.trim(), module: $('#lib-module').value, dateFrom: $('#lib-from').value, dateTo: $('#lib-to').value,
-    order: $('#lib-order').value, page, pageSize: LIB.pageSize };
+    order: $('#lib-order').value, page, pageSize: LIB.pageSize, trash: LIB.view === 'trash' };
   try {
     const r = await L.rpc('index.search', params);
     if (seq !== LIB.seq) return;
-    Object.assign(LIB, { page: r.page, total: r.total, items: r.items });
+    const last = Math.max(0, Math.ceil(r.total / LIB.pageSize) - 1);
+    if (!r.items.length && r.page > last) { runLibrary(last); return; } // the last page was emptied (files deleted)
+    Object.assign(LIB, { page: r.page, total: r.total, items: r.items, anchor: -1 });
+    LIB.selected.clear();
     renderLibrary();
   } catch (err) {
     if (seq === LIB.seq) setText($('#lib-info'), `Không tìm được: ${errMsg(err)}`);
   }
 }
+const trashDays = () => S.settings?.library?.trashDays ?? 30;
+function trashLeft(it) {
+  // days before the automatic purge (settings.library.trashDays, main.js purgeOldTrash); '' when the trash is never emptied
+  const days = trashDays();
+  if (!days || !it.trashedAt) return '';
+  const left = Math.ceil(days - (Date.now() / 1000 - it.trashedAt) / 86400);
+  return left > 0 ? `còn ${left} ngày` : 'sắp xoá';
+}
 function renderLibrary() {
+  const trash = LIB.view === 'trash';
   const pages = Math.max(1, Math.ceil(LIB.total / LIB.pageSize));
   const missing = LIB.items.filter((it) => !it.exists).length;
-  setText($('#lib-info'), LIB.total ? `${nf.format(LIB.total)} file${missing ? ` · ${missing} file trên trang này không còn trên đĩa` : ''}`
-    : 'Không có file nào khớp. Index chỉ có những file tải từ khi có tính năng này (và khi đang bật ghi index).');
+  const days = trashDays();
+  const inTrash = LIB.trash?.files || 0; // the whole trash (index.stats), not only what the search bar keeps
+  setText($('#lib-info'), trash
+    ? (LIB.total ? `${nf.format(LIB.total)} file trong thùng rác · ${days ? `tự xoá vĩnh viễn sau ${days} ngày` : 'không tự xoá'}`
+      : inTrash ? `Không có file nào trong thùng rác khớp bộ lọc (thùng rác có ${nf.format(inTrash)} file).` : 'Thùng rác trống.')
+    : LIB.total ? `${nf.format(LIB.total)} file${missing ? ` · ${missing} file trên trang này không còn trên đĩa` : ''}`
+      : 'Không có file nào khớp. Index chỉ có những file tải từ khi có tính năng này (và khi đang bật ghi index).');
   setText($('#lib-page'), `${LIB.page + 1} / ${pages}`);
   $('#lib-prev').disabled = LIB.page <= 0;
   $('#lib-next').disabled = LIB.page + 1 >= pages;
-  $('#lib-grid').replaceChildren(...LIB.items.map((it) => {
+  LIB.cards.clear();
+  $('#lib-grid').replaceChildren(...LIB.items.map((it, i) => {
     const kind = LIB_KIND(String(it.ext || '').toLowerCase());
     const thumb = it.exists && kind === 'image'
       ? h('img', { loading: 'lazy', decoding: 'async', alt: '', src: fileUrl(it.path), onerror: (e) => e.target.replaceWith(h('div', { class: 'ph' }, '🖼')) })
       : h('div', { class: 'ph' }, it.exists ? (kind === 'video' ? '▶' : '♪') : '✕');
-    return h('div', { class: `card ${it.exists ? '' : 'missing'}`, title: `${it.name}\n${(it.tags || '').slice(0, 400)}`, onclick: () => openLibraryItem(it) },
-      thumb, h('div', { class: 'badges' },
-        h('span', { class: 'b' }, it.module), it.ext ? h('span', { class: 'b' }, it.ext) : null,
-        it.size ? h('span', { class: 'b' }, fmtBytes(it.size)) : null, it.exists ? null : h('span', { class: 'b' }, 'đã mất')));
+    const left = trash ? trashLeft(it) : '';
+    const where = trash ? `\nVị trí cũ: ${it.origPath}` : '';
+    const card = h('div', {
+      class: `card ${it.exists ? '' : 'missing'}`, dataset: { path: it.path },
+      title: `${it.name}${where}\n${(it.tags || '').slice(0, 400)}\n(bấm để chọn, bấm đúp để xem)`,
+      onclick: (e) => libCardClick(e, i), ondblclick: () => openLibraryItem(it),
+    }, thumb, h('span', { class: 'tick' }, '✓'), h('div', { class: 'badges' },
+      h('span', { class: 'b' }, it.module), it.ext ? h('span', { class: 'b' }, it.ext) : null,
+      it.size ? h('span', { class: 'b' }, fmtBytes(it.size)) : null, it.exists ? null : h('span', { class: 'b' }, 'đã mất'),
+      left ? h('span', { class: 'b left' }, left) : null));
+    LIB.cards.set(it.path, card);
+    return card;
   }));
+  updateLibTools();
+}
+function updateLibTools() {
+  const trash = LIB.view === 'trash';
+  const n = LIB.selected.size;
+  for (const [p, card] of LIB.cards) card.classList.toggle('sel', LIB.selected.has(p));
+  for (const [id, label, show] of [['#lib-delete', 'Xoá', !trash], ['#lib-restore', 'Khôi phục', trash], ['#lib-purge', 'Xoá vĩnh viễn', trash]]) {
+    setHidden($(id), !show);
+    setText($(id), `${label} (${n})`);
+    $(id).disabled = !n;
+  }
+  setHidden($('#lib-empty'), !trash);
+  $('#lib-empty').disabled = !LIB.trash?.files;
+  $('#lib-sel-none').disabled = !n;
+  $('#lib-sel-page').disabled = !LIB.items.length;
+}
+function libCardClick(e, i) {
+  const it = LIB.items[i];
+  if (!it) return;
+  if (e.shiftKey && LIB.anchor >= 0) { // a range from the last clicked card
+    const [a, b] = LIB.anchor < i ? [LIB.anchor, i] : [i, LIB.anchor];
+    LIB.items.slice(a, b + 1).forEach((x) => LIB.selected.add(x.path));
+  } else {
+    if (LIB.selected.has(it.path)) LIB.selected.delete(it.path); else LIB.selected.add(it.path);
+    LIB.anchor = i;
+  }
+  updateLibTools();
+}
+const libSelectedItems = () => LIB.items.filter((it) => LIB.selected.has(it.path));
+function setLibraryView(view) {
+  if (LIB.view === view) return;
+  LIB.view = view;
+  $$('#lib-view button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
+  // newest deletion first in the trash, newest download first in the library (unless another order was picked)
+  const order = $('#lib-order');
+  order.querySelector('option[value="trashed"]').hidden = view !== 'trash';
+  if (view === 'trash' && order.value === 'downloaded') order.value = 'trashed';
+  if (view !== 'trash' && order.value === 'trashed') order.value = 'downloaded';
+  LIB.selected.clear();
+  LIB.items = [];
+  renderLibrary();
+  runLibrary(0);
+  refreshLibraryStats();
+}
+function afterLibraryChange() {
+  runLibrary(LIB.page);
+  refreshLibraryStats();
+  if ($('#page-settings').classList.contains('active')) refreshIndexStats();
+}
+// errors of the core (lustra/dlindex.py) the user can act on
+const LIB_ERRORS = [[/^the trash folder is not reachable/, 'không truy cập được thư mục thùng rác (ổ đã rút?)']];
+const libError = (e) => LIB_ERRORS.find(([re]) => re.test(String(e || '')))?.[1] || e;
+function reportLibFailed(failed, what) {
+  if (!failed?.length) return;
+  toast(`${what} ${failed.length} file: ${libError(failed[0].error)}${failed.length > 1 ? '…' : ''}`, 'err');
+}
+async function releaseMedia() {
+  // a playing video keeps its file open (Windows refuses to move or delete it): stop the lightbox media before the file is touched
+  const media = $$('#modal-card video, #modal-card audio');
+  for (const m of media) { m.pause(); m.removeAttribute('src'); m.load(); }
+  closeModal();
+  if (media.length) await new Promise((r) => setTimeout(r, 200));
+}
+async function libDelete(items) {
+  // library: files on disk go to the trash (undo from the toast); rows whose file is already gone are dropped (main asks first)
+  const present = items.filter((it) => it.exists).map((it) => it.path);
+  const gone = items.filter((it) => !it.exists).map((it) => it.path);
+  if (present.length) {
+    try {
+      const r = await L.library.trash(present);
+      reportLibFailed(r.failed, 'Không chuyển được vào thùng rác');
+      const moved = r.trashed.map((x) => x.trashPath);
+      // the toast sits above the lightbox: a lightbox opened meanwhile on one of these files (Thùng rác) is closed and its media
+      // stopped first, as its own buttons do (an open video keeps its file: Windows refuses to move it)
+      const undo = async () => {
+        if (moved.includes($('#modal-card .lightbox')?.dataset.path)) await releaseMedia();
+        libRestore(moved, true);
+      };
+      if (moved.length) toastAction(`Đã chuyển ${moved.length} file vào thùng rác`, 'Hoàn tác', undo);
+    } catch (err) { toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
+  }
+  if (gone.length) {
+    try {
+      const r = await L.library.forget(gone);
+      if (r.removed) toast(`Đã bỏ ${r.removed} mục không còn file khỏi thư viện`, 'ok');
+    } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
+  }
+  afterLibraryChange();
+}
+async function libRestore(paths, undo = false) {
+  try {
+    const r = await L.library.restore(paths);
+    reportLibFailed(r.failed, 'Không khôi phục được');
+    if (r.restored.length) toast(undo ? `Đã hoàn tác: ${r.restored.length} file về chỗ cũ` : `Đã khôi phục ${r.restored.length} file`, 'ok');
+  } catch (err) { toast(`Không khôi phục được: ${errMsg(err)}`, 'err'); }
+  afterLibraryChange();
+}
+async function libPurge(paths) {
+  try {
+    const r = await (paths ? L.library.purge(paths) : L.library.emptyTrash());
+    reportLibFailed(r.failed, 'Không xoá được');
+    // purged counts rows: files deleted, rows whose file was already gone, rows of files outside a trash folder (kept on disk)
+    const gone = Math.max(0, (r.purged || 0) - (r.files || 0) - (r.kept || 0));
+    const parts = [r.files ? `Đã xoá vĩnh viễn ${r.files} file (${fmtBytes(r.bytes)})` : '', gone ? `bỏ ${gone} mục không còn file` : '',
+      r.kept ? `giữ ${r.kept} file nằm ngoài thùng rác` : ''].filter(Boolean);
+    if (parts.length) toast(parts.join(', ').replace(/^./, (c) => c.toUpperCase()), 'ok');
+  } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(`Không xoá được: ${errMsg(err)}`, 'err'); }
+  afterLibraryChange();
 }
 function openLibraryItem(it) {
   const kind = LIB_KIND(String(it.ext || '').toLowerCase());
+  const trash = Boolean(it.trashedAt);
   const media = !it.exists ? h('div', { class: 'audio-ph' }, 'File không còn trên đĩa')
     : kind === 'video' ? h('video', { controls: true, autoplay: true, src: fileUrl(it.path) })
       : kind === 'audio' ? h('div', { class: 'cover' }, h('div', { class: 'audio-ph' }, '♪'), h('audio', { controls: true, autoplay: true, src: fileUrl(it.path) }))
         : h('img', { src: fileUrl(it.path), alt: '' });
   const tags = String(it.tags || '').split(' ').filter(Boolean);
   const searchTag = (t) => { closeModal(); $('#lib-q').value = t; runLibrary(0); };
-  openModal(h('div', { class: 'lightbox' },
+  // the media is stopped and the lightbox closed before the file is moved or deleted
+  const act = (fn) => async () => { await releaseMedia(); fn(); };
+  const left = trash ? trashLeft(it) : '';
+  const actions = trash ? [
+    it.exists ? h('button', { class: 'btn primary', onclick: act(() => libRestore([it.path])) }, 'Khôi phục') : null,
+    h('button', { class: 'btn danger', onclick: act(() => libPurge([it.path])) }, 'Xoá vĩnh viễn'),
+  ] : [
+    it.exists && L.library ? h('button', { class: 'btn', onclick: () => L.library.open(it.path).then((r) => r && toast(r, 'err')) }, 'Mở file') : null,
+    L.library ? h('button', { class: 'btn', onclick: () => L.library.reveal(it.path) }, 'Mở thư mục') : null,
+    L.library?.trash ? h('button', { class: 'btn danger', title: it.exists ? 'Chuyển vào thùng rác' : 'Bỏ khỏi thư viện (file đã mất)', onclick: act(() => libDelete([it])) },
+      it.exists ? 'Xoá' : 'Xoá khỏi thư viện') : null,
+  ];
+  openModal(h('div', { class: 'lightbox', dataset: { path: it.path } },
     h('div', {}, media),
     h('div', {},
       h('h2', {}, `${it.module} #${it.id} `, h('span', { class: 'muted' }, [it.ext, it.size && fmtBytes(it.size), it.date, it.rating].filter(Boolean).join(' · '))),
-      h('p', { class: 'muted lib-path' }, it.path),
+      trash ? h('p', { class: 'muted' }, `Trong thùng rác · đã xoá ${ago(it.trashedAt * 1000)}${left ? ` · ${left}` : ''}`) : null,
+      h('p', { class: 'muted lib-path' }, trash ? `Vị trí cũ: ${it.origPath}` : it.path),
       it.md5 ? h('p', { class: 'muted lib-path' }, `md5 ${it.md5}`) : null,
       h('p', { class: 'muted' }, 'Bấm một tag để tìm các file khác có tag đó.'),
       h('div', { class: 'lb-tags' }, tags.slice(0, 300).map((t) => h('span', { class: 'lb-tag', onclick: () => searchTag(t), style: 'cursor:pointer' }, t))),
-      h('div', { class: 'modal-actions' },
-        it.exists && L.library ? h('button', { class: 'btn', onclick: () => L.library.open(it.path).then((r) => r && toast(r, 'err')) }, 'Mở file') : null,
-        L.library ? h('button', { class: 'btn', onclick: () => L.library.reveal(it.path) }, 'Mở thư mục') : null,
-        h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
+      h('div', { class: 'modal-actions' }, ...actions, h('button', { class: 'btn ghost', onclick: closeModal }, 'Đóng')))));
 }
 $('#lib-search').addEventListener('click', () => runLibrary(0));
 $('#lib-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') runLibrary(0); });
 ['#lib-module', '#lib-order', '#lib-from', '#lib-to'].forEach((id) => $(id).addEventListener('change', () => runLibrary(0)));
 $('#lib-prev').addEventListener('click', () => { if (LIB.page > 0) runLibrary(LIB.page - 1); });
 $('#lib-next').addEventListener('click', () => runLibrary(LIB.page + 1));
+$$('#lib-view button').forEach((b) => b.addEventListener('click', () => setLibraryView(b.dataset.view)));
+$('#lib-sel-page').addEventListener('click', () => { LIB.items.forEach((it) => LIB.selected.add(it.path)); updateLibTools(); });
+$('#lib-sel-none').addEventListener('click', () => { LIB.selected.clear(); LIB.anchor = -1; updateLibTools(); });
+$('#lib-delete').addEventListener('click', () => { if (LIB.selected.size) libDelete(libSelectedItems()); });
+$('#lib-restore').addEventListener('click', () => {
+  const paths = libSelectedItems().filter((it) => it.exists).map((it) => it.path);
+  if (paths.length) libRestore(paths); else toast('File đã chọn không còn trong thùng rác', 'err');
+});
+$('#lib-purge').addEventListener('click', () => { if (LIB.selected.size) libPurge(libSelectedItems().map((it) => it.path)); });
+$('#lib-empty').addEventListener('click', () => libPurge(null));
+// the key labelled "delete" on a Mac keyboard sends Backspace (fn + delete sends Delete)
+const IS_MAC = /Mac/i.test(navigator.platform || navigator.userAgent || '');
+document.addEventListener('keydown', (e) => {
+  // library page: Delete moves the selected cards to the trash (reversible), Escape clears the selection. Capture phase: runs
+  // before the listener that closes the lightbox on Escape, so closing it keeps the selection
+  if (!$('#page-library').classList.contains('active') || !$('#modal').hidden) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  const del = e.key === 'Delete' || (IS_MAC && e.key === 'Backspace');
+  if (del && LIB.view === 'library' && LIB.selected.size) { e.preventDefault(); libDelete(libSelectedItems()); }
+  else if (e.key === 'Escape' && LIB.selected.size) { LIB.selected.clear(); updateLibTools(); }
+}, true);
 
 // ---------------- downloads ----------------
 async function startDownload(override = null) {
@@ -1248,9 +1529,10 @@ async function startDownload(override = null) {
     }
     // "download selected" builds an id: query of this site: never sent to the other sites
     const sites = !override && multi.size && multiAvailable() ? [...multi] : null;
+    const options = { ...downloadOptions(), ...(override?.options || {}) };
     const job = await addJob((allowDuplicate) => (sites
-      ? L.jobs.startMulti({ ...q, path, options: downloadOptions(), allowDuplicate }, sites)
-      : L.jobs.start({ ...q, path, options: downloadOptions(), allowDuplicate })));
+      ? L.jobs.startMulti({ ...q, path, options, allowDuplicate }, sites)
+      : L.jobs.start({ ...q, path, options, allowDuplicate })));
     if (Array.isArray(job)) toast(`Đã thêm ${job.length} job, chạy lần lượt: ${job.map((j) => j.module).join(' → ')}`, 'ok');
     else if (job) toast(`Đã thêm job: ${q.label || q.tags}`, 'ok');
   } catch (err) {
@@ -1275,7 +1557,7 @@ async function rerunJob(id) {
     if (j) toast(`Đã chạy lại: ${j.label || j.tags}`, 'ok');
   } catch (err) { toast(`Không chạy lại được: ${errMsg(err)}`, 'err'); }
 }
-$('#btn-download').addEventListener('click', () => startDownload());
+$('#btn-download').addEventListener('click', downloadClicked);
 
 // Each job owns one DOM subtree that is created once and then patched in place (at most once per frame), so buttons
 // never get swapped out from under the cursor and an open log keeps its scroll position.
@@ -1856,6 +2138,9 @@ async function refreshIndexStats() {
   if (seq !== indexStatsSeq) return;
   const when = (t) => (t ? new Date(t * 1000).toLocaleString('vi-VN') : '—');
   $('#index-path').textContent = r.path || '';
+  const trash = r.trash || { files: 0, bytes: 0 };
+  setText($('#index-trash-info'), trash.files ? `(${nf.format(trash.files)} file · ${fmtBytes(trash.bytes)})` : '(trống)');
+  $('#index-empty-trash').disabled = !trash.files;
   if (!r.exists) {
     table.replaceChildren(h('tr', {}, h('td', { class: 'muted' }, r.recording === false
       ? 'Chưa có index; đang tắt ghi (LUSTRA_DLINDEX=0).' : 'Chưa có index: file đầu tiên tải xong sẽ được ghi vào.')));
@@ -1869,6 +2154,7 @@ async function refreshIndexStats() {
     row('Tag khác nhau', nf.format(r.tags)),
     row('Dung lượng file', fmtBytes(r.bytes)),
     row('Dung lượng index', fmtBytes(r.dbBytes)),
+    row('Thùng rác', trash.files ? `${nf.format(trash.files)} file · ${fmtBytes(trash.bytes)}` : 'trống'),
     row('Lần tải gần nhất', when(r.last)),
     ...(r.recording === false ? [row('Ghi index', 'đang tắt (LUSTRA_DLINDEX=0)')] : []),
     ...(r.modules?.length ? [h('tr', {}, h('th', {}, 'Module'), h('th', {}, 'File'), h('th', {}, 'Dung lượng'), h('th', {}, 'Gần nhất')),
@@ -1876,6 +2162,15 @@ async function refreshIndexStats() {
         h('td', {}, fmtBytes(m.bytes)), h('td', {}, when(m.last))))] : []));
 }
 $('#index-refresh').addEventListener('click', () => refreshIndexStats());
+$('#s-trash-days').addEventListener('change', async (e) => {
+  // a shorter time empties what is older at once (main); the "còn X ngày" badges follow
+  try { await saveSettings({ library: { trashDays: Number(e.target.value) } }); } catch (err) { toast(`Không lưu được: ${errMsg(err)}`, 'err'); }
+  if (LIB.ready && LIB.view === 'trash') renderLibrary();
+});
+$('#index-empty-trash').addEventListener('click', async () => {
+  await libPurge(null); // main asks first (native dialog)
+  refreshIndexStats();
+});
 $('#s-skip-known').addEventListener('change', (e) => { $('#f-skip-known').checked = e.target.checked; });
 
 // ---------------- download index tools: clean (index.clean in the sidecar, via main) ----------------
@@ -2106,8 +2401,24 @@ function tagSourceTitle(src) {
   const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
   return `${src.site} — ${src.description}. ${rule}${key}`;
 }
+// updates running in the core, module -> { count, message }: from tags.sources (running, also jobs started by main and after a reload
+// of the window) and tags.updateProgress; gone at tags.updateDone. A running row keeps its button off until the job ends
+const tagUpdates = new Map();
+const tagRunningText = (count) => (count ? `đang cập nhật… ${nf.format(count)} tag` : 'đang cập nhật…');
+const tagRunningButton = (message) => h('button', { class: 'btn sm', disabled: true, title: message || '', dataset: { running: '1' } }, 'Đang cập nhật…');
+function showTagRunning(m, count = tagUpdates.get(m)?.count, message = tagUpdates.get(m)?.message) {
+  tagUpdates.set(m, { count: Number(count) || 0, message: message || '' });
+  const cell = $(`#tagupd-${m}`);
+  if (cell) { cell.textContent = tagRunningText(count); cell.title = message || ''; }
+  const act = $(`#tagact-${m}`);
+  const btn = act && $('[data-running]', act);
+  if (btn) btn.title = message || '';
+  else if (act) act.replaceChildren(tagRunningButton(message));
+}
+let tagStatusGen = 0;
 async function refreshTagStatus() {
   if (!azPage.loaded) { azPage.loaded = true; azPage.reload(); }
+  const gen = ++tagStatusGen;
   let rows = [];
   let sources = [];
   try {
@@ -2115,8 +2426,13 @@ async function refreshTagStatus() {
     S.tagLists = new Set(rows.filter((r) => r.size > 0).map((r) => r.module));
   } catch { /* ignore */ }
   try { sources = await L.rpc('tags.sources'); } catch { /* core without tags.sources: no update buttons */ }
+  if (gen !== tagStatusGen) return; // a later call asked the core after this one: its answer is the newer one
   const byMod = Object.fromEntries(rows.map((r) => [r.module, r]));
   const srcByMod = Object.fromEntries((Array.isArray(sources) ? sources : []).map((src) => [src.module, src]));
+  for (const src of Object.values(srcByMod)) {
+    if (src.running) tagUpdates.set(src.module, { count: Number(src.count) || 0, message: src.message || '' });
+    else if (src.running === false) tagUpdates.delete(src.module);
+  }
   const installed = S.modules.filter((m) => m.installed);
   const mods = [...installed.filter((m) => srcByMod[m.abbr]), ...installed.filter((m) => !srcByMod[m.abbr])]; // updatable first
   const table = $('#tag-status');
@@ -2127,14 +2443,20 @@ async function refreshTagStatus() {
       const r = byMod[m];
       const src = srcByMod[m];
       const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
+      const run = src ? tagUpdates.get(m) : undefined;
       let action;
-      if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
+      if (run) action = tagRunningButton(run.message);
+      else if (!src && r && !r.learned) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
       else if (!src) {
         action = h('button', { class: 'btn sm', title: 'Đọc tag của các file đã tải (index), không gửi request tới site', onclick: async (e) => {
           e.currentTarget.disabled = true;
           try {
             const res = await L.rpc('tags.learn', { module: m });
-            toast(res.newPosts ? `Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải` : `Tag ${m}: không có post đã tải mới`);
+            // mayLearn false: the module has a list from a source (or learning is off); indexed false: nothing downloaded yet
+            if (res.mayLearn === false) toast(res.sourceList ? `Tag ${m}: đã có danh sách tag từ nguồn, không cần học` : `Tag ${m}: chức năng học tag đang tắt`);
+            else if (res.newPosts) toast(`Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải`);
+            else if (res.indexed === false) toast(`Chưa có post nào của ${name || m} trong index: tải vài post (hoặc xem Preview) để Lustra học tag`);
+            else toast(`Tag ${m}: không có post đã tải mới`);
             refreshTagStatus();
             loadTagLists();
           } catch (err) { toast(errMsg(err), 'err'); }
@@ -2146,7 +2468,11 @@ async function refreshTagStatus() {
           try {
             await L.tags.update(m, full ? { full: true } : undefined);
             toast(`Đang ${full ? 'đọc lại toàn bộ' : 'cập nhật'} danh sách tag ${m}…`);
-          } catch (err) { toast(errMsg(err), 'err'); }
+          } catch (err) {
+            const running = /already running/i.test(errMsg(err));
+            toast(running ? `Danh sách tag ${m} đang được cập nhật` : errMsg(err), running ? undefined : 'err');
+          }
+          refreshTagStatus(); // the core says whether it runs (a job that failed at once has already ended)
         };
         // tail sources (Rule34): 'Cập nhật' reads the last pages only (a full read every 30 days on its own)
         action = src.tailUpdates
@@ -2161,8 +2487,9 @@ async function refreshTagStatus() {
           src ? (src.name || name || m) : (r && !r.learned ? '—' : 'học từ post đã xem / đã tải')),
         h('td', { class: 'mono', title: r?.path || '' }, r ? r.path.split(/[\\/]/).slice(-2).join('/') : '—'),
         h('td', { title: r?.learned ? 'Danh sách học từ post đã xem / đã tải' : '' }, r ? `${r.size >= 1048576 ? `${(r.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(r.size / 1024))} KB`}${r.learned ? ' (đã học)' : ''}` : '—'),
-        h('td', { id: `tagupd-${m}` }, r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
-        h('td', {}, action));
+        h('td', { id: `tagupd-${m}`, title: run?.message || '' },
+          run ? tagRunningText(run.count) : r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : 'chưa có'),
+        h('td', { id: `tagact-${m}` }, action));
     }));
   $('#tags-autoupdate').checked = !!S.settings.tags.autoUpdate;
   $('#tags-autoupdate-days').value = S.settings.tags.autoUpdateDays;
@@ -2307,7 +2634,13 @@ $('#ext-zip').addEventListener('click', async () => {
   if (!file) return;
   const v = await prompt2('Cài extension từ file .zip', [{ label: 'SHA-256 của file (bắt buộc, lấy từ nơi phát hành)', placeholder: 'e3b0c442…' }]);
   if (!v) return;
-  try { await L.ext.installZip(file, v[0]); toast('Đã cài extension', 'ok'); renderExtensions(); } catch (err) { toast(errMsg(err), 'err'); }
+  try {
+    // an update of an extension this app run already loaded takes effect after a restart (the catalog installs say so too)
+    const r = await L.ext.installZip(file, v[0]);
+    const name = r?.name ? `${r.name} v${r.version}` : 'extension';
+    toast(r?.restartRequired ? `Đã cài ${name}. Khởi động lại app để dùng phiên bản mới.` : `Đã cài ${name}`, 'ok');
+    renderExtensions();
+  } catch (err) { if (!/cancelled/.test(errMsg(err))) toast(errMsg(err), 'err'); }
 });
 $('#catalog-load').addEventListener('click', async () => {
   const url = $('#catalog-url').value.trim();
@@ -2937,6 +3270,10 @@ function renderSettings() {
   bindSetting('#s-notify', 'download.notify');
   bindSetting('#s-concurrent', 'download.maxConcurrentJobs', 'number');
   bindSetting('#s-skip-known', 'download.skipKnown');
+  const days = s.library?.trashDays ?? 30;
+  const daysSel = $('#s-trash-days');
+  if (![...daysSel.options].some((o) => Number(o.value) === days)) daysSel.append(h('option', { value: String(days) }, `${days} ngày`));
+  daysSel.value = String(days);
   $('#c-proxy').value = s.connection.proxy || '';
   $('#c-ignore').checked = !!s.connection.ignoreProxy;
   $('#c-nodown').checked = !!s.connection.proxyNoDownload;
@@ -3120,7 +3457,12 @@ function onSidecarStatus(st) {
   $('#core-dot').className = `dot ${st.ok ? 'ok' : st.error === 'starting' ? '' : 'err'}`;
   $('#core-status').textContent = st.ok ? `Lõi sẵn sàng · ${st.info?.version || ''}`
     : st.error === 'starting' ? 'Đang khởi động lõi…' : `Lõi lỗi: ${st.error}`;
-  if (st.ok && !coreOk) { loadModules(); renderAbout(); warmupTags(S.module); loadTagLists(); }
+  if (st.ok && !coreOk) {
+    loadModules(); renderAbout(); warmupTags(S.module); loadTagLists();
+    // a core that exited took its running tag updates with it (no tags.updateDone comes): the new one says what runs
+    tagUpdates.clear();
+    if (azPage.loaded) refreshTagStatus();
+  }
   coreOk = !!st.ok;
 }
 function listen() {
@@ -3130,10 +3472,14 @@ function listen() {
   L.on('jobs:log', (m) => appendJobLog(m.id, m.text));
   L.on('sidecar:notify', ({ method, params }) => {
     if (method === 'tags.updateProgress') {
-      const cell = $(`#tagupd-${params.module}`);
-      if (cell) cell.textContent = `đang tải… ${nf.format(params.count)} tag`;
+      // whoever started it (this page, main's auto update or a new extension): the row shows it and its button stays off
+      showTagRunning(params.module, params.count, params.message);
     } else if (method === 'index.cleanProgress' || method === 'index.cleanDone') {
       onIndexCleanNotify(method, params);
+    } else if (method === 'library.trashPurged') {
+      // main emptied the trash of files older than settings.library.trashDays
+      if (LIB.ready) { refreshLibraryStats(); if (LIB.view === 'trash') runLibrary(LIB.page); }
+      if ($('#page-settings').classList.contains('active')) refreshIndexStats();
     } else if (method === 'app.notice') {
       // main process notices (ex. settings.json was corrupt: backed up, API keys recovered)
       toast(`${params.title ? `${params.title}: ` : ''}${params.message || ''}`, params.level === 'info' ? 'ok' : 'err');
@@ -3143,6 +3489,7 @@ function listen() {
       loadTagLists();
       if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
+      tagUpdates.delete(params.module);
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
       if (params.written) {
         for (const k of [...resolveCache.keys()]) if (k.startsWith(`${params.module}\n`)) resolveCache.delete(k);

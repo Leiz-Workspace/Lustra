@@ -6,6 +6,7 @@ Author: trickerer (https://github.com/trickerer, https://github.com/trickerer01)
 #
 #
 
+import datetime
 import os
 import pathlib
 import re
@@ -17,9 +18,8 @@ from typing import Any, TypeVar, final
 from bs4 import BeautifulSoup
 
 from .defines import (
-    DATE_MAX_DEFAULT,
     DATE_MIN_DEFAULT,
-    LAUCH_DATE,
+    FMT_DATE,
     NEGATIVE_GROUP_MATCH_LIST_MAX_LEN,
     APIKey,
     DownloaderStates,
@@ -79,8 +79,12 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.prefer_webm: bool = False
         self.prefer_mp4: bool = False
         self.low_res: bool = False
+        # the day this downloader was made: the default max date, and a max date on or after it limits nothing. Per downloader,
+        # not per process (defines.LAUCH_DATE): the app's core makes one for each request and runs for days
+        self.date_today: datetime.date = datetime.date.today()
+        self.date_max_default: str = self.date_today.strftime(FMT_DATE)
         self.date_min: str = DATE_MIN_DEFAULT
-        self.date_max: str = DATE_MAX_DEFAULT
+        self.date_max: str = self.date_max_default
         self.preserve_date: bool = False
         self.dest_base: pathlib.Path = pathlib.Path().resolve().parent
         self.subfolder_vid: str = ''
@@ -274,6 +278,10 @@ class DownloaderBase(ThreadedHtmlWorker):
 
     def _has_capability(self, cap: str) -> bool:
         return cap in self.CAPABILITIES
+
+    def _has_date_limits(self) -> bool:
+        """-mindate / -maxdate other than their defaults (no limit)"""
+        return self.date_min != DATE_MIN_DEFAULT or self.date_max != self.date_max_default
 
     def _parses_raw_pages(self) -> bool:
         """True if module parses raw page bytes (json api) instead of BeautifulSoup html"""
@@ -496,7 +504,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         if 1 <= self._num_pages() <= 2:
             trace('Only a page or two! Skipping')
             return self.minpage if minpage else self.maxpage
-        if minpage is True and as_date(self.date_max) >= LAUCH_DATE:
+        if minpage is True and as_date(self.date_max) >= self.date_today:
             trace('Min page: max date irrelevant! Skipping')
             return self.minpage
         if minpage is False and as_date(self.date_min) <= as_date(DATE_MIN_DEFAULT):
@@ -570,7 +578,7 @@ class DownloaderBase(ThreadedHtmlWorker):
         """Removes leading items newer than date_max (see _filter_last_items)"""
         trace('Filtering trailing front items...')
 
-        if as_date(self.date_max) >= LAUCH_DATE:
+        if as_date(self.date_max) >= self.date_today:
             trace('first items filter is irrelevant! Skipping!')
             return
 

@@ -17,7 +17,7 @@ cd app && npm install && node node_modules/electron/install.js   # tải binary 
 | Sidecar (debug) | `.venv/bin/python -m lustra.server`, rồi gõ `{"jsonrpc":"2.0","id":1,"method":"app.info"}` |
 | UI mock trên trình duyệt | `python3 -m http.server 5178 --directory app`, mở `http://localhost:5178/renderer/index.html` |
 | Tạo extension (CLI / skill) | `.venv/bin/python -m lustra.extgen survey https://site` → `new https://site --out .extgen-drafts` → `record .extgen-drafts/<id> --query "<tag>"` → `check .extgen-drafts/<id>` → `pack .extgen-drafts/<id> --out <file>.zip` |
-| Công cụ index các lần tải | `.venv/bin/python -m lustra.dlindex_tools clean --dry-run`, `import ~/Pictures/booru --module db`, `retag ~/Downloads/Lustra --source index` (mục 3b) |
+| Công cụ index các lần tải | `.venv/bin/python -m lustra.dlindex_tools clean --dry-run`, `import ~/Pictures/booru --module db`, `retag ~/Downloads/Lustra --source index`, `trash list`, `trash purge --days 30` (mục 3b) |
 | Worker tạo extension (debug) | `(echo '{"cmd":"start","url":"https://site","mode":"template"}'; sleep 120) \| .venv/bin/python -m lustra.aigen.worker` |
 
 Biến môi trường:
@@ -42,7 +42,7 @@ Biến môi trường:
 - `LUSTRA_SECRET_MODULE_ARGS`: object JSON `{"db": ["-api_key", "KEY,LOGIN"]}`, khoá API theo module cho job nhập thư viện (`dlindex_tools import`); đọc xong thì xoá khỏi môi trường;
 - `LUSTRA_SELFTEST_SECURITY=1`: thêm kiểm tra bảo mật vào chế độ tự kiểm thử;
 - `LUSTRA_SELFTEST_DIR`: chạy tự kiểm thử Electron. Bước `generator` kiểm: khoá chỉ ghi (không lộ ra renderer, không có dạng chữ thường), phiên bị từ chối (R10), phiên cho site trong danh sách chặn tên miền bị từ chối (R7, lời nhắn tiếng Việt), cài từ catalog từ xa không nhận URL / sha256 từ renderer, không cài được bản nháp chưa đạt, cài cần xác nhận, dọn dẹp.
-  Bước `indexTools` kiểm: `index.clean` / `index.cleanCancel` không gọi trực tiếp được qua `rpc`, dọn cần xác nhận (từ chối thì không chạy, chạy thử thì không hỏi), nhập thư viện chỉ với thư mục chọn từ hộp thoại và module hợp lệ, một job nhập chạy thử thật (lõi `index import --dry-run`) và thẻ job của nó, nhóm tải nhiều site (2–8 module, ép `-skip_known` / `-prefix`, site sau chờ site trước, renderer không tự tạo nhóm), giao diện (Kiểm tra / Dọn index ở Cài đặt, hộp nhập thư viện, chọn site thêm, khung nhóm trong hàng đợi; ảnh `20-…` tới `24-…`).
+  Bước `indexTools` kiểm: `index.clean` / `index.cleanCancel` không gọi trực tiếp được qua `rpc`, dọn cần xác nhận (từ chối thì không chạy, chạy thử thì không hỏi), nhập thư viện chỉ với thư mục chọn từ hộp thoại và module hợp lệ, một job nhập chạy thử thật (lõi `index import --dry-run`) và thẻ job của nó, nhóm tải nhiều site (2–8 module, ép `-skip_known` / `-prefix`, site sau chờ site trước, renderer không tự tạo nhóm), thùng rác (`index.trash` / `index.restore` / `index.purgeTrash` / `index.forget` không gọi được qua `rpc`, đường dẫn không hợp lệ hoặc không có trong index bị từ chối, xoá → khôi phục → xoá vĩnh viễn với hộp xác nhận thay bằng hàm giả: từ chối thì không xoá gì, `settings.library.trashDays` chỉ nhận số nguyên 0–365), giao diện (Kiểm tra / Dọn index ở Cài đặt, hộp nhập thư viện, chọn site thêm, khung nhóm trong hàng đợi, chọn thẻ ở trang Đã tải → Xoá → Hoàn tác, Thùng rác; ảnh `20-…` tới `27-…`). Bước này cần Python của mã nguồn để ghi index mẫu (lõi đóng băng: phần thùng rác bỏ qua) và một hồ sơ tạm (`LUSTRA_USER_DATA`): phần thùng rác dọn sạch thùng rác của hồ sơ nó chạy trên, nên với hồ sơ thật thì bỏ qua; số ngày tự dọn được đặt lại như cũ.
 
 Chế độ AI của trình tạo extension cần gói `anthropic`: `uv pip install --python .venv/bin/python 'anthropic>=2.9'`, hoặc `pip install "lustra[ai]"`. Khoá Claude API nhập trong app (Cài đặt → AI tạo extension). Khoá được mã hoá bằng keyring của hệ điều hành; không có keyring thì app không lưu. Chế độ "Không dùng AI" không cần gói hay khoá này. Bản nháp nằm ở `<data>/extgen/drafts/`.
 
@@ -63,7 +63,7 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 | `gelbooru_dapi` | `index.php?page=dapi&s=tag&q=index`, phân trang theo số trang `pid` (danh sách của site không theo thứ tự id) | bắt buộc nếu manifest có `auth.apiKey` (site trả "Missing authentication"), nếu không thì dùng khi có (`API_KEY,USER_ID`) |
 | `danbooru_json` | `tags.json`, con trỏ id `page=a<id>` | dùng khi có (`API_KEY,LOGIN`) |
 | `moebooru_json` | `tag.json?order=name`, theo trang | không |
-| `e621_json` | bản export `db_export/tags-<ngày>.csv.gz` (thử 4 ngày gần nhất) | không |
+| `e621_json` | bản export hằng ngày: trang `db_exports` liệt kê `tags.csv.gz` và SHA-256 của nó; tải file (host con của site, ví dụ `static1.e621.net`), kiểm SHA-256 (sai thì không đọc). Trang không có link thì thử `db_export/tags-<ngày>.csv.gz` cũ (4 ngày gần nhất) | không |
 | `philomena_json` | `api/v1/json/search/tags`: 10.000 tag dùng nhiều nhất (giới hạn cửa sổ tìm kiếm của site); dấu cách trong tên tag thành `_` | không |
 | `szurubooru_json` | `api/tags/`, theo offset | không |
 | `shimmie_api` | `api/danbooru/find_tags`: cả danh sách trong một câu trả lời | không |
@@ -81,7 +81,7 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Nguồn: tag của các post hiện trong Preview (`search.preview`) và của các file đã tải (index các lần tải; app gọi `tags.learn` sau mỗi lượt tải xong, hoặc nút "Học từ file đã tải" ở Tags A–Z).
   - Mỗi post chỉ đếm một lần. File ghi dạng `"tag": "N posts (unknown)"`, với N là số post đã thấy ở đây, không phải số trên site; loại tag không biết.
   - Trạng thái ở `<thư mục dữ liệu>/tags/learned/<abbr>.sqlite`.
-  - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó.
+  - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó. Danh sách thật được dùng kể cả khi file của nó cũ hơn danh sách đã học.
 
 **Lịch sự** (mọi nguồn):
 - **Nhịp request:** khoảng cách giữa hai request là `--delay` (mặc định 0,5 giây). Bộ cập nhật dùng giá trị lớn nhất trong các mức sau, tối đa 60 giây:
@@ -130,8 +130,11 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
 **Trong app** (Tags A–Z → Danh sách tag):
 - Bảng liệt kê mọi extension đã cài, có cột "Nguồn" (rê chuột để xem site, cách đọc, có tuân thủ robots.txt không).
   - Module có nguồn: có nút "Cập nhật". Với extension có job riêng, nút này là cách duy nhất để chạy job.
+  - Khi đang cập nhật (bấm ở đây, tự cập nhật khi mở app, hoặc extension vừa cài), dòng đó ghi "đang cập nhật… N tag" (khoảng 2 giây cập nhật một lần) và nút thành "Đang cập nhật…" (tắt) tới khi xong, kể cả khi chuyển trang hay tải lại cửa sổ: bảng hỏi lõi (`tags.sources`, `running`).
   - Module bắt buộc khoá mà chưa có khoá: ghi "cần API key" (nhập ở Cài đặt → API key).
   - Module không có nguồn: cột "Nguồn" ghi "học từ post đã xem / đã tải", có nút "Học từ file đã tải"; cột dung lượng ghi "(đã học)" khi danh sách là danh sách học được. Module không có nguồn nhưng có danh sách đi kèm (ví dụ `2tags/` của repo) ghi "không có nguồn".
+    - Nút "Học từ file đã tải" báo rõ lý do khi không học thêm được: index chưa có post nào của site ("Chưa có post nào của … trong index: tải vài post (hoặc xem Preview) để Lustra học tag"), module đã có danh sách từ nguồn (không cần học), hoặc không có post đã tải mới.
+    - Rule34Hentai, Paheal, Rule34.us: catalog đi kèm app có sẵn danh sách của chúng (từ v1.0.2). Bản 1.0.1 đã cài thấy "có bản v1.0.2" ở trang Extensions; cập nhật là có danh sách.
   - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay. Extension có job riêng thì không: job chỉ chạy khi bấm nút.
 - "Tự cập nhật mỗi N ngày khi mở app": Rule34 và Danbooru, bằng khoá đã lưu; Rule34 bị bỏ qua khi chưa có khoá.
 - "Cập nhật theo lịch của hệ thống, kể cả khi app đóng" (mỗi tuần vào thứ Hai, hoặc mỗi ngày, lúc khoảng 4 giờ sáng):
@@ -172,7 +175,7 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
 
 ## 3b. Index các lần tải
 - File: `<data dir>/index/downloads.sqlite` (kèm `-wal`, `-shm` khi đang có tiến trình mở). Mỗi file tải xong ở chế độ `full` được ghi một dòng (module, id, md5, đường dẫn, tags, score, rating, ngày post, thời điểm tải). Không đọc nội dung file, không gửi dữ liệu ra ngoài.
-- Bỏ qua post đã tải: CLI `-skip_known`; app: ô "Bỏ qua file đã tải" trong tuỳ chọn tải, mặc định ở Cài đặt → Index các lần tải. Post chỉ bị bỏ qua khi file đã ghi trong index vẫn còn trên đĩa, nên xoá file là cách tải lại.
+- Bỏ qua post đã tải: CLI `-skip_known`; app: ô "Bỏ qua file đã tải" trong tuỳ chọn tải, mặc định ở Cài đặt → Index các lần tải. Post chỉ bị bỏ qua khi file đã ghi trong index vẫn còn trên đĩa và không nằm trong thùng rác, nên xoá file (trên đĩa hoặc ở trang Đã tải) là cách tải lại.
   ```bash
   .venv/bin/python -m lustra -module db -skip_known -path ~/Downloads/Lustra -- cat_ears rating:g
   ```
@@ -194,6 +197,18 @@ Log ghi ở `~/.local/state/lustra/update-tags.log`. Chạy tay: `.venv/bin/pyth
   .venv/bin/python -m lustra.dlindex_tools retag ~/Downloads/Lustra --source index
   ```
   `--source both` (mặc định: index trước, file info JSON sau), `--types artist,character` (theo loại tag, cần danh sách tag), `--module` (bộ lọc tag của module khi `--types auto`). Exit code `3` khi có file không tìm được info. Re-tag / un-tag / sắp xếp file trong GUI Tk tự cập nhật đường dẫn trong index.
+- **Xoá file, thùng rác** (trang Đã tải): bấm thẻ để chọn (Shift + bấm: chọn một dải; **Chọn cả trang**), bấm đúp để xem. **Xoá (N)** hoặc phím Delete (Mac: phím delete) chuyển file vào thùng rác, thông báo có nút **Hoàn tác**. **Thùng rác (N)** liệt kê file đã xoá (vị trí cũ, "còn X ngày"): **Khôi phục** đưa file về chỗ cũ (thư mục đã mất thì tạo lại; tên đã có file khác thì thêm `_1`, `_2`…), **Xoá vĩnh viễn** và **Dọn sạch thùng rác…** xoá file khỏi đĩa sau hộp xác nhận. Thẻ "đã mất" (file không còn trên đĩa): **Xoá** chỉ bỏ dòng khỏi index, cũng có xác nhận.
+  - Thùng rác do Lustra quản lý, không phải thùng rác của hệ điều hành. File chỉ được đổi tên thành `<id dòng>_<tên>`, không bao giờ chép sang ổ khác: vào `<data dir>/trash/` nếu cùng ổ với file; nếu không, vào `.lustra-trash` ở gốc thư mục tải (Cài đặt → Tải xuống mặc định → Thư mục) nếu file nằm trong đó, cùng ổ; nếu không nữa thì `.lustra-trash` cạnh file. Nhập thư viện bỏ qua thư mục ẩn nên không nhập lại file trong thùng rác.
+  - Trong index, dòng của file trong thùng rác giữ nguyên metadata: `path` là chỗ file đang nằm, `orig_path` là chỗ cũ, `trashed_at` là lúc xoá. File trong thùng rác không còn tính là đã tải (`-skip_known`, tìm ở trang Đã tải, số liệu, tag học từ file đã tải); tải lại post đó thì có một dòng mới. Dọn index bỏ cả dòng thùng rác có file đã bị xoá bằng tay.
+  - Tự dọn: Cài đặt → Index các lần tải → **Tự dọn thùng rác sau** 7 / 14 / 30 (mặc định) / 60 / 90 ngày hoặc Không tự xoá (`settings.library.trashDays`, 0 = không tự xoá). App xoá file quá hạn 60 giây sau khi lõi sẵn sàng, sau đó tối đa 12 giờ một lần, và ngay khi số ngày được giảm. File cài đặt bị hỏng, hoặc số ngày trong đó không hợp lệ (sửa tay): app chuyển sang Không tự xoá và báo, chứ không dùng mặc định 30 ngày, cho tới khi người dùng chọn lại. CLI:
+    ```bash
+    .venv/bin/python -m lustra.dlindex_tools trash list
+    .venv/bin/python -m lustra.dlindex_tools trash purge --days 30
+    ```
+    `--days 0` hoặc `--all`: xoá mọi file trong thùng rác; `--json`. Exit code `3` khi có file không xoá được (đang mở). Sidecar: `index.trash`, `index.restore`, `index.purgeTrash`, `index.forget` (app chỉ gọi từ tiến trình chính, renderer không gọi trực tiếp được), `index.search` với `"trash": true`.
+  - Schema index lên 3 (thêm cột `trashed_at`, `orig_path`, `moving_to`): index cũ được nâng cấp tại chỗ ở lần mở đầu tiên, dòng cũ giữ nguyên. Bản app cũ vẫn đọc được index mới, nhưng hiện file trong thùng rác như file thường.
+  - Mỗi lượt chuyển (tối đa 200 file) ghi chỗ đến của từng file vào `moving_to` trước khi đổi tên, rồi đổi tên và cập nhật dòng trong cùng một giao dịch giữ khoá ghi (dọn, quên dòng, lượt chuyển khác chờ tới khi xong). App tắt hay lõi bị dừng giữa chừng: lần sau mở trang Đã tải (hoặc xoá, khôi phục, dọn thùng rác), dòng đi theo file đã tới chỗ mới, file chưa đi thì giữ nguyên.
+  - Thư mục thùng rác không truy cập được (ổ ngoài đã rút, ổ mạng chưa gắn): dọn thùng rác không bỏ dòng của các file trong đó (báo "không xoá được"), cắm lại thì lần dọn sau xoá như thường; "Xoá khỏi thư viện" cũng không bỏ các dòng đó.
 - **Tải nhiều site**: Tìm kiếm → Bộ lọc & tuỳ chọn tải → **Tải thêm từ site khác**, chọn thêm site rồi bấm **Tải xuống (N site)**. Mỗi site một job, chạy lần lượt, luôn bỏ qua file đã tải và đặt tiền tố module cho tên file; post trùng md5 với file site trước đã tải thì không tải lại. Thử truy vấn trên từng site bằng Preview trước: tên tag, metatag và alias khác nhau giữa các site.
 
 ## 3c. Model nhận diện giới tính (`-gender_mode model`)
@@ -247,7 +262,7 @@ Server nạp model khi có ảnh đầu tiên (hoặc khi app bật model, `--pr
   - Đo trên máy dev: model trên GPU (RTX 4070 Ti SUPER, CUDA), mỗi video 4–5 s (512 px / 640 px) qua HTTP ~0,5 s (phần lớn là 8 lần chạy ffmpeg), GIF 10 khung ~0,12 s; image Docker (CPU) 2,7–4,2 s mỗi file. File tối đa 200 MB; ffmpeg mỗi lần tối đa 30 s, cả file tối đa 120 s. Image Docker có ffmpeg: ~1,05 GB trên đĩa (trước đó ~420 MB), vì gói `ffmpeg` của Debian kéo theo nhiều thư viện codec.
   - Kiểm tra tay: `python -m lustra.media_frames clip.mp4 anim.gif` (khung nào được lấy, bộ giải mã; không cần model), `LUSTRA_GENDER_MODEL_URL=http://127.0.0.1:8765 python -m lustra.gender_model classify clip.mp4` (nhãn, bằng chứng, số khung).
 - Công cụ: `python -m lustra.gender_model status` (có `LUSTRA_GENDER_MODEL_URL` thì kiểm server), `install`, `remove`, `classify ảnh.jpg …` (in nhãn, độ tin cậy, bằng chứng, safety tag; video / ảnh động thì xét trên nhiều khung; qua server nếu có biến địa chỉ).
-- Kết quả theo post nằm ở `<data>/cache/gender_model.sqlite` của client; xoá file này để model xem lại.
+- Kết quả theo post nằm ở `<data>/cache/gender_model.sqlite` của client; xoá file này để model xem lại. Đổi bộ luật `lustra/gender_rules/db.json` (hoặc `CLASSIFY_VERSION`) thì kết quả cũ tự bị bỏ qua.
 
 ## 3d. Catalog extension từ xa: ký số
 App và CLI chỉ tin catalog từ xa (`Settings → Advanced → Catalog URL`, `LUSTRA_CATALOG_URL`) khi `index.json` có file chữ ký `index.json.sig` cạnh nó, ký bằng Ed25519 với khoá có trong `lustra/safety_data/catalog_keys.json`. Lõi kiểm chữ ký trên đúng các byte của `index.json` trước khi đọc bất kỳ mục nào; mỗi mục ghi sha256 của archive nên chữ ký phủ luôn các archive. Kiểm bằng `lustra/ed25519.py` (Python thuần theo RFC 8032, có test vector), không cần thư viện thêm.
@@ -273,7 +288,7 @@ gh release upload catalog /tmp/lustra-catalog/* --repo Leiz-Workspace/Lustra --c
 ```
 Extension không đổi giữ nguyên sha256, vì zip tất định. Zip của bản cũ có thể giữ lại trong release cho tới khi người dùng đã cập nhật.
 
-`--lists`: thư mục chứa danh sách tag mà manifest khai báo (`"tagList": "<abbr>_tags.json"`). Danh sách không nằm trong repo: có thể để ngay cạnh `manifest.json` trên máy người bảo trì (`.gitignore` bỏ qua `extensions/*/*_tags.json`, `build_catalog.py` lấy file ở đó trước) hoặc trong thư mục `--lists`; mỗi file được gói vào zip của extension của nó, nên extension có danh sách ngay khi cài. Tạo danh sách bằng `lustra-core tags --modules <abbr> --out ~/lustra-tag-lists`, hoặc lấy lại từ zip của catalog đang phát hành (`unzip -j <zip> '<abbr>_tags.json' -d ~/lustra-tag-lists`). Extension thiếu danh sách vẫn được build, kèm một dòng báo; zip vượt giới hạn của trình cài bị từ chối. Xem plan [ext-tag-jobs](plans/ext-tag-jobs.md).
+`--lists`: thư mục chứa danh sách tag mà manifest khai báo (`"tagList": "<abbr>_tags.json"`). Danh sách không nằm trong repo: có thể để ngay cạnh `manifest.json` trên máy người bảo trì (`.gitignore` bỏ qua `extensions/*/*_tags.json`, `build_catalog.py` lấy file ở đó trước) hoặc trong thư mục `--lists`; mỗi file được gói vào zip của extension của nó, nên extension có danh sách ngay khi cài. Tạo danh sách bằng `lustra-core tags --modules <abbr> --out ~/lustra-tag-lists`, hoặc lấy lại từ zip của catalog đang phát hành (`unzip -j <zip> '<abbr>_tags.json' -d ~/lustra-tag-lists`). Extension không có nguồn tag (không `tagUpdate`, không phải module đã duyệt, không engine có API danh sách: hiện là rn, rp, rs) không có danh sách ở hai chỗ trên thì lấy `2tags/<abbr>_tags.json` của repo, giống catalog đi kèm lõi; thiếu cả ở đó thì build dừng (cập nhật từ catalog sẽ làm module mất danh sách). Extension khác thiếu danh sách vẫn được build, kèm một dòng báo; zip vượt giới hạn của trình cài bị từ chối. Xem plan [ext-tag-jobs](plans/ext-tag-jobs.md).
 
 Mỗi lần sửa catalog:
 ```bash
@@ -374,7 +389,7 @@ LUSTRA_DATA_DIR=$(mktemp -d) .venv/bin/python -W ignore -m unittest lustra.tests
 ## 5. Build
 - CLI exe: `python lustra/release` (PyInstaller, đã kèm manifest builtin và hidden-import `download_rx`/`download_db`, icon `images/lustra.ico`: icon mặt nạ cam của app ở 16–256 px). Thư mục `extensions/` cần được đặt cạnh file exe để làm catalog.
 - App desktop:
-  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag; dùng `--tags all` hoặc `--tags rx,db` để kèm. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli`, `index` (nhập thư viện chạy thử), `aigen`, danh sách chặn tên miền (phiên `https://www.youtube.com/` bị từ chối R7) và các file `lustra/safety_data`. Đo ngày 2026-11-17 (có `lustra.sdk`, `lustra.trust`, danh sách chặn): 51,4 MiB khi kèm `anthropic`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
+  1. Build lõi Python đóng băng: `python -m pip install -r requirements.txt 'pyinstaller>=6.21' 'anthropic>=2.9' && python tools/build_core.py` → `app/build/core/lustra-core/`, khoảng 40 MB (khoảng 51 MB khi kèm `anthropic`; bỏ gói này thì bản build chỉ có chế độ "Không dùng AI"). Mặc định không kèm danh sách tag trong `2tags/` của lõi; dùng `--tags all` hoặc `--tags rx,db` để kèm. Riêng catalog extension đi kèm thì extension nào có `tagList` mà không có nguồn cập nhật (không `tagUpdate`, không phải module đã duyệt, không engine có API danh sách: hiện là rn, rp, rs) được chép danh sách `2tags/` cạnh manifest (thêm khoảng 26 MB); danh sách mà người bảo trì để cạnh manifest trong `extensions/` không được chép vào lõi. Smoke test kiểm `server`, client model server (`gender.modelStatus`), `cli`, `index` (nhập thư viện chạy thử), `aigen`, danh sách chặn tên miền (phiên `https://www.youtube.com/` bị từ chối R7) và các file `lustra/safety_data`. Đo ngày 2026-11-17 (có `lustra.sdk`, `lustra.trust`, danh sách chặn): 51,4 MiB khi kèm `anthropic`. numpy, onnxruntime, Pillow luôn bị loại khỏi bản build kể cả khi môi trường build có (model chạy ở model server, mục 3c): đo được 51,4 MiB khi kèm `anthropic`; trước đó kèm onnxruntime thì thêm ~110 MB.
   2. Build app: `cd app && npm ci && npm run dist` (Linux AppImage; Windows nsis/zip; macOS dmg/zip), hoặc `npm run dist:dir` để chỉ tạo thư mục chưa nén.
   3. Model server chạy độc lập (tuỳ chọn, phát hành riêng với app): `python tools/build_model_server.py`, xem mục 3c.
 - **Release** (`.github/workflows/release.yml`, cùng cách làm với Mirrix). Tên file: `<app>-<os>-<arch>_v<version>.<ext>`.
