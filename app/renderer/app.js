@@ -2525,9 +2525,10 @@ async function refreshTagStatus() {
           : h('button', { class: 'btn sm', title: src.onDemand ? ON_DEMAND_NOTE : '', onclick: update(false) }, 'Cập nhật');
       }
       const written = r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : '';
-      // bundled: the file's time is when this machine wrote it (the install), the data's own date is not known
+      // bundled: the file keeps the time it had where the extension was built (a catalog install copies it with its time),
+      // so neither that time nor the install time says how old the data is: show the extension version only
       const [updText, updTitle] = run ? [tagRunningText(run.count), run.message || '']
-        : bundled ? [`theo extension${ver ? ` v${ver}` : ''}`, `File được ghi trên máy này lúc ${written} (khi cài hoặc cập nhật extension). Ngày của dữ liệu không rõ.`]
+        : bundled ? [`theo extension${ver ? ` v${ver}` : ''}`, 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.']
           : written ? [written, '']
             : !src && !r ? ['chưa học tag nào', NOT_LEARNED_TITLE] : ['chưa có', ''];
       const added = bundled && r.added ? h('span', { class: 'muted tag-added', title: 'Tag học từ post đã xem / đã tải mà danh sách đi kèm chưa có' },
