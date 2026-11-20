@@ -99,6 +99,12 @@
     // a site without a tag listing: its list is learned from the posts previewed and downloaded (tags.learn, learned: true)
     { id: 'htmlsite', name: 'Htmlsite', abbr: 'hs', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image'], site: 'https://htmlsite.example/',
       description: 'Htmlsite: custom HTML', auth: {}, syntax: { maxTags: 0 }, generator: { tool: 'lustra.aigen', engine: 'custom', createdAt: '2026-11-18T09:00:00Z' } },
+    // ships its list but has no tag source (tags.status bundled): learned tags go on top of it
+    { id: 'videosite', name: 'Videosite', abbr: 'vb', version: '1.0.2', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://videosite.example/',
+      description: 'Videosite: custom HTML', auth: {}, syntax: { maxTags: 0 }, tagList: 'vb_tags.json' },
+    // learn-only, nothing learned yet (no row in tags.status)
+    { id: 'clipsite', name: 'Clipsite', abbr: 'cv', version: '1.0.0', source: 'user', default: false, installed: true, media: ['video'], site: 'https://clipsite.example/',
+      description: 'Clipsite: custom HTML, robots.txt forbids its tag API', auth: {}, syntax: { maxTags: 0 } },
   ];
   const PAGE_MAX = { db: 200, rx: 1000 };
   const TAGS = [
@@ -269,8 +275,11 @@
           { module: 'tb', name: 'TBIB', engine: 'extension_job', site: 'https://tbib.org/', key: 'none', keyFormat: '', robots: true, curated: false, tailUpdates: false, onDemand: true, job: 'tags.py:read_tags', description: "the extension's own update (tags.py:read_tags), run only when asked" },
         ].map((s) => ({ ...s, running: mockTagRuns.has(s.module), count: mockTagRuns.get(s.module)?.count || 0, message: mockTagRuns.get(s.module)?.message || '' }));
       }
-      if (method === 'tags.learn') return { module: p.module, learned: true, posts: 132, tags: 845, newPosts: 12, mayLearn: true, sourceList: false, indexed: true };
-      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9 }];
+      if (method === 'tags.learn') {
+        return { module: p.module, learned: p.module !== 'vb', posts: 132, tags: 845, newPosts: 12, mayLearn: true, sourceList: false, indexed: true,
+          bundled: p.module === 'vb', added: p.module === 'vb' ? 37 : 0 };
+      }
+      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9 }, { module: 'vb', path: '~/.config/Lustra/extensions/videosite/vb_tags.json', size: 18.9e6, mtime: Date.now() / 1000 - 7200, learned: false, bundled: true, version: '1.0.2', added: 37 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;
@@ -338,7 +347,9 @@
             genderStats[label] = (genderStats[label] || 0) + 1;
             if (!sel.includes(label)) excludedBy.push('gender');
           }
-          return { id: String(id), preview: thumb(id), sample: thumb(id), isVideo: i % 9 === 4, mediaKind: i % 9 === 4 ? 'video' : i % 13 === 7 ? 'audio' : 'image', downloaded: i % 5 === 1 ? 'id' : undefined, ext: i % 9 === 4 ? 'mp4' : i % 13 === 7 ? 'mp3' : 'jpg', score: String((id % 97)),
+          // a few posts without a preview address, or whose preview does not load (the card shows its placeholder)
+          const preview = i % 11 === 3 ? '' : i % 17 === 5 ? 'data:image/png;base64,AAAA' : thumb(id);
+          return { id: String(id), preview, sample: preview, isVideo: i % 9 === 4, mediaKind: i % 9 === 4 ? 'video' : i % 13 === 7 ? 'audio' : 'image', downloaded: i % 5 === 1 ? 'id' : undefined, ext: i % 9 === 4 ? 'mp4' : i % 13 === 7 ? 'mp3' : 'jpg', score: String((id % 97)),
             width: '1920', height: '1080', date: '16-11-2026', rating: 'g', tags, gender, excludedBy, excluded: excludedBy.length > 0 };
         });
         return { page, pageSize, hasMore: page < pages - 1, items, tasks, requiredTags: required, site: 'https://example.invalid/',

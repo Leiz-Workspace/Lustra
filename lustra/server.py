@@ -34,7 +34,7 @@ sys.stdout = sys.stderr
 
 from . import tags_learned  # noqa: E402
 from .defines import DATE_MIN_DEFAULT, ModuleCaps, ThreadInterruptException  # noqa: E402
-from .extensions import ENV_CATALOG_AUTOLOAD, Extensions, data_dir  # noqa: E402
+from .extensions import ENV_CATALOG_AUTOLOAD, SOURCE_USER, Extensions, data_dir  # noqa: E402
 from .gender import decide, infer_from_tags, rules_for_module  # noqa: E402
 from .help import APP_ADDRESS  # noqa: E402
 from .logger import Logger  # noqa: E402
@@ -206,13 +206,25 @@ def m_ext_install(p: dict) -> dict:
     else:
         raise RpcError(-32602, 'id, remoteId, url, archivePath or path required')
     TagsDB.locate_default_lists(reload=(m.abbr,))  # a tag list shipped in the extension (the generator's drafts) is used at once
+    _refresh_learned(m.abbr)
     return {**m.to_public_dict(), 'restartRequired': Extensions.restart_required(m)}
 
 
 def m_ext_uninstall(p: dict) -> dict:
+    abbr = next((m.abbr for m in Extensions._scan(Extensions.user_dir(), SOURCE_USER) if m.id == p.get('id')), '')
     Extensions.uninstall(p['id'])
     TagsDB.locate_default_lists()  # its shipped tag list is gone with its folder
+    _refresh_learned(abbr)
     return {'ok': True}
+
+
+def _refresh_learned(module: str) -> None:
+    """The bundled list the learning adds to came, changed or went with the extension: the learned list is written again for it"""
+    try:
+        if module:
+            tags_learned.refresh(module)
+    except Exception as err:
+        Logger.log(f'Warning: learned tag list of {module} not refreshed: {err}', False, False)
 
 
 def m_ext_remote_catalog(p: dict) -> list[dict]:
@@ -291,26 +303,35 @@ def m_tags_fuzzy(p: dict) -> list[dict]:
 
 
 def m_tags_status(_: dict) -> list[dict]:
-    """learned: the list is learned from the posts seen here (lustra/tags_learned.py), its counts are not the site's"""
+    """learned: the list is learned from the posts seen here (lustra/tags_learned.py), its counts are not the site's.
+    bundled: the list ships inside an installed extension that has no tag source (version: that extension's), it is not updated and
+    the learning adds the tags it lacks (added: how many are served on top of it)"""
     rows = []
     for module, path in sorted(TagsDB.files().items()):
         st = path.stat() if path.is_file() else None
+        bundled = TagsDB.bundled(module)
+        on_base = bundled is not None and bundled.path == path
         rows.append({'module': module, 'path': path.as_posix(), 'size': st.st_size if st else 0, 'mtime': st.st_mtime if st else 0,
-                     'loaded': TagsDB.is_loaded(module), 'learned': tags_learned.is_learned(module, path)})
+                     'loaded': TagsDB.is_loaded(module), 'learned': tags_learned.is_learned(module, path), 'bundled': on_base,
+                     'version': bundled.version if on_base else '',
+                     'added': tags_learned.added_count(module) if on_base and TagsDB.get_additions(module) else 0})
     return rows
 
 
 def m_tags_learn(p: dict) -> dict:
     """Learns a module's tag list from its downloaded files (download index) when it has no list from a source; the app calls it
     after each download job. No request is made. -> {module, learned, posts, tags (status), newPosts, mayLearn (False: nothing is
-    learned, the module has a list from a source, see sourceList), sourceList, indexed (the download index holds posts of the module)}"""
+    learned, the module has a list from a source, see sourceList), sourceList, indexed (the download index holds posts of the module),
+    bundled (the learning adds to a list shipped inside the extension), added (learned tags that list lacks)}"""
     module = str(p.get('module', ''))
     if not re_abbr.fullmatch(module):
         raise RpcError(-32602, f'invalid module \'{module}\'')
     may = tags_learned.may_learn(module)
     new = tags_learned.learn_from_index(module) if may else 0
+    bundled = tags_learned.base_list(module) is not None
     return {'module': module, **tags_learned.status(module), 'newPosts': new, 'mayLearn': may,
-            'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module)}
+            'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module), 'bundled': bundled,
+            'added': tags_learned.added_count(module) if bundled else 0}
 
 
 def _learn_from_preview(module: str, items: list[dict]) -> None:

@@ -2869,6 +2869,33 @@ async function selfTestContract(js, quick) {
     jobs.pump = realPump;
   }
   out.selectedDownload = await selfTestSelectedDownload(js);
+  // posts without a preview address, or whose preview does not load (here a loopback address, refused by lustra-thumb without
+  // a request): a placeholder tile instead of the broken image icon, and the card still selects
+  try {
+    out.thumbPlaceholder = await js(`(async () => {
+      const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelector('[data-page="search"]').click();
+      Object.assign(S.preview, { module: 'db', tags: 'selftest_thumbs', site: '', page: 0, hasMore: false, dateFilter: 'native',
+        items: [{ id: '1', excludedBy: [] }, { id: '2', isVideo: true, mediaKind: 'video', excludedBy: [] },
+          { id: '3', preview: 'http://127.0.0.1:9/x.jpg', excludedBy: [] }] });
+      S.preview.key = previewKey();
+      S.preview.selected.clear();
+      renderGrid();
+      for (let i = 0; i < 50 && document.querySelectorAll('#grid .thumb-ph').length < 3; i++) await pause(100);
+      const tiles = [...document.querySelectorAll('#grid .thumb-ph')].map((e) => e.dataset.kind + ':' + e.textContent);
+      const first = document.querySelector('#grid .card');
+      first.click();
+      const r = { tiles, selected: S.preview.selected.has('1') && first.classList.contains('sel'), images: document.querySelectorAll('#grid img').length };
+      S.preview.selected.clear();
+      clearPreview();
+      return r;
+    })()`);
+    out.thumbPlaceholder.ok = out.thumbPlaceholder.tiles.join('|')
+      === 'image:không có ảnh xem trước|video:không có ảnh xem trước|image:không tải được ảnh xem trước'
+      && out.thumbPlaceholder.selected === true && out.thumbPlaceholder.images === 0;
+  } catch (e) {
+    out.thumbPlaceholder = { ok: false, error: String(e.message || e) };
+  }
   // a core that exits during a tag update never sends tags.updateDone: once it is back, the Tags A-Z row is usable again
   try {
     out.tagRestart = await js(`(async () => {

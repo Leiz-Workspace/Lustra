@@ -81,7 +81,10 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Nguồn: tag của các post hiện trong Preview (`search.preview`) và của các file đã tải (index các lần tải; app gọi `tags.learn` sau mỗi lượt tải xong, hoặc nút "Học từ file đã tải" ở Tags A–Z).
   - Mỗi post chỉ đếm một lần. File ghi dạng `"tag": "N posts (unknown)"`, với N là số post đã thấy ở đây, không phải số trên site; loại tag không biết.
   - Trạng thái ở `<thư mục dữ liệu>/tags/learned/<abbr>.sqlite`.
-  - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó. Danh sách thật được dùng kể cả khi file của nó cũ hơn danh sách đã học.
+  - Chỉ học khi module chưa có danh sách nào từ nguồn. Khi updater, extension có nguồn tag hoặc `2tags/` cho module một danh sách thật, việc học dừng và không ghi đè danh sách đó. Danh sách thật được dùng kể cả khi file của nó cũ hơn danh sách đã học.
+  - Danh sách đi kèm extension không có nguồn tag (Rule34Hentai, Paheal, Rule34.us từ v1.0.2) không bao giờ được cập nhật, nên việc học vẫn chạy trên nó: `<thư mục dữ liệu>/tags/<abbr>_tags.json` chỉ giữ các tag học được mà danh sách đi kèm chưa có, autocomplete và Tags A–Z dùng danh sách đi kèm cộng các tag đó (số post của danh sách đi kèm giữ nguyên).
+    - Danh sách đi kèm không bị ghi lại hay đọc lại sau mỗi Preview (Rule34.us: 18,9 MB, khoảng 544 nghìn tag): chỉ tag của các post mới được tra trong nó, và chỉ file nhỏ của phần học thêm được ghi lại.
+    - Cập nhật extension: tag mà danh sách mới đã có bị bỏ khỏi phần học thêm. Gỡ extension: danh sách học được (đủ mọi tag đã học) lại là danh sách của module.
 
 **Lịch sự** (mọi nguồn):
 - **Nhịp request:** khoảng cách giữa hai request là `--delay` (mặc định 0,5 giây). Bộ cập nhật dùng giá trị lớn nhất trong các mức sau, tối đa 60 giây:
@@ -132,7 +135,8 @@ Exit code của CLI: `0` thành công, `1` lỗi, `2` sai tham số, `3` một s
   - Module có nguồn: có nút "Cập nhật". Với extension có job riêng, nút này là cách duy nhất để chạy job.
   - Khi đang cập nhật (bấm ở đây, tự cập nhật khi mở app, hoặc extension vừa cài), dòng đó ghi "đang cập nhật… N tag" (khoảng 2 giây cập nhật một lần) và nút thành "Đang cập nhật…" (tắt) tới khi xong, kể cả khi chuyển trang hay tải lại cửa sổ: bảng hỏi lõi (`tags.sources`, `running`).
   - Module bắt buộc khoá mà chưa có khoá: ghi "cần API key" (nhập ở Cài đặt → API key).
-  - Module không có nguồn: cột "Nguồn" ghi "học từ post đã xem / đã tải", có nút "Học từ file đã tải"; cột dung lượng ghi "(đã học)" khi danh sách là danh sách học được. Module không có nguồn nhưng có danh sách đi kèm (ví dụ `2tags/` của repo) ghi "không có nguồn".
+  - Module không có nguồn: cột "Nguồn" ghi "học từ post đã xem / đã tải", có nút "Học từ file đã tải"; cột dung lượng ghi "(đã học)" khi danh sách là danh sách học được. Chưa học được tag nào (ví dụ Rule34Video: robots.txt cấm API tag của site) thì cột "Cập nhật" ghi "chưa học tag nào": xem Preview hoặc tải vài post của site để Lustra học.
+  - Module có danh sách đi kèm extension nhưng không có nguồn (Rule34Hentai, Paheal, Rule34.us): cột "Nguồn" ghi "đi kèm extension", cột "Cập nhật" ghi "theo extension v<phiên bản>" (giờ của file là lúc nó được ghi trên máy khi cài, không phải ngày của dữ liệu), cột "File" thêm "+N tag học thêm" khi đã học được tag mà danh sách chưa có; có nút "Học từ file đã tải". Module không có nguồn mà danh sách nằm ở chỗ khác (ví dụ `2tags/` của repo khi chạy từ mã nguồn) ghi "không có nguồn".
     - Nút "Học từ file đã tải" báo rõ lý do khi không học thêm được: index chưa có post nào của site ("Chưa có post nào của … trong index: tải vài post (hoặc xem Preview) để Lustra học tag"), module đã có danh sách từ nguồn (không cần học), hoặc không có post đã tải mới.
     - Rule34Hentai, Paheal, Rule34.us: catalog đi kèm app có sẵn danh sách của chúng (từ v1.0.2). Bản 1.0.1 đã cài thấy "có bản v1.0.2" ở trang Extensions; cập nhật là có danh sách.
   - Cài một extension: nếu chưa có danh sách đi kèm mà extension có nguồn, app bắt đầu tải ngay. Extension có job riêng thì không: job chỉ chạy khi bấm nút.
