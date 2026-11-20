@@ -446,6 +446,56 @@ class BuildCatalogTests(TestCase):
         manifest = json.loads((ROOT / 'extensions' / 'bbooru' / 'manifest.json').read_text(encoding='utf-8'))
         self.assertIsNone(self.tool.tag_list_source(ROOT / 'extensions' / 'bbooru', manifest, None), 'bbooru reads its list from its source')
 
+    def test_a_merge_source_takes_the_repository_list_and_needs_one(self) -> None:
+        # Paheal 1.0.3 updates its list with its own update, which reads only the tags with 100+ posts and merges them into the list
+        # in use (tagUpdate.merge): its zip still carries the 2tags/ list (as 1.0.2 did), the base of every merge; without it
+        # anywhere, or with a list its update wrote alone, there is no catalog
+        exts = self.root / 'ext'
+        shutil.copytree(ROOT / 'extensions' / 'paheal', exts / 'paheal', ignore=shutil.ignore_patterns('__pycache__', '*_tags.json'))
+        manifest = json.loads((exts / 'paheal' / 'manifest.json').read_text(encoding='utf-8'))
+        src = self.tool.tag_source(exts / 'paheal')
+        self.assertEqual((True, 100), (src.merge, src.merge_min_posts))
+        self.assertTrue(self.tool.needs_shipped_list(src))
+        tags = self.root / '2tags'
+        tags.mkdir()
+        (tags / 'rp_tags.json').write_text('{\n"blue_sky": "120 posts",\n"red_sky": "12 posts"\n}\n', encoding='utf-8')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            index = self.tool.build(exts, self.root / 'a', self.tool.OFFICIAL_BASE_URL, None, tags)
+        entry = index['extensions'][0]
+        self.assertEqual(('paheal', '1.0.3'), (entry['id'], entry['version']))
+        self.assertEqual({'id', 'name', 'abbr', 'version', 'url', 'sha256', 'site', 'description'}, set(entry))  # no manifest field
+        with zipfile.ZipFile(self.root / 'a' / f"paheal-{manifest['version']}.zip") as zf:
+            self.assertEqual((tags / 'rp_tags.json').read_bytes(), zf.read('rp_tags.json'))
+            self.assertIn('tags.py', zf.namelist())
+        # cores before 2.0.10 refuse the manifest: the build says so (publish once 2.0.10 is out, docs/operations.md 3d)
+        self.assertIn('paheal 1.0.3: tagUpdate.merge (Lustra 2.0.10): older cores refuse to install it', err.getvalue())
+        lists = self.root / 'lists'  # a list its own update wrote alone (the tags with 100+ posts): refused
+        lists.mkdir()
+        (lists / 'rp_tags.json').write_text('{\n"blue_sky": "130 posts (unknown)"\n}\n', encoding='utf-8')
+        (tags / 'rp_tags.json').write_text('{\n"a": "1 posts",\n"b": "2 posts",\n"blue_sky": "120 posts"\n}\n', encoding='utf-8')
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+            self.tool.build(exts, self.root / 'b', self.tool.OFFICIAL_BASE_URL, lists, tags)
+        self.assertIn('has 1 tags, under half of', str(ctx.exception))
+        (lists / 'rp_tags.json').write_text('{\n"a": "1 posts",\n"blue_sky": "130 posts (unknown)"\n}\n', encoding='utf-8')
+        self.assertEqual(lists / 'rp_tags.json', self.tool.tag_list_source(exts / 'paheal', manifest, lists, tags))  # merged: taken
+        (tags / 'rp_tags.json').unlink()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+            self.tool.build(exts, self.root / 'c', self.tool.OFFICIAL_BASE_URL, None, tags)
+        self.assertIn('paheal: no rp_tags.json', str(ctx.exception))
+        self.assertIn('its own update reads only the tags with 100+ posts and merges them into this list', str(ctx.exception))
+
+    def test_a_replace_job_never_takes_the_repository_list(self) -> None:
+        # an extension whose own update reads the whole list (TBIB) is built without a list when none is given: the user makes it
+        # with "Cập nhật", the core stays small; a list in 2tags/ is not taken for it
+        tags = self.root / '2tags'
+        tags.mkdir()
+        (tags / 'tb_tags.json').write_text('{"blue_sky": "12 posts (general)"}\n', encoding='utf-8')
+        manifest = json.loads((ROOT / 'extensions' / 'tbib' / 'manifest.json').read_text(encoding='utf-8'))
+        self.assertFalse(self.tool.tag_source(ROOT / 'extensions' / 'tbib').merge)
+        self.assertIsNone(self.tool.tag_list_source(ROOT / 'extensions' / 'tbib', manifest, None, tags))
+        self.assertEqual([], self.tool.newer_core_keys(manifest))  # tagUpdate.entry: every core since 2.0.7 knows it
+
     def test_repository_extensions_carry_no_tag_list(self) -> None:
         # a list is data, not code: it goes into the catalog zips (tools/build_catalog.py), not into the repository, which the app
         # also bundles (tools/build_core.py copies extensions/ into the frozen core). Committed files only: a maintainer keeps the

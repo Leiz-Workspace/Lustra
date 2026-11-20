@@ -1831,7 +1831,8 @@ async function fetchNewTagList(abbr) {
 
 function learnTagList(module) {
   // after a download job: the module's downloaded posts teach its list when it has none from a source (no request). written: the
-  // list served for it changed, also the tags learned on top of a bundled list (rn, rp, rs: 'learned' stays false for those)
+  // list served for it changed, also the tags learned on top of a list (rn, rs; rp, whose own update merges: 'learned' stays false
+  // for those)
   return sidecar.call('tags.learn', { module }, 60000).then((r) => {
     if (r?.written) send('sidecar:notify', { method: 'tags.learned', params: r });
   }).catch(() => { /* sidecar not running: the next job or preview learns it */ });
@@ -2927,7 +2928,8 @@ async function selfTestContract(js, quick) {
 }
 
 async function selfTestTagLearned(js) {
-  // after a download job, tags learned on top of a bundled list (rn, rp, rs: tags.learn says learned: false) reach the window
+  // after a download job, tags learned on top of a list (rn, rs; rp, whose own update merges: tags.learn says learned: false) reach
+  // the window
   // (tags.learned), and only when the list changed (written). The chip shown keeps its hints while it is asked again (no blink),
   // the module's other cached answers are dropped. tags.learn is faked here; tags.resolve is the real core's
   const out = {};

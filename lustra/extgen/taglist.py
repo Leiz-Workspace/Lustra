@@ -51,7 +51,8 @@ def bundle_tag_list(draft: pathlib.Path, *, session=None, allow_local=False, min
     """Reads the site's tag list into the draft. session / allow_local: the generator's transport (tests: a fake site).
     -> {status: bundled | later | learned | failed, file, count, requests, message}:
     bundled: '<abbr>_tags.json' is in the draft; later: the app reads it after the install (too big, needs the user's key, the site
-    asked to wait); learned: no tag listing, or robots.txt disallows it; failed: the site did not answer (the app tries again)"""
+    asked to wait); learned: no tag listing, or robots.txt disallows it; failed: the site did not answer (the app tries again), or
+    the extension's own update merges (tagUpdate.merge) and the draft has no list for it to go into (the app can never make one)"""
     draft = pathlib.Path(draft)
     m = ExtensionManifest.load(draft / 'manifest.json', 'user')
     src = source_for_manifest(m, jobs=False)  # a draft's own code runs only in the sandbox, never here
@@ -61,6 +62,11 @@ def bundle_tag_list(draft: pathlib.Path, *, session=None, allow_local=False, min
         if (path := draft / m.tagList).is_file():
             count = sum(1 for line in path.read_text(encoding='utf-8').splitlines() if line.strip() not in ('', '{', '}'))
             return {'status': 'bundled', 'file': m.tagList, 'count': count, 'requests': 0, 'message': f'{count:d} tags, the extension\'s own list'}
+        if isinstance(merge := m.tagUpdate.get('merge'), dict):  # it reads only the most used tags: never a whole list
+            return {'status': 'failed', 'file': '', 'count': 0, 'requests': 0,
+                    'message': f'{job} reads only the tags with {merge.get("minPosts")}+ posts and merges them into the list the '
+                               f'extension ships (tagUpdate.merge): put {m.tagList} next to manifest.json, or remove \'merge\' if the '
+                               f'job reads the whole list'}
         return {'status': 'later', 'file': '', 'count': 0, 'requests': 0,
                 'message': f'{job} is the extension\'s own update: the app runs it only when you ask (Tags A-Z, Cập nhật)'}
     if src is None or m.tagList != f'{m.abbr}_tags.json':

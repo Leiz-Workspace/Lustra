@@ -16,3 +16,6 @@
 # special files which must ignore whitespace
 *.patch         whitespace=-trailing-space eol=lf
 *.diff          whitespace=-trailing-space eol=lf
+
+# recorded pages of the tests: byte for byte on every system (their sha256 is checked), never CRLF on Windows
+lustra/tests/fixtures/** -text

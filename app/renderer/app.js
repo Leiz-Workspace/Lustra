@@ -2428,14 +2428,19 @@ const TAG_KEY_NOTE = { required: 'Cần API key của bạn', optional: 'Dùng A
 const LEARNED_TITLE = 'Site không có danh sách tag dùng được (không có API, hoặc robots.txt cấm): Lustra học dần từ tag của các post '
   + 'đã xem trong Preview và đã tải, không gửi thêm request. Số post là số post đã thấy ở đây, không phải số trên site.';
 const ON_DEMAND_NOTE = 'Job cập nhật của chính extension: chỉ chạy khi bạn bấm Cập nhật, không chạy theo lịch, khi mở app hay khi cài.';
-// a list shipped inside an extension that has no tag source (tags.status bundled: Rule34Hentai, Paheal, Rule34.us): the core adds
-// the tags learned from previewed / downloaded posts that it lacks (lustra/tags_learned.py)
+// tags.sources merge: the extension's own job reads only the tags with mergeMinPosts+ posts and the core merges them into the list in
+// use (Paheal from 1.0.3, manifest tagUpdate.merge)
+const mergeNote = (n) => `Job chỉ đọc các tag có từ ${nf.format(n)} post trở lên rồi gộp vào danh sách đang dùng: các tag đó lấy số post mới, `
+  + 'tag mới được thêm, mọi tag khác giữ nguyên.';
+// a list shipped inside an extension that has no tag source (tags.status bundled: Rule34Hentai, Rule34.us; Paheal until 1.0.2): the
+// core adds the tags learned from previewed / downloaded posts that it lacks (lustra/tags_learned.py)
 const bundledTitle = (v) => `Site không có nguồn danh sách tag mà Lustra đọc được. Danh sách này đi kèm extension${v ? ` v${v}` : ''} `
   + 'và không tự cập nhật. Tag mới được học thêm từ các post bạn xem trong Preview hoặc tải về (không gửi thêm request).';
 const NOT_LEARNED_TITLE = 'Lustra chưa thấy post nào của site này. Xem Preview hoặc tải vài post của site để Lustra học tag (không gửi thêm request).';
 const fmtListSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 function tagSourceTitle(src) {
-  const rule = `${src.onDemand ? `${ON_DEMAND_NOTE} ` : ''}${src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.'}`;
+  const rule = `${src.onDemand ? `${ON_DEMAND_NOTE} ` : ''}${src.merge ? `${mergeNote(src.mergeMinPosts)} ` : ''}`
+    + `${src.curated ? 'Module đã duyệt: API chính thức của site.' : 'Tuân thủ robots.txt của site.'}`;
   const key = TAG_KEY_NOTE[src.key] ? ` ${TAG_KEY_NOTE[src.key]} (${src.keyFormat}).` : '';
   return `${src.site} — ${src.description}. ${rule}${key}`;
 }
@@ -2483,7 +2488,10 @@ async function refreshTagStatus() {
       const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
       const run = src ? tagUpdates.get(m) : undefined;
       const bundled = !src && r?.bundled;
-      const ver = bundled ? r.version || version || '' : '';
+      // shipped: the list in use is still the one inside an extension that has a source (its own job, an engine of the generator),
+      // not updated here yet: the 'Cập nhật' button stays, the column gives the extension version like a bundled list
+      const shipped = bundled || (!!src && !!r?.shipped);
+      const ver = shipped ? r.version || version || '' : '';
       let action;
       if (run) action = tagRunningButton(run.message);
       else if (!src && r && !r.learned && !bundled) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
@@ -2522,17 +2530,31 @@ async function refreshTagStatus() {
           ? h('span', { class: 'row' },
             h('button', { class: 'btn sm', title: 'Chỉ đọc các trang cuối, nơi có tag mới và tag vừa đổi số post (vài phút). Cứ 30 ngày tự đọc lại toàn bộ một lần', onclick: update(false) }, 'Cập nhật'),
             h('button', { class: 'btn sm ghost', title: 'Đọc lại cả danh sách (Rule34: khoảng 1,5–2 giờ; đóng app giữa chừng thì lần sau đọc tiếp)', onclick: update(true) }, 'Đọc lại toàn bộ'))
-          : h('button', { class: 'btn sm', title: src.onDemand ? ON_DEMAND_NOTE : '', onclick: update(false) }, 'Cập nhật');
+          : h('button', { class: 'btn sm', title: [src.onDemand && ON_DEMAND_NOTE, src.merge && mergeNote(src.mergeMinPosts)].filter(Boolean).join(' '),
+            onclick: update(false) }, 'Cập nhật');
       }
       const written = r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : '';
-      // bundled: the file's time is the build's (installed from the catalog bundled in the app, copied with its time) or the
-      // install's (a zip, the remote catalog): neither says how old the data is, so the extension version only
+      // bundled / shipped: the file's time is the build's (installed from the catalog bundled in the app, copied with its time) or
+      // the install's (a zip, the remote catalog): neither says how old the data is, so the extension version only. After the
+      // first 'Cập nhật' the list in use is the one written here, and its time is the update's (a merge: of the tags it read only)
+      const shippedTitle = src?.merge
+        ? `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ` Bấm "Cập nhật" để lấy số post mới của các tag có từ ${nf.format(src.mergeMinPosts)} post và thêm tag mới; các tag khác giữ nguyên.`}`
+        : `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ' Bấm "Cập nhật" để đọc danh sách mới từ site.'}`;
+      // merged: the core says an update that merges wrote this list (a list of 2tags/, when the app runs from the source, is not one)
+      const writtenTitle = src?.merge && r?.merged
+        ? `Giờ của lần cập nhật gần nhất. Tag site liệt kê ở mức từ ${nf.format(src.mergeMinPosts)} post: số post của site lúc đó. Tag khác: số post của danh sách trước đó.`
+        : '';
       const [updText, updTitle] = run ? [tagRunningText(run.count), run.message || '']
-        : bundled ? [`theo extension${ver ? ` v${ver}` : ''}`, 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.']
-          : written ? [written, '']
+        : shipped ? [`theo extension${ver ? ` v${ver}` : ''}`, bundled
+          ? 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.'
+          : shippedTitle]
+          : written ? [written, writtenTitle]
             : !src && !r ? ['chưa học tag nào', NOT_LEARNED_TITLE] : ['chưa có', ''];
-      const added = bundled && r.added ? h('span', { class: 'muted tag-added', title: 'Tag học từ post đã xem / đã tải mà danh sách đi kèm chưa có' },
-        ` +${nf.format(r.added)} tag học thêm`) : null;
+      // added: learned tags served on top of the list (the core sets it only for a list the learning adds to: a bundled list, or
+      // the list of a merge source, shipped or merged)
+      const addedTitle = bundled ? 'Tag học từ post đã xem / đã tải mà danh sách đi kèm chưa có'
+        : 'Tag học từ post đã xem / đã tải mà danh sách chưa có (thường là tag ít post). Lần "Cập nhật" sau có tag nào thì tag đó lấy số post của site.';
+      const added = r?.added ? h('span', { class: 'muted tag-added', title: addedTitle }, ` +${nf.format(r.added)} tag học thêm`) : null;
       return h('tr', {},
         h('td', { title: name || m }, h('span', { class: 'mod-abbr' }, m)),
         h('td', { title: src ? tagSourceTitle(src) : bundled ? bundledTitle(ver) : (r && !r.learned ? '' : LEARNED_TITLE) },

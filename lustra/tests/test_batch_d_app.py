@@ -3,8 +3,9 @@
 Lustra: regression tests for audit batch D, desktop app side (docs/reports/audit-2026-11-16.md, D3 / D4), offline
 - frozen core entry (lustra/frozen_main.py): 'server' / 'cli' dispatch used by the packaged app
 - headers / cookies with '"' or '\\' as the app passes them ('-header name=value' / '-cookie name=value', see app/main.js connectionArgs)
-- tools/build_core.py data staging: everything the frozen core needs at run time; the catalog extensions without a tag source carry
-  their 2tags/ list, which an install from that catalog brings to the core
+- tools/build_core.py data staging: everything the frozen core needs at run time; the catalog extensions without a tag source, and
+  the one whose own update merges the most used tags into its list (Paheal 1.0.3), carry their 2tags/ list, which an install from
+  that catalog brings to the core; an install a core refuses keeps the version installed before
 - tools/check_selftest.py: a failed step names its false checks and shows each value on a line of its own
 Run: python -m unittest lustra.tests.test_batch_d_app
 """
@@ -12,7 +13,9 @@ Run: python -m unittest lustra.tests.test_batch_d_app
 #
 #
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -114,26 +117,76 @@ class BuildCoreTests(TestCase):
             data = dict((dest, src) for src, dest in bc._stage_data(pathlib.Path(tmp), 'none'))
             self.assertNotIn('2tags', data)
 
-    def test_catalog_extensions_without_a_tag_source_carry_their_list(self) -> None:
-        # Rule34Hentai, Paheal, Rule34.us read no list from their site (no tagUpdate, not reviewed, no engine): the bundled catalog
-        # holds their 2tags/ list next to the manifest. Bbooru, e621, Xbooru read theirs (the core stays small)
+    def test_catalog_extensions_that_need_their_shipped_list_carry_it(self) -> None:
+        # Rule34Hentai, Rule34.us read no list from their site (no tagUpdate, not reviewed, no engine), and Paheal's own update reads
+        # only the tags with 100+ posts and merges them into its list (tagUpdate.merge): the bundled catalog holds their 2tags/ list
+        # next to the manifest. Bbooru, e621, Xbooru read theirs; the extensions whose own update reads the whole list get none, even
+        # with a list of their module in 2tags/ (the core stays small)
         bc = _load_build_core()
         with tempfile.TemporaryDirectory() as tmp:
             catalog = bc._stage_catalog(pathlib.Path(tmp) / 'extensions')
             with_list = {p.parent.name: p.name for p in catalog.glob('*/*_tags.json')}
             self.assertEqual({'rule34hentai': 'rn_tags.json', 'paheal': 'rp_tags.json', 'rule34us': 'rs_tags.json'}, with_list)
+            versions = {'rule34hentai': '1.0.2', 'paheal': '1.0.3', 'rule34us': '1.0.2'}  # installs before are offered the update
             for ext_id, name in with_list.items():
                 self.assertEqual((ROOT / '2tags' / name).stat().st_size, (catalog / ext_id / name).stat().st_size)
                 manifest = json.loads((catalog / ext_id / 'manifest.json').read_text(encoding='utf-8'))
-                self.assertEqual((name, '1.0.2'), (manifest['tagList'], manifest['version']))  # 1.0.1 installs are offered the update
-            for ext_id in ('bbooru', 'e621', 'xbooru'):
+                self.assertEqual((name, versions[ext_id]), (manifest['tagList'], manifest['version']))
+            self.assertTrue((catalog / 'paheal' / 'tags.py').is_file())
+            for ext_id in ('bbooru', 'e621', 'xbooru', 'gelbooru', 'tbib'):
                 self.assertEqual([], list((catalog / ext_id).glob('*_tags.json')))
+            tags = pathlib.Path(tmp) / '2tags'  # a list of a replace job's module in 2tags/: never staged
+            tags.mkdir()
+            for name in ('tb_tags.json', 'gb_tags.json', 'rp_tags.json'):
+                (tags / name).write_text('{"blue_sky": "120 posts"}\n', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                other = bc._stage_catalog(pathlib.Path(tmp) / 'other', tags_dir=tags)
+            self.assertEqual({'paheal'}, {p.parent.name for p in other.glob('*/*_tags.json')})
             self._install_staged(catalog, pathlib.Path(tmp) / 'data')
 
-    def _install_staged(self, catalog: pathlib.Path, data_dir: pathlib.Path) -> None:
-        """An install (or an update of 1.0.1) from the staged catalog brings the list, the core uses it; the others fit the limits"""
-        from lustra import tagsdb
-        from lustra.denylist import denied_in_extension
+    def test_paheal_updates_to_its_merge_job_and_a_refused_install_keeps_1_0_2(self) -> None:
+        # the install is transactional: a core that refuses the 1.0.3 manifest ('merge' unknown: what Lustra 2.0.7 to 2.0.10-rc.109
+        # say, checked by hand with their code, docs/dev_log.md 7bd) keeps 1.0.2, its list and the learning on top of it. Here the
+        # new core with the older list of keys stands in for them
+        from lustra import modspec
+        from lustra.extensions import Extensions
+        from lustra.modspec import ManifestError
+        from lustra.tags_updater import tag_source
+        from lustra.tagsdb import TagsDB
+        bc = _load_build_core()
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = bc._stage_catalog(pathlib.Path(tmp) / 'extensions')
+            data_dir = pathlib.Path(tmp) / 'data'
+            self._keep_registry()
+            with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': data_dir.as_posix(), 'LUSTRA_CATALOG_DIR': catalog.as_posix()}):
+                os.environ.pop('LUSTRA_TAGS_DIR', None)  # restored by the patch
+                old = pathlib.Path(tmp) / 'old' / 'paheal'  # 1.0.2 as installed before: no tagUpdate, its list
+                shutil.copytree(catalog / 'paheal', old, ignore=shutil.ignore_patterns('tags.py'))
+                manifest = json.loads((old / 'manifest.json').read_text(encoding='utf-8'))
+                manifest.pop('tagUpdate')
+                (old / 'manifest.json').write_text(json.dumps({**manifest, 'version': '1.0.2'}), encoding='utf-8')
+                Extensions.install_from_dir(old)
+                installed = Extensions.user_dir() / 'paheal'
+                listed = (installed / 'rp_tags.json').read_bytes()
+                with mock.patch.object(modspec, 'TAG_UPDATE_KEYS', ('entry',)), \
+                        self.assertRaisesRegex(ManifestError, r'unknown tagUpdate field\(s\): merge'):
+                    Extensions.install_from_catalog('paheal')
+                self.assertEqual('1.0.2', json.loads((installed / 'manifest.json').read_text(encoding='utf-8'))['version'])
+                self.assertEqual(listed, (installed / 'rp_tags.json').read_bytes())
+                self.assertFalse((installed / 'tags.py').exists())
+                m = Extensions.install_from_catalog('paheal')  # "Cập nhật v1.0.2 → v1.0.3"
+                self.assertEqual(('rp', '1.0.3'), (m.abbr, m.version))
+                self.assertTrue(tag_source('rp').merge)
+                TagsDB.clear()
+                TagsDB.locate_default_lists(reload=('rp',))
+                self.assertEqual(installed / 'rp_tags.json', TagsDB.get_file('rp'))
+                from lustra import server
+                row = next(r for r in server.m_tags_status({}) if r['module'] == 'rp')
+                self.assertEqual((True, '1.0.3', False), (row['shipped'], row['version'], row['bundled']))
+                Extensions.uninstall('paheal')
+
+    def _keep_registry(self) -> None:
+        """The extension registry lives for the whole test process: put it back as it was after the test"""
         from lustra.downloaders import DOWNLOADERS_BY_PROC_MODULE
         from lustra.extensions import Extensions
         from lustra.module import ProcModule
@@ -149,10 +202,19 @@ class BuildCoreTests(TestCase):
             TagsDB.clear()
 
         self.addCleanup(restore)
-        # the registry lives for the whole test process: an earlier test may have loaded the catalog's 1.0.2 (test_tag_sources), and
-        # the 1.0.1 installed below would then not register (Extensions._register keeps a loaded id)
-        if (stale := Extensions.loaded.pop('rule34hentai', None)) is not None:
-            DOWNLOADERS_BY_PROC_MODULE.pop(ProcModule.PROC_MODULES_BY_NAME.get(stale.abbr, -1), None)
+        for ext_id in ('rule34hentai', 'paheal'):  # an earlier test may have loaded the catalog's version (Extensions._register keeps it)
+            if (stale := Extensions.loaded.pop(ext_id, None)) is not None:
+                DOWNLOADERS_BY_PROC_MODULE.pop(ProcModule.PROC_MODULES_BY_NAME.get(stale.abbr, -1), None)
+
+    def _install_staged(self, catalog: pathlib.Path, data_dir: pathlib.Path) -> None:
+        """An install (or an update of 1.0.1) from the staged catalog brings the list, the core uses it; the others fit the limits"""
+        from lustra import tagsdb
+        from lustra.denylist import denied_in_extension
+        from lustra.extensions import Extensions
+        from lustra.tagsdb import TagsDB
+        # an earlier test may have loaded the catalog's 1.0.2 (test_tag_sources), and the 1.0.1 installed below would then not
+        # register (Extensions._register keeps a loaded id)
+        self._keep_registry()
         # the frozen core has no 2tags/rn_tags.json (tools/build_core.py bundles the aliases only): its tagsdb.py is elsewhere
         frozen_tagsdb = (data_dir.parent / 'core' / 'lustra' / 'tagsdb.py').as_posix()
         with mock.patch.dict(os.environ, {'LUSTRA_DATA_DIR': data_dir.as_posix(), 'LUSTRA_CATALOG_DIR': catalog.as_posix()}), \

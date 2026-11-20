@@ -5,6 +5,9 @@ Writes '<abbr>_tags.json' files in the same format as bundled lists: {"tag": "N 
 Sources (TagSource): the five reviewed modules (CURATED), every extension with its own tag update ('tagUpdate' in its manifest: a
 function of the extension run only when the user asks, see TagJob / EXTENSION_JOB) and every extension made from a known engine,
 read from the '$generator.engine' and 'site' of its manifest (lustra.extgen writes them), see ENGINE_TAG_SOURCES / tag_source.
+An extension's own update that can read only the most used tags declares "merge": {"minPosts": N} (TagSource.merge, Paheal from
+1.0.3): its read goes into the list in use (fresh counts for the tags read, new tags added, every other tag kept) instead of
+replacing it, see update_tag_list.
 Politeness, every source (docs/operations.md §3): the delay between requests, robots.txt Crawl-delay, Retry-After, a request
 budget per list, no cookies, a stop on bot challenges, the user's own API key only (Lustra ships no shared key). robots.txt
 (RFC 9309, lustra/robots.py) is applied strictly to extension sources; the five reviewed modules use the sites' documented
@@ -65,7 +68,9 @@ ROBOTS_AGENT = 'Lustra'
 '''product token looked up in robots.txt (the extension generator uses the same)'''
 PAGE_LIMIT = 1000
 SANITY_MIN_RATIO = 0.5
-'''refuse to replace an existing list with one that has less than this ratio of tags (partial/failed fetch)'''
+'''refuse to replace an existing list with one that has less than this ratio of tags (partial/failed fetch); a merge (TagSource.merge)
+is refused when its read lists less than this ratio of the tags the list in use has at its threshold (a cut read, another page,
+names in another form)'''
 REQUEST_BUDGET = 5000
 '''requests per list (robots.txt and retries count): 5M tags in 1000 tag pages. A list that needs more is not written'''
 ENGINE_MIN_INTERVAL = 1.0
@@ -142,6 +147,8 @@ EXTENSION_JOB = 'extension_job'
 JOB_TAG_MAX_LEN = 200
 JOB_TAG_TYPES = frozenset(str(k) for k in TAG_TYPES_BY_NAME)
 '''tag types an extension's update may give (others are written as 'general')'''
+GENERIC_TYPES = frozenset(('general', 'unknown'))
+'''types that say nothing about a tag: what a job that cannot tell types gives (_job_tag gives 'general' to (name, posts))'''
 
 
 class TagSourceError(RuntimeError):
@@ -175,6 +182,12 @@ class TagSource:
     '''the extension's own tag update, 'tags.py:read_tags' (manifest 'tagUpdate.entry'), engine EXTENSION_JOB'''
     folder: str = ''
     '''folder of the extension the job file is in'''
+    tag_list: str = ''
+    '''the list the extension ships next to its manifest (manifest 'tagList', '<abbr>_tags.json'), '' when it names none: a merge
+    goes into it when no list is in use (the command line where the extension is not installed)'''
+    merge_min_posts: int = 0
+    '''the extension's own update reads only the tags with at least this many posts, every one of them (manifest
+    tagUpdate.merge.minPosts): update_tag_list merges the read into the list in use'''
 
     @property
     def on_demand(self) -> bool:
@@ -183,15 +196,22 @@ class TagSource:
         return self.engine == EXTENSION_JOB
 
     @property
+    def merge(self) -> bool:
+        """The update reads only the tags with merge_min_posts or more posts: merged into the list in use, never replacing it"""
+        return self.engine == EXTENSION_JOB and self.merge_min_posts > 0
+
+    @property
     def description(self) -> str:
         if self.engine == EXTENSION_JOB:
-            return f'the extension\'s own update ({self.job}), run only when asked'
+            return (f'the extension\'s own update ({self.job}), run only when asked'
+                    + (f': the tags with {self.merge_min_posts:d}+ posts, merged into the list in use' if self.merge else ''))
         return ENGINE_TAG_SOURCES.get(self.engine, '')
 
     def as_dict(self) -> dict:
         return {'module': self.module, 'name': self.name or self.module, 'engine': self.engine, 'site': self.site, 'key': self.key,
                 'keyFormat': self.key_format, 'robots': self.robots, 'curated': self.curated, 'description': self.description,
-                'tailUpdates': self.tail_updates, 'onDemand': self.on_demand, 'job': self.job}
+                'tailUpdates': self.tail_updates, 'onDemand': self.on_demand, 'job': self.job, 'merge': self.merge,
+                'mergeMinPosts': self.merge_min_posts}
 
 
 CURATED: dict[str, TagSource] = {
@@ -237,12 +257,16 @@ def source_for_manifest(m, jobs: bool = True) -> TagSource | None:
     cur = CURATED.get(m.abbr)
     if cur and _base_domain(_host(cur.site)) == _base_domain(_host(site)):
         return cur
-    job = str((getattr(m, 'tagUpdate', None) or {}).get('entry', ''))
+    tu = getattr(m, 'tagUpdate', None) or {}
+    job = str(tu.get('entry', ''))
     if job and jobs and m.path is not None and re_site.fullmatch(site) and not denied(site):
         auth = m.auth if isinstance(m.auth, dict) else {}
         key = 'required' if auth.get('apiKey') is True else 'none'
+        merge = tu.get('merge')
+        tag_list = str(m.path / m.tagList) if m.tagList == f'{m.abbr}_tags.json' else ''  # the name TagsDB.extension_lists reads
         return TagSource(m.abbr, EXTENSION_JOB, site, m.name, key, str(auth.get('apiKeyFormat') or '') if key != 'none' else '',
-                         rate_limit=manifest_rate_limit(auth), job=job, folder=str(m.path))
+                         rate_limit=manifest_rate_limit(auth), job=job, folder=str(m.path), tag_list=tag_list,
+                         merge_min_posts=int(merge.get('minPosts') or 0) if isinstance(merge, dict) else 0)
     engine = str((m.generator or {}).get('engine', ''))
     if engine not in ENGINE_TAG_SOURCES or not re_site.fullmatch(site) or denied(site):
         return None
@@ -481,7 +505,8 @@ class TagJob:
     """What the tag update of an extension gets (manifest 'tagUpdate': 'tags.py:read_tags', called as read_tags(job)): the requests
     of the core for its own site only, with the pacing, robots.txt, Retry-After, request budget and no cookies of every list.
     read_tags yields (name, posts, type) for each tag of the site; the core checks each one, keeps those with min_posts or more and
-    writes the list. Exported by lustra.sdk (SDK 1.1)"""
+    writes the list. Exported by lustra.sdk (SDK 1.1).
+    min_posts: for a merge update (tagUpdate.merge) at least merge.minPosts; the job must yield every tag with that many posts or more"""
 
     def __init__(self, client: PoliteClient, api_key: str = '', min_posts: int = 1) -> None:
         self._client = client
@@ -931,7 +956,8 @@ def _count_lines(path: pathlib.Path) -> int:
 
 
 def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None:
-    """Atomic write in bundled list format (one entry per line, sorted by python string order for binary search)"""
+    """Atomic write in bundled list format (one entry per line, sorted by python string order for binary search). A tag whose type
+    is '' is written without one ('N posts', read as unknown), as the lists of 2tags/ that have no types"""
     tmp = path.with_name(f'.{path.name}.{os.getpid():d}.{uuid.uuid4().hex[:8]}.tmp')  # concurrent writers never share a tmp file
     try:
         with open(tmp, 'wt', encoding=UTF8, newline='\n') as f:
@@ -939,7 +965,8 @@ def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None
             names = sorted(tags)
             for i, name in enumerate(names):
                 count, ttype = tags[name]
-                f.write(f'{json.dumps(name, ensure_ascii=False)}: "{count:d} posts ({ttype})"{"," if i < len(names) - 1 else ""}\n')
+                kind = f' ({ttype})' if ttype else ''
+                f.write(f'{json.dumps(name, ensure_ascii=False)}: "{count:d} posts{kind}"{"," if i < len(names) - 1 else ""}\n')
             f.write('}\n')
             f.flush()
             os.fsync(f.fileno())
@@ -951,10 +978,17 @@ def write_tag_list(path: pathlib.Path, tags: dict[str, tuple[int, str]]) -> None
 re_list_value = re.compile(r'^([0-9]+) posts(?: \(([^()]*)\))?$')
 
 
-def read_tag_list(path: pathlib.Path) -> dict[str, tuple[int, str]]:
-    """{name: (posts, type)} of a list file in the bundled format (write_tag_list). Lines it cannot read are skipped"""
+def read_tag_list(path: pathlib.Path, untyped: str = 'general') -> dict[str, tuple[int, str]]:
+    """{name: (posts, type)} of a list file in the bundled format (write_tag_list). Lines it cannot read are skipped.
+    untyped: the type of a line that names none ('' keeps it without one when written back)"""
+    return _read_list_lines(path, untyped)[0]
+
+
+def _read_list_lines(path: pathlib.Path, untyped: str = 'general') -> tuple[dict[str, tuple[int, str]], int]:
+    """read_tag_list, and how many lines it could not read"""
     from .tagsdb import TagsDB
     tags: dict[str, tuple[int, str]] = {}
+    skipped = 0
     with open(path, encoding=UTF8) as f:
         for line in f:
             if line.strip() in ('{', '}', ''):
@@ -962,10 +996,103 @@ def read_tag_list(path: pathlib.Path) -> dict[str, tuple[int, str]]:
             try:
                 name, value = TagsDB._parse_line(line)
             except (ValueError, StopIteration):
+                skipped += 1
                 continue
             if m := re_list_value.match(value):
-                tags[name] = (int(m.group(1)), m.group(2) or 'general')
-    return tags
+                tags[name] = (int(m.group(1)), m.group(2) or untyped)
+            else:
+                skipped += 1
+    return tags, skipped
+
+
+def _merge_counts(base: dict[str, tuple[int, str]], fetched: dict[str, tuple[int, str]]) -> tuple[int, int]:
+    """Puts the tags of a partial read into base, in place: their counts and types win, base keeps every tag the read did not
+    list. -> (added, changed)"""
+    added = sum(1 for n in fetched if n not in base)
+    changed = sum(1 for n, v in fetched.items() if n in base and base[n] != v)
+    base.update(fetched)
+    return added, changed
+
+
+def _keep_known_types(base: dict[str, tuple[int, str]], fetched: dict[str, tuple[int, str]]) -> dict[str, tuple[int, str]]:
+    """A read that says only 'general' or 'unknown' of a tag (a job that cannot tell types: _job_tag gives 'general' to
+    (name, posts)) keeps the type the list in use has for it: a specific one, or none"""
+    return {n: (c, base[n][1]) if t in GENERIC_TYPES and n in base else (c, t) for n, (c, t) in fetched.items()}
+
+
+def _merge_base(module: str, src: TagSource, reference: pathlib.Path | None, out: pathlib.Path) -> pathlib.Path | None:
+    """The list a partial read (TagSource.merge) goes into: the list in use (reference), else the list at out, else the list the
+    extension ships (src.tag_list: the command line where it is not installed). None without one, or when it is the list learned
+    from the posts seen here (lustra/tags_learned.py: its counts are not the site's)"""
+    from .tagsdb import _is_learned_list
+    for p in (reference, out, pathlib.Path(src.tag_list) if src.tag_list else None):
+        if p is not None and p.is_file() and not _is_learned_list(module, p):
+            return p
+    return None
+
+
+def _list_stamp(path: pathlib.Path) -> list[int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns]
+
+
+_digests: dict[str, tuple[list[int], str]] = {}
+'''path -> (size and time of the file, its sha256): list_digest'''
+
+
+def list_digest(path: pathlib.Path) -> str:
+    """sha256 of a list file, '' when it cannot be read; kept while the file's size and time stay the same (TagsDB compares the
+    list a merging extension ships each time it locates the lists)"""
+    stamp = _list_stamp(path)
+    if stamp is None:
+        return ''
+    key = os.fspath(path)
+    if (hit := _digests.get(key)) is not None and hit[0] == stamp:
+        return hit[1]
+    h = hashlib.sha256()
+    try:
+        with open(path, 'rb') as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+    except OSError:
+        return ''
+    _digests[key] = (stamp, h.hexdigest())
+    return h.hexdigest()
+
+
+def _save_merged(meta_path: pathlib.Path, src: TagSource, written: pathlib.Path, cover: int, onto: str) -> None:
+    """<out>/.meta/<abbr>_tags.json of a merge: the size and time of the list it wrote (is_merged_list), the list its merges
+    started from (merged_onto)"""
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = meta_path.with_name(f'{meta_path.name}.{uuid.uuid4().hex[:8]}.tmp')
+    tmp.write_text(json.dumps({'site': src.site, 'engine': src.engine, 'merged': _list_stamp(written), 'onto': onto,
+                               'minPosts': cover, 'updatedAt': time.time()}), encoding=UTF8)
+    os.replace(tmp, meta_path)
+
+
+def merged_onto(path: pathlib.Path) -> str | None:
+    """The list at path is the one a merge (TagSource.merge) wrote there last (its size and time are in <its folder>/.meta/): the
+    sha256 of the list the first of its merges went into (list_digest; each merge into a merged list keeps it), '' when it went
+    into none. None: not a merged list (no stamp, or the file changed since).
+    TagsDB lets a file of <data dir>/tags replace the list a merging extension ships only when it is the merge of that very list:
+    a learned list that lost its stamp never is, and an extension update that ships another list makes that list the base again,
+    whatever the file times (a zip install gives its files the install's time, the catalog bundled with the app the build's)"""
+    try:
+        d = json.loads((path.parent / META_DIR / path.name).read_text(encoding=UTF8))
+    except (OSError, ValueError):
+        return None
+    stamp = _list_stamp(path)
+    if not isinstance(d, dict) or stamp is None or d.get('merged') != stamp:
+        return None
+    return str(d.get('onto') or '')
+
+
+def is_merged_list(path: pathlib.Path) -> bool:
+    """The list at path is the one a merge (TagSource.merge) wrote there last (merged_onto)"""
+    return merged_onto(path) is not None
 
 
 def _load_partial(path: pathlib.Path, src: TagSource) -> tuple[str, int, dict[str, tuple[int, str]], dict] | None:
@@ -1025,17 +1152,25 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     source: default tag_source(module); allow_local / session: tests (fake sites), session: also the generator's own transport;
     min_interval / deadline: see PoliteClient (the generator bounds the time a draft waits for its list).
     A source with tail_updates reads only its last TAIL_PAGES pages and merges them into the list of <out> when that list came
-    from a full read less than FULL_EVERY ago (<out>/.meta/); full=True, or no such read, reads everything"""
+    from a full read less than FULL_EVERY ago (<out>/.meta/); full=True, or no such read, reads everything.
+    A source with merge reads only the tags with cover = max(min_posts, merge_min_posts) or more posts and merges them into the list
+    in use (reference, else the list of <out>, else the one the extension ships), never into a learned list: the tags read take
+    their counts (and their types, unless the read says only 'general' or 'unknown'), new ones are added, every other tag is kept
+    (a line without a type keeps none); written to <out> with its stamp in <out>/.meta/ (merged_onto), never over the base"""
     src = source or tag_source(module)
     if src is None:
         raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions with their own '
                          f'update (manifest tagUpdate); extensions made from the engines {", ".join(ENGINE_TAG_SOURCES)})')
     out_dir.mkdir(parents=True, exist_ok=True)
     res = UpdateResult(module, out_dir / f'{module}_tags.json')
+    cover = max(int(min_posts or 0), src.merge_min_posts) if src.merge else min_posts
+    '''a merge's job reads every tag with this many posts or more, and claims nothing below'''
     res.previous = max(_count_lines(res.path), _count_lines(reference) if reference else 0)
     client = PoliteClient(src, delay=delay, budget=budget, allow_local=allow_local, session=session, min_interval=min_interval,
                           deadline=deadline)
     tags: dict[str, tuple[int, str]] = {}
+    onto = ''
+    '''a merge: the list its line of merges started from (merged_onto)'''
     if progress:
         client.notify = lambda msg: progress(f'[{module}] {msg}', len(tags))
     # page / id cursor listings keep their progress in <out>/.partial/: a list stopped half way (rate limit, network, closed app)
@@ -1083,7 +1218,7 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
                 _save_partial(partial_path, src, st['pid'], tags, 'tail', st)
     try:
         source_iter = (_iter_gelbooru_tail(client, _dapi_auth(src, api_key), min_posts, base, state, on_tail_page) if state is not None
-                       else _iter_source(src, client, api_key, min_posts, max_pages, resume))
+                       else _iter_source(src, client, api_key, cover, max_pages, resume))
         told = -math.inf
         for name, count, ttype in source_iter:
             if name not in tags or tags[name][0] < count:
@@ -1113,11 +1248,49 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
         # the tail's counts replace the list's; tags it did not see keep theirs until the next full read
         fetched = tags
         tags = base
-        added = sum(1 for n in fetched if n not in tags)
-        changed = sum(1 for n, v in fetched.items() if n in tags and tags[n] != v)
-        tags.update(fetched)
+        added, changed = _merge_counts(tags, fetched)
         detail = (f', the end of the list only: pages {meta["pages"] - state["back"]:d}-{end_page - 1:d} of {end_page:d}, '
                   f'{added:d} new, {changed:d} updated')
+    elif src.merge:
+        # the job read only the tags with cover+ posts: they go into the list in use, every other tag keeps its count
+        if not tags:
+            res.message = 'not written: no tags fetched'
+            return res
+        from .tagsdb import _is_learned_list
+        fetched, base_path = tags, _merge_base(module, src, reference, res.path)
+        if base_path is None and src.tag_list and not force:
+            res.count = len(fetched)
+            res.message = (f'not written: no list to merge the tags with {cover:d}+ posts into (the extension names '
+                           f'{pathlib.Path(src.tag_list).name}, not found): they would be the whole list ({len(fetched):d} tags read, '
+                           f'use --force)')
+            return res
+        into = 'the list in use' if base_path in (reference, res.path) else 'the list the extension ships'
+        # the list this line of merges started from (before the write: the base may be the list of <out>, merged before)
+        if base_path is not None:
+            onto = merged_onto(base_path)
+            onto = list_digest(base_path) if onto is None else onto
+        tags, unread = _read_list_lines(base_path, '') if base_path is not None else ({}, 0)  # lines without a type keep none
+        if unread and not force:
+            res.count = len(fetched)
+            res.message = (f'not written: {unread:d} line{"s" if unread != 1 else ""} of {into} could not be read: the merged list '
+                           f'would lose {"them" if unread != 1 else "it"} (use --force)')
+            return res
+        popular = [n for n, (c, _) in tags.items() if c >= cover]
+        seen = sum(1 for n in popular if n in fetched)
+        if not force and seen < int(len(popular) * SANITY_MIN_RATIO):
+            res.count = len(fetched)
+            res.message = (f'not written: the read lists {seen:d} of the {len(popular):d} tags with {cover:d}+ posts of {into} '
+                           f'({len(fetched):d} tags read; sanity check failed, use --force)')
+            return res
+        # nor is a learned list what the merged one is measured against: its tags come back on top of it (tags_learned)
+        res.previous = max((_count_lines(p) for p in (res.path, reference) if p is not None and not _is_learned_list(module, p)),
+                           default=0)
+        if progress:
+            progress(f'[{module}] {len(fetched):d} tags read, merging them into {into} ({len(tags):d} tags)', len(fetched))
+        added, changed = _merge_counts(tags, _keep_known_types(tags, fetched))
+        detail = (f', the tags with {cover:d}+ posts merged into {into}: {len(fetched):d} read, {added:d} new, {changed:d} updated, '
+                  f'{len(popular) - seen:d} no longer listed kept' if base_path is not None
+                  else f', the tags with {cover:d}+ posts only: no list in use to merge into')
     elif resume is not None and src.tail_updates:
         detail = f', full read of {end_page:d} pages'
     res.count = len(tags)
@@ -1130,11 +1303,14 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
                        f'{" (partial fetch, use --force)" if partial else " (sanity check failed, use --force)"}')
         return res
     if progress:
-        progress(f'[{module}] {res.count:d} tags read, writing the list', res.count)
+        progress(f'[{module}] {res.count:d} tags in the merged list, writing it' if src.merge
+                 else f'[{module}] {res.count:d} tags read, writing the list', res.count)
     write_tag_list(res.path, tags)
     res.written = True
     if src.tail_updates and src.engine == 'gelbooru_dapi' and (resume is not None or state is not None):
         _save_meta(meta_path, src, end_page, meta['fullAt'] if state is not None else time.time())
+    if src.merge:
+        _save_merged(meta_path, src, res.path, cover, onto)
     waited = f', waited {res.waited:.0f} s for the site\'s rate limit' if res.waited else ''
     res.message = f'written {res.count:d} tags (was {res.previous:d}, {res.requests:d} requests{detail}{waited})'
     return res
@@ -1176,7 +1352,8 @@ def main(argv: list[str] | None = None, default_out: str | os.PathLike | None = 
                     f'extensions with their own update or made from a known engine), or \'auto\': every installed module that '
                     f'needs no API key, except the extensions\' own updates (run only when their module is named)')
     ap.add_argument('--out', default=str(default_out or data_dir() / 'tags'), help='output folder (default: <data dir>/tags)')
-    ap.add_argument('--min-posts', type=int, default=1, help='skip tags with fewer posts (default 1)')
+    ap.add_argument('--min-posts', type=int, default=1, help='skip tags with fewer posts (default 1); an extension whose update merges '
+                    '(tagUpdate.merge) reads from max(this, its minPosts) and keeps the other tags of its list')
     ap.add_argument('--delay', type=float, default=0.5, help='delay between requests, seconds (be polite, default 0.5; a robots.txt '
                     f'Crawl-delay wins, extension sites get {ENGINE_MIN_INTERVAL:g} at least)')
     ap.add_argument('--max-requests', type=int, default=REQUEST_BUDGET, help=f'request budget per list (default {REQUEST_BUDGET:d})')
