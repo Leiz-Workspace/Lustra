@@ -3,7 +3,7 @@
   "id": "paheal",
   "name": "Rule34 Paheal",
   "abbr": "rp",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,
@@ -13,7 +13,14 @@
     "video"
   ],
   "entry": "downloader.py:DownloaderRp",
+  "minSdkVersion": "1.1",
   "tagList": "rp_tags.json",
+  "tagUpdate": {
+    "entry": "tags.py:read_tags",
+    "merge": {
+      "minPosts": 100
+    }
+  },
   "description": "Shimmie danbooru-compatible API. Max 3 tags.",
   "syntax": {
     "concat": " ",

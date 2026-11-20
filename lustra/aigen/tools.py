@@ -163,7 +163,21 @@ def reference_text(name: str) -> str:
         'sdk': ['lustra/sdk.py'],
         'manifest_schema': ['docs/schemas/extension-manifest.schema.json'],
     }.get(name) or [f'extensions/{name}/downloader.py', f'extensions/{name}/manifest.json']
-    return '\n\n'.join(f'### {f}\n{p.read_text(encoding="utf-8")}' for f in files if (p := _ref_path(f)))
+    return '\n\n'.join(f'### {f}\n{_reference_file(f, p)}' for f in files if (p := _ref_path(f)))
+
+
+def _reference_file(rel: str, path: pathlib.Path) -> str:
+    """A reference file as the model reads it. An extension's manifest leaves out its own tag update ('tagUpdate'): the generator
+    writes no tags.py (WRITABLE), and a draft that copied the key would fail its checks for the missing file"""
+    text = path.read_text(encoding='utf-8')
+    if rel.startswith('extensions/') and rel.endswith('/manifest.json'):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(data, dict) and data.pop('tagUpdate', None) is not None:
+            text = json.dumps(data, ensure_ascii=False, indent=2) + '\n'
+    return text
 
 
 def _ref_path(rel: str) -> pathlib.Path | None:

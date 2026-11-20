@@ -8,14 +8,18 @@ with the tag here, not the site's count. A list from a source always wins: once 
 source or 2tags/ gives the module a list, the learning stops writing (the file it wrote last is stamped; any other file at that
 path, or another list located for the module, means it is not ours any more).
 On top of a bundled list: a list shipped inside an installed extension that has no tag source (TagsDB.Bundled: Rule34Hentai,
-Paheal, Rule34.us) is never updated, so the learning goes on and writes only the learned tags that list lacks (its 'additions'),
-to '<data dir>/tags/learned/<abbr>_added.json' (additions_path): out of the '*_tags.json' names, so they are never taken for the
-module's whole list. TagsDB serves the bundled list plus those, the bundled counts stay. The bundled list is never rewritten or
-parsed again for it (rule34.us: 18.9 MB): only the tags of the newly counted posts are looked up in it, the whole learned set only
-when the bundled list changed (an extension update, its uninstall: then the learned list is the module's whole list again). The
-additions file is written only when they changed (a tag the bundled list lacks was seen), not on every Preview.
+Rule34.us; Paheal until 1.0.2) is never updated, so the learning goes on and writes only the learned tags that list lacks (its
+'additions'), to '<data dir>/tags/learned/<abbr>_added.json' (additions_path): out of the '*_tags.json' names, so they are never
+taken for the module's whole list. TagsDB serves the bundled list plus those, the bundled counts stay. The bundled list is never
+rewritten or parsed again for it (rule34.us: 18.9 MB): only the tags of the newly counted posts are looked up in it, the whole
+learned set only when the bundled list changed (an extension update, its uninstall: then the learned list is the module's whole
+list again). The additions file is written only when they changed (a tag the bundled list lacks was seen), not on every Preview.
+The same goes for the list of a module whose own update reads only part of the site's list and merges it (TagSource.merge: Paheal
+from 1.0.3): the learning adds to the list in use, the shipped one before the first update, the merged one after it; after each
+update the learned tags the list now has leave the additions (server.m_tags_update -> refresh). The merged list is the updater's,
+never written or removed here. The list the learning adds to is its 'base' (base_list, TagsDB.LearningBases).
 State: '<data dir>/tags/learned/<abbr>.sqlite' (posts counted, tag counts, the index cursor, the stamp of the last write, the
-bundled list the additions were computed for and those additions, a write still to do)
+base the additions were computed for and those additions, a write still to do)
 """
 #########################################
 #
@@ -53,7 +57,7 @@ CREATE TABLE IF NOT EXISTS tags (name TEXT PRIMARY KEY, posts INTEGER NOT NULL) 
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS added (name TEXT PRIMARY KEY) WITHOUT ROWID;
 '''
-'''added: the learned tags the bundled list lacks (meta 'base': that list's path and stamp; empty without one)'''
+'''added: the learned tags the base lacks (meta 'base': that list's path and stamp; empty without one)'''
 
 
 class Learned(NamedTuple):
@@ -85,8 +89,8 @@ def list_path(module: str) -> pathlib.Path:
 
 
 def additions_path(module: str) -> pathlib.Path:
-    """The learned tags a bundled list lacks (served on top of it): next to the learning's state, not a '*_tags.json' of
-    <data dir>/tags, so a file that lost its stamp is never taken for the module's whole list and never hides the bundled one"""
+    """The learned tags the base lacks (served on top of it): next to the learning's state, not a '*_tags.json' of
+    <data dir>/tags, so a file that lost its stamp is never taken for the module's whole list and never hides the base"""
     return _tags_dir() / 'learned' / f'{module}_added.json'
 
 
@@ -140,10 +144,11 @@ def enabled() -> bool:
 
 
 def base_list(module: str) -> pathlib.Path | None:
-    """The list the learning adds to: the module's located list when it ships inside an installed extension that has no tag source
-    (TagsDB.Bundled), else None"""
-    bundled = TagsDB.bundled(module)
-    return bundled.path if bundled is not None and TagsDB.get_file(module) == bundled.path else None
+    """The list the learning adds to (TagsDB.LearningBases), when it is the module's located list: a list shipped inside an
+    installed extension that has no tag source (TagsDB.Bundled), or the list in use of a module whose own update merges a partial
+    read into it (TagSource.merge). Else None"""
+    base = TagsDB.learning_base(module)
+    return base if base is not None and TagsDB.get_file(module) == base else None
 
 
 def _path_is_ours(module: str) -> bool:
@@ -153,7 +158,8 @@ def _path_is_ours(module: str) -> bool:
 
 def may_learn(module: str) -> bool:
     """No list from a source: none located (and nothing else at the learned path), the located one is the learned list, or it is a
-    bundled list without a source (base_list: the learning adds the tags it lacks, in their own file)"""
+    base (base_list: a bundled list without a source, or the list of a merge source; the learning adds the tags it lacks, in their
+    own file)"""
     if not enabled() or not re_abbr.fullmatch(str(module or '')):
         return False
     located = TagsDB.get_file(module)
@@ -168,7 +174,8 @@ def may_learn(module: str) -> bool:
 
 def has_source_list(module: str) -> bool:
     """The module has a list that is not the learned one: from the updater, an installed extension with a tag source, 2tags/ or
-    registered in memory (learning it is not needed). A bundled list without a source is not one (the learning adds to it)"""
+    registered in memory (learning it is not needed). A base is not one (a bundled list without a source, the list of a merge
+    source: the learning adds to it)"""
     if not re_abbr.fullmatch(str(module or '')):
         return False
     located = TagsDB.get_file(module)
@@ -216,8 +223,8 @@ def _base_stamp(base: pathlib.Path | None) -> list | None:
 
 def _sync_base(module: str, conn: sqlite3.Connection, base: pathlib.Path | None, seen: set[str]) -> bool:
     """Keeps 'added' right for the list the learning adds to (base_list): the tags seen now that it lacks are added; when the
-    bundled list changed (or is gone), the whole learned set is checked again. -> True: what is written must be redone (the bundled
-    list changed, or a tag seen now is one it lacks: a new addition, or the count of one went up)"""
+    base changed (an extension update, a merge update) or is gone, the whole learned set is checked again. -> True: what is written
+    must be redone (the base changed, or a tag seen now is one it lacks: a new addition, or the count of one went up)"""
     stamp = _base_stamp(base)
     changed = stamp != _meta(conn, 'base')
     if changed:
@@ -232,9 +239,10 @@ def _sync_base(module: str, conn: sqlite3.Connection, base: pathlib.Path | None,
 
 
 def _write(module: str, conn: sqlite3.Connection, on_base: bool) -> bool:
-    """on_base: only the learned tags the bundled list lacks, to additions_path (an empty list replaces additions the bundled list
-    now has); the whole list the learning wrote before at list_path is removed. Else the whole learned list to list_path (unless
-    another list took that path) and the additions are removed. -> written"""
+    """on_base: only the learned tags the base lacks, to additions_path (an empty list replaces additions the base now has); the
+    whole list the learning wrote before at list_path is removed, unless another list took that path meanwhile (the merge update of
+    a merge source writes there). Else the whole learned list to list_path (unless another list took that path) and the additions
+    are removed. -> written"""
     full, extra = list_path(module), additions_path(module)
     current = _stamp(full)
     ours = current is not None and current == _meta(conn, 'export')
@@ -251,8 +259,8 @@ def _write(module: str, conn: sqlite3.Connection, on_base: bool) -> bool:
     if not on_base:
         _set_meta(conn, 'export', _stamp(target))
         conn.commit()
-    if stale is not None and stale.exists():
-        with contextlib.suppress(OSError):  # the learned list moved onto a bundled list, or back to being the module's list
+    if stale is not None and stale.exists() and (stale == extra or _stamp(stale) == current):
+        with contextlib.suppress(OSError):  # the learned list moved onto a base, or back to being the module's list
             stale.unlink()
         if on_base:
             conn.execute("DELETE FROM meta WHERE k = 'export'")
@@ -322,10 +330,13 @@ def learn_from_index(module: str) -> Learned:
     return Learned(new, written)
 
 
-def refresh(module: str) -> bool:
-    """After an extension of the module was installed, updated or uninstalled: when the bundled list the learning adds to changed,
-    the learned list is written again (the additions the new list has are dropped; with no bundled list any more, the whole learned
-    list). Nothing learned yet: nothing to do. -> written"""
+def refresh(module: str, recheck: bool = False) -> bool:
+    """After an extension of the module was installed, updated or uninstalled, or a merge update rewrote the list the learning adds
+    to: when that base changed, the learned list is written again (the additions the new list has are dropped; with no base any
+    more, the whole learned list). Nothing learned yet: nothing to do.
+    recheck: the base was rewritten at its path and TagsDB has just loaded it again (server.m_tags_update after a merge): the whole
+    learned set is checked against it whatever stamp the state holds. A learn that ran on another thread between the write and the
+    reload took the new file's stamp while it looked the tags up in the list still loaded. -> written"""
     if not may_learn(module) or not _store_path(module).is_file():
         return False
     base = base_list(module)
@@ -334,6 +345,8 @@ def refresh(module: str) -> bool:
         if conn is None:
             return False
         with contextlib.closing(conn):
+            if recheck and base is not None:
+                conn.execute("DELETE FROM meta WHERE k = 'base'")
             written = _flush(module, conn, base, _sync_base(module, conn, base, set()))
     if written:
         TagsDB.locate_default_lists(reload=(module,))
@@ -341,7 +354,7 @@ def refresh(module: str) -> bool:
 
 
 def added_count(module: str) -> int:
-    """Learned tags the module's bundled list lacks (served on top of it)"""
+    """Learned tags the module's base lacks (served on top of it)"""
     conn = _connect(module, create=False) if re_abbr.fullmatch(str(module or '')) else None
     if conn is None:
         return 0
@@ -350,7 +363,7 @@ def added_count(module: str) -> int:
 
 
 def status(module: str) -> dict:
-    """{learned: the module's list is the learned one (not when it is only served on top of a bundled list), posts: posts counted,
+    """{learned: the module's list is the learned one (not when it is only served on top of a base), posts: posts counted,
     tags: tags known}"""
     conn = _connect(module, create=False) if re_abbr.fullmatch(str(module or '')) else None
     if conn is None:

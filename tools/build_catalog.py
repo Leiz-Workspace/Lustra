@@ -13,12 +13,16 @@ Tag lists stay out of the repository (docs/plans/ext-tag-jobs.md): an extension'
 "<abbr>_tags.json"). A list kept next to its manifest on the maintainer's machine (.gitignore leaves extensions/*/*_tags.json
 out) is used first; --lists is a folder for the others (made with 'lustra-core tags --modules <abbr> --out <dir>', or taken
 out of the zips of the catalog in use). Each list goes into its extension's zip, next to manifest.json, so
-the extension has it as soon as it is installed. An extension with no tag source (no 'tagUpdate', not a reviewed module, no engine
-with a tag listing: lustra/tags_updater.py source_for_manifest; today rn, rp, rs) takes the repository's 2tags/<abbr>_tags.json
-when neither place has its list, like the catalog bundled with the core (tools/build_core.py _stage_catalog), and the build stops
-when that is missing too: without a list in its zip, an update from this catalog would leave the module with no list. Any other
-extension whose list is not there is built without it: the app reads the list with the extension's own update when the user asks
-(Tags A-Z, "Cập nhật"). A zip over the installer's limits is refused.
+the extension has it as soon as it is installed. An extension the app cannot make the whole list of by itself takes the
+repository's 2tags/<abbr>_tags.json when neither place has its list, like the catalog bundled with the core (tools/build_core.py
+_stage_catalog), and the build stops when that is missing too: without a list in its zip, an update from this catalog would leave
+the module with no list (or with only the most used tags). That is one with no tag source (no 'tagUpdate', not a reviewed module, no
+engine with a tag listing: lustra/tags_updater.py source_for_manifest; rn, rs), or one whose own update reads only the most used
+tags and merges them into its list (tagUpdate.merge; rp). For a merge source a list from --lists or its folder that is under half
+of the 2tags/ one is refused (a list its own update wrote alone). Any other extension whose list is not there is built without it:
+the app reads the list with the extension's own update when the user asks (Tags A-Z, "Cập nhật"). A zip over the installer's limits
+is refused. A manifest with a tagUpdate key older cores refuse (lustra/modspec.py TAG_UPDATE_KEYS_SINCE) is said on stderr: users of
+those cores are offered an update they cannot install (docs/operations.md, 3d).
 """
 #########################################
 #
@@ -71,30 +75,53 @@ def build_archive(ext_dir: pathlib.Path, dest: pathlib.Path, extra: dict[str, pa
     return hashlib.sha256(dest.read_bytes()).hexdigest()
 
 
-def has_tag_source(ext_dir: pathlib.Path) -> bool:
-    """The app can read this extension's tag list from somewhere (lustra/tags_updater.py source_for_manifest)"""
+def tag_source(ext_dir: pathlib.Path):
+    """Where the app reads this extension's tag list from (lustra/tags_updater.py source_for_manifest), None: nowhere"""
     from lustra.extensions import SOURCE_CATALOG
     from lustra.modspec import ExtensionManifest
     from lustra.tags_updater import source_for_manifest
-    return source_for_manifest(ExtensionManifest.load(ext_dir / 'manifest.json', SOURCE_CATALOG)) is not None
+    return source_for_manifest(ExtensionManifest.load(ext_dir / 'manifest.json', SOURCE_CATALOG))
+
+
+def needs_shipped_list(src) -> bool:
+    """The app cannot make the whole list by itself: no tag source, or its own update reads only part of the site's list
+    (TagSource.merge)"""
+    return src is None or src.merge
+
+
+def _tag_count(path: pathlib.Path) -> int:
+    with open(path, 'rb') as f:
+        return sum(1 for line in f if line.strip() not in (b'{', b'}', b''))
 
 
 def tag_list_source(ext_dir: pathlib.Path, manifest: dict, lists: pathlib.Path | None,
                     tags_dir: pathlib.Path | None = TAGS_DIR) -> pathlib.Path | None:
     """The tag list file to put into the zip of this extension (None: no list declared, or already in its folder, or not found).
-    Next to its manifest, else in lists, else (an extension with no tag source) the repository's 2tags/. Raises SystemExit when an
-    extension with no tag source has its list nowhere"""
+    Next to its manifest, else in lists, else (needs_shipped_list: no tag source, or a merge source) the repository's 2tags/. Raises
+    SystemExit when such an extension has its list nowhere, or (a merge source) a list under half of the 2tags/ one"""
     name = str(manifest.get('tagList') or '')
-    if not name or pathlib.PurePosixPath(name).name != name or (ext_dir / name).is_file():
+    if not name or pathlib.PurePosixPath(name).name != name:
         return None
-    path = lists / name if lists is not None else None
+    src = tag_source(ext_dir)
+    repo = tags_dir / name if tags_dir is not None and name == f'{manifest.get("abbr", "")}_tags.json' else None
+    path = ext_dir / name if (ext_dir / name).is_file() else lists / name if lists is not None else None
+    if src is not None and src.merge and path is not None and path.is_file() and repo is not None and repo.is_file():
+        # its own update reads only the most used tags: a list that update wrote alone would be all a user gets, then the base of
+        # every merge after it
+        if (n := _tag_count(path)) < (full := _tag_count(repo)) * 0.5:
+            raise SystemExit(f'{manifest.get("id")}: {path} has {n:d} tags, under half of {repo} ({full:d}): its own update reads only '
+                             f'the tags with {src.merge_min_posts:d}+ posts, a list it made must be merged into this one')
+    if (ext_dir / name).is_file():
+        return None
     if path is None or not path.is_file():
-        if has_tag_source(ext_dir):
-            return None
-        path = tags_dir / name if tags_dir is not None and name == f'{manifest.get("abbr", "")}_tags.json' else None
+        if not needs_shipped_list(src):
+            return None  # read from its source after the install, or made by its own update when the user asks
+        path = repo
         if path is None or not path.is_file():
-            raise SystemExit(f'{manifest.get("id")}: no {name} next to its manifest, in --lists or in {tags_dir}, and the app has no '
-                             f'source to read it from: an update from this catalog would leave the module without a list')
+            why = ('the app has no source to read it from' if src is None else
+                   f'its own update reads only the tags with {src.merge_min_posts:d}+ posts and merges them into this list')
+            raise SystemExit(f'{manifest.get("id")}: no {name} next to its manifest, in --lists or in {tags_dir}, and {why}: an update '
+                             f'from this catalog would leave the module without a list')
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except ValueError as err:
@@ -102,6 +129,14 @@ def tag_list_source(ext_dir: pathlib.Path, manifest: dict, lists: pathlib.Path |
     if not isinstance(data, dict) or not data:
         raise SystemExit(f'{path}: not a tag list (expected {{"tag": "N posts (type)", ...}})')
     return path
+
+
+def newer_core_keys(manifest: dict) -> list[str]:
+    """'tagUpdate.<key> (Lustra <version>)' for each tagUpdate key cores before that release refuse (the whole manifest)"""
+    from lustra.modspec import TAG_UPDATE_KEYS_SINCE
+    tu = manifest.get('tagUpdate')
+    keys = tu if isinstance(tu, dict) else {}
+    return [f'tagUpdate.{k} (Lustra {TAG_UPDATE_KEYS_SINCE[k]})' for k in keys if k in TAG_UPDATE_KEYS_SINCE]
 
 
 def build(extensions_dir: pathlib.Path, out: pathlib.Path, base_url: str, lists: pathlib.Path | None = None,
@@ -123,6 +158,10 @@ def build(extensions_dir: pathlib.Path, out: pathlib.Path, base_url: str, lists:
         if manifest.get('tagList') and not tag_list and not (ext_dir / str(manifest['tagList'])).is_file():
             print(f'{ext_id}: no {manifest["tagList"]} in --lists: built without its tag list (the app reads it from its source '
                   f'when asked)', file=sys.stderr)
+        if newer := newer_core_keys(manifest):
+            print(f'{ext_id} {version}: {", ".join(newer)}: older cores refuse to install it (the version they have stays). Publish '
+                  f'this catalog once that release is out, or build from a copy of the extensions that keeps the version before',
+                  file=sys.stderr)
         entries.append({'id': ext_id, 'name': manifest.get('name', ext_id), 'abbr': manifest.get('abbr', ''), 'version': version,
                         'url': base_url + name, 'sha256': sha256, 'site': manifest.get('site', ''),
                         'description': manifest.get('description', '')})

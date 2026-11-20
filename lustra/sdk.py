@@ -8,6 +8,9 @@ A downloader.py imports what it needs from here instead of the core modules:
 An extension may also ship its own tag list update (manifest "tagUpdate": {"entry": "tags.py:read_tags"}, "minSdkVersion": "1.1"):
 read_tags(job: TagJob) yields (name, posts, type) for each tag of the site, its requests go through job.get_text / job.get_json.
 Lustra runs it only when the user asks (Tags A-Z), never on a schedule.
+"merge": {"minPosts": N} in tagUpdate declares an update that reads only the tags with N+ posts; Lustra 2.0.10+ merges it into the
+list in use. The job must give names in the list's form (lowercase where the site searches without case, '_' for spaces), because
+the core matches names exactly.
 
 Versioning (SDK_VERSION, 'MAJOR.MINOR'): a MINOR release only adds names; a MAJOR release may remove or change one, after the
 name was marked deprecated for at least one MINOR release. An extension that needs names added in a later release declares

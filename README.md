@@ -25,8 +25,9 @@ site cannot, and download in the background, at the pace each site allows.
 - **Extensions**: Rule34 (`rx`) and Danbooru (`db`) are built in; e621, Xbooru, Rule34.us, Rule34 Paheal,
   Rule34 Hentai, Bbooru, Gelbooru (your own API key), TBIB, Hypnohub, Safebooru, yande.re, Sakugabooru, Realbooru,
   Rule34.xyz, Rule34.world and Zerochan are optional extensions; the new ones ship their tag list and their own tag
-  update. **Create an extension for a new site** from its address, with or without Claude: the result is always a
-  draft you review, never installed on its own.
+  update; Rule34 Paheal's own update refreshes the most used tags of the list it ships. **Create an extension for a
+  new site** from its address, with or without Claude: the result is always a draft you review, never installed on its
+  own.
 - Proxies (http, https, socks5), per-site headers and cookies, encrypted API keys, 4 themes and 4 icons.
 - **Rule34 needs your own API key** (rule34.xxx: My Account > Options > API Access Credentials), entered in Settings >
   API key theo module as `KEY,USER_ID`. Lustra ships no shared key.
