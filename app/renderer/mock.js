@@ -279,7 +279,7 @@
         return { module: p.module, learned: p.module !== 'vb', posts: 132, tags: 845, newPosts: 12, written: true, mayLearn: true, sourceList: false, indexed: true,
           bundled: p.module === 'vb', added: p.module === 'vb' ? 37 : 0 };
       }
-      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9 }, { module: 'vb', path: '~/.config/Lustra/extensions/videosite/vb_tags.json', size: 18.9e6, mtime: Date.now() / 1000 - 7200, learned: false, bundled: true, version: '1.0.2', added: 37 }];
+      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9, shipped: true, version: '1.0.0' }, { module: 'vb', path: '~/.config/Lustra/extensions/videosite/vb_tags.json', size: 18.9e6, mtime: Date.now() / 1000 - 7200, learned: false, bundled: true, version: '1.0.2', added: 37 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;

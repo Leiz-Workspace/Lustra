@@ -1154,10 +1154,29 @@ class BundledListLearningTests(_DataDirTest):
                 self.assertEqual((0, False), tags_learned.learn(module, [('1', ['sky', 'new'])]))
                 self.assertFalse(tags_learned.list_path(module).exists())
                 self.assertFalse(tags_learned.additions_path(module).exists())
-                self.assertEqual((False, '', 0), tuple(self._row(module)[k] for k in ('bundled', 'version', 'added')))
+                # the list in use is still the one the extension ships: its version, not the file's time (Tags A-Z)
+                self.assertEqual((False, True, '1.0.2', 0), tuple(self._row(module)[k] for k in ('bundled', 'shipped', 'version', 'added')))
                 res = server.m_tags_learn({'module': module})
                 self.assertEqual((False, True, False), (res['mayLearn'], res['sourceList'], res['bundled']))
                 shutil.rmtree(self.root / 'src')
+
+    def test_a_shipped_list_with_a_source_reads_as_shipped_until_it_is_updated_here(self) -> None:
+        """tags.status 'shipped': the list of an extension that has its own update is the shipped one until the user updates it;
+        the update writes <data dir>/tags/<abbr>_tags.json, newer, and from then on the row gives that file's time"""
+        self._install(tagUpdate={'entry': 'tags.py:read_tags'}, minSdkVersion='1.1')
+        self.assertEqual({'bundled': False, 'shipped': True, 'version': '1.0.2', 'path': (self.folder / 'fq_tags.json').as_posix()},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'path')})
+        updated = self.data / 'tags' / 'fq_tags.json'
+        updated.parent.mkdir(parents=True, exist_ok=True)
+        tags_updater.write_tag_list(updated, {'sky': (6000, 'general')})  # what update_tag_list writes
+        later = (self.folder / 'fq_tags.json').stat().st_mtime + 60
+        os.utime(updated, (later, later))
+        TagsDB.locate_default_lists()
+        self.assertEqual({'bundled': False, 'shipped': False, 'version': '', 'path': updated.as_posix()},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'path')})
+        for row in server.m_tags_status({}):  # the lists in no extension (the repository's 2tags/) are never 'shipped'
+            if row['module'] != 'fq':
+                self.assertEqual((False, ''), (row['shipped'], row['version']), row['module'])
 
     def test_learning_off_learns_nothing_on_top(self) -> None:
         self._install()

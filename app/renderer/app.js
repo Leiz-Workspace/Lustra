@@ -2483,7 +2483,10 @@ async function refreshTagStatus() {
       const keyMissing = src?.key === 'required' && !S.secrets?.modules?.[m];
       const run = src ? tagUpdates.get(m) : undefined;
       const bundled = !src && r?.bundled;
-      const ver = bundled ? r.version || version || '' : '';
+      // shipped: the list in use is still the one inside an extension that has a source (its own job, an engine of the generator),
+      // not updated here yet: the 'Cập nhật' button stays, the column gives the extension version like a bundled list
+      const shipped = bundled || (!!src && !!r?.shipped);
+      const ver = shipped ? r.version || version || '' : '';
       let action;
       if (run) action = tagRunningButton(run.message);
       else if (!src && r && !r.learned && !bundled) action = h('span', { class: 'muted', title: 'Extension này không có nguồn cập nhật: giữ danh sách đi kèm' }, 'không có nguồn');
@@ -2525,10 +2528,13 @@ async function refreshTagStatus() {
           : h('button', { class: 'btn sm', title: src.onDemand ? ON_DEMAND_NOTE : '', onclick: update(false) }, 'Cập nhật');
       }
       const written = r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : '';
-      // bundled: the file's time is the build's (installed from the catalog bundled in the app, copied with its time) or the
-      // install's (a zip, the remote catalog): neither says how old the data is, so the extension version only
+      // bundled / shipped: the file's time is the build's (installed from the catalog bundled in the app, copied with its time) or
+      // the install's (a zip, the remote catalog): neither says how old the data is, so the extension version only. After the
+      // first 'Cập nhật' the list in use is the one written here, and its time is the update's
       const [updText, updTitle] = run ? [tagRunningText(run.count), run.message || '']
-        : bundled ? [`theo extension${ver ? ` v${ver}` : ''}`, 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.']
+        : shipped ? [`theo extension${ver ? ` v${ver}` : ''}`, bundled
+          ? 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.'
+          : `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ' Bấm "Cập nhật" để đọc danh sách mới từ site.'}`]
           : written ? [written, '']
             : !src && !r ? ['chưa học tag nào', NOT_LEARNED_TITLE] : ['chưa có', ''];
       const added = bundled && r.added ? h('span', { class: 'muted tag-added', title: 'Tag học từ post đã xem / đã tải mà danh sách đi kèm chưa có' },

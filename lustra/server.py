@@ -305,15 +305,21 @@ def m_tags_fuzzy(p: dict) -> list[dict]:
 def m_tags_status(_: dict) -> list[dict]:
     """learned: the list is learned from the posts seen here (lustra/tags_learned.py), its counts are not the site's.
     bundled: the list ships inside an installed extension that has no tag source (version: that extension's), it is not updated and
-    the learning adds the tags it lacks (added: how many are served on top of it)"""
+    the learning adds the tags it lacks (added: how many are served on top of it).
+    shipped: the list in use is still the one shipped inside an installed extension that has a tag source (its own job, an engine,
+    a reviewed module), not updated here yet (version: that extension's). For both, mtime is the time of the file (the build or
+    the install), not the date of the data"""
     rows = []
+    own = TagsDB._extension_list_manifests()
     for module, path in sorted(TagsDB.files().items()):
         st = path.stat() if path.is_file() else None
         bundled = TagsDB.bundled(module)
         on_base = bundled is not None and bundled.path == path
+        ext = own.get(module)
+        shipped = not on_base and ext is not None and ext[0] == path
         rows.append({'module': module, 'path': path.as_posix(), 'size': st.st_size if st else 0, 'mtime': st.st_mtime if st else 0,
                      'loaded': TagsDB.is_loaded(module), 'learned': tags_learned.is_learned(module, path), 'bundled': on_base,
-                     'version': bundled.version if on_base else '',
+                     'shipped': shipped, 'version': bundled.version if on_base else ext[1].version if shipped else '',
                      'added': tags_learned.added_count(module) if on_base and TagsDB.get_additions(module) else 0})
     return rows
 
