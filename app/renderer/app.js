@@ -2525,8 +2525,8 @@ async function refreshTagStatus() {
           : h('button', { class: 'btn sm', title: src.onDemand ? ON_DEMAND_NOTE : '', onclick: update(false) }, 'Cập nhật');
       }
       const written = r?.mtime ? new Date(r.mtime * 1000).toLocaleString('vi-VN') : '';
-      // bundled: the file keeps the time it had where the extension was built (a catalog install copies it with its time),
-      // so neither that time nor the install time says how old the data is: show the extension version only
+      // bundled: the file's time is the build's (installed from the catalog bundled in the app, copied with its time) or the
+      // install's (a zip, the remote catalog): neither says how old the data is, so the extension version only
       const [updText, updTitle] = run ? [tagRunningText(run.count), run.message || '']
         : bundled ? [`theo extension${ver ? ` v${ver}` : ''}`, 'Danh sách đổi khi extension có phiên bản mới (trang Extensions). Không rõ ngày của dữ liệu.']
           : written ? [written, '']
