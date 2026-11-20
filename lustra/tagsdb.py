@@ -624,7 +624,7 @@ def _is_learned_list(module: str, path: pathlib.Path) -> bool:
 
 
 def _learned_additions(module: str) -> pathlib.Path | None:
-    """The tags lustra/tags_learned.py learned on top of the module's bundled list (additions_path), when there are any"""
+    """The tags lustra/tags_learned.py learned on top of the list it adds to (additions_path), when there are any"""
     try:
         from .tags_learned import additions_path
         path = additions_path(module)
@@ -643,6 +643,26 @@ def _has_no_tag_source(manifest) -> bool:
         return False
 
 
+def _merges(manifest) -> bool:
+    """The extension's own update reads only the most used tags and merges them into the list in use (TagSource.merge,
+    tagUpdate.merge): that list is never read whole again, the learning adds to it"""
+    try:
+        from .tags_updater import source_for_manifest
+        src = source_for_manifest(manifest)
+        return src is not None and src.merge
+    except Exception:  # an unreadable manifest field or denylist: not learned on top of
+        return False
+
+
+def _merged_here(path: pathlib.Path) -> bool:
+    """The list at <data dir>/tags is the one a merge update wrote there last (lustra/tags_updater.py is_merged_list)"""
+    try:
+        from .tags_updater import is_merged_list
+        return is_merged_list(path)
+    except Exception:  # an unreadable stamp: not the update's
+        return False
+
+
 class BundledList(NamedTuple):
     """A module's list shipped inside an installed extension that has no tag source"""
     path: pathlib.Path
@@ -657,9 +677,13 @@ class TagsDB:
     DBFiles: dict[str, pathlib.Path] = {}
     Bundled: dict[str, BundledList] = {}
     '''modules whose located list ships inside an installed extension that has no tag source (lustra/tags_learned.py adds to it)'''
+    LearningBases: dict[str, pathlib.Path] = {}
+    '''module -> the located list the learning adds to (lustra/tags_learned.py): a list shipped inside an installed extension that
+    has no tag source (Bundled), or the list in use of a module whose own update merges a partial read into it (TagSource.merge,
+    Paheal from 1.0.3)'''
     Additions: dict[str, pathlib.Path] = {}
-    '''module -> the tags learned on top of its bundled list (lustra/tags_learned.py additions_path; before the learning first wrote
-    them there, its whole learned list): the names the bundled list lacks are added at load'''
+    '''module -> the tags learned on top of the list in LearningBases (lustra/tags_learned.py additions_path; before the learning
+    first wrote them there, its whole learned list): the names that list lacks are added at load'''
     AuxDB: dict[str, pathlib.Path] = {}
     AuxDBFiles: dict[str, pathlib.Path] = {}
     MaxLoaded = TAGS_MAX_LOADED
@@ -735,6 +759,7 @@ class TagsDB:
             TagsDB._lists.clear()
             TagsDB.DBFiles.clear()
             TagsDB.Bundled.clear()
+            TagsDB.LearningBases.clear()
             TagsDB.Additions.clear()
             TagsDB._epoch += 1
 
@@ -760,8 +785,14 @@ class TagsDB:
             return TagsDB.Bundled.get(module)
 
     @staticmethod
+    def learning_base(module: str) -> pathlib.Path | None:
+        """The located list the learning adds to (LearningBases), None when the module has none"""
+        with TagsDB._lock:
+            return TagsDB.LearningBases.get(module)
+
+    @staticmethod
     def get_additions(module: str) -> pathlib.Path | None:
-        """The learned list served on top of the module's bundled list"""
+        """The learned list served on top of the module's list (its learning base)"""
         with TagsDB._lock:
             return TagsDB.Additions.get(module)
 
@@ -865,15 +896,19 @@ class TagsDB:
         return {abbr: path for abbr, (path, _) in TagsDB._extension_list_manifests().items()}
 
     @staticmethod
-    def _extension_list_manifests() -> dict[str, tuple]:
-        """extension_lists with the manifest that names each list: {abbr: (path, manifest)}"""
+    def _installed_manifests() -> list:
+        """Manifests of the installed extensions, builtin first (no code runs); [] when they cannot be read"""
         from .extensions import SOURCE_BUILTIN, SOURCE_USER, Extensions
-        result: dict[str, tuple] = {}
         try:
-            manifests = [*Extensions._scan(Extensions.builtin_dir(), SOURCE_BUILTIN), *Extensions._scan(Extensions.user_dir(), SOURCE_USER)]
+            return [*Extensions._scan(Extensions.builtin_dir(), SOURCE_BUILTIN), *Extensions._scan(Extensions.user_dir(), SOURCE_USER)]
         except OSError:
-            return result
-        for m in manifests:
+            return []
+
+    @staticmethod
+    def _extension_list_manifests(manifests: list | None = None) -> dict[str, tuple]:
+        """extension_lists with the manifest that names each list: {abbr: (path, manifest)}. manifests: _installed_manifests"""
+        result: dict[str, tuple] = {}
+        for m in TagsDB._installed_manifests() if manifests is None else manifests:
             if m.path is not None and m.abbr not in result and m.tagList == f'{m.abbr}_tags.json' and (m.path / m.tagList).is_file():
                 result[m.abbr] = (m.path / m.tagList, m)
         return result
@@ -885,8 +920,11 @@ class TagsDB:
         is used only for a module that has no other list, however recent it is: a list from a source always wins. When the module's
         list ships inside an extension that has no tag source (TagsDB.Bundled), the learned tags are served on top of it: the names it
         lacks are added (TagsDB.Additions), and no other file of <data dir>/tags outranks it (nothing but the learning writes there for
-        such a module: a learned list that lost its stamp is not taken for a newer list). Loaded lists stay in memory unless their file
-        changed or they are listed in 'reload'"""
+        such a module: a learned list that lost its stamp is not taken for a newer list). The same goes for a module whose own update
+        merges a partial read into its list (TagSource.merge): the learned tags are served on top of the list in use, the shipped one
+        or the merged one (TagsDB.LearningBases), and a file of <data dir>/tags outranks the shipped list only when the merge wrote it
+        (its stamp, lustra/tags_updater.py is_merged_list). Loaded lists stay in memory unless their file changed or they are listed
+        in 'reload'"""
         from .extensions import data_dir
         env = os.environ.get('LUSTRA_TAGS_DIR')
         env_dir = pathlib.Path(env).expanduser() if env else None
@@ -902,8 +940,13 @@ class TagsDB:
             if cur is None or from_env or (cur.parent != env_dir and f.stat().st_mtime > cur.stat().st_mtime):
                 files[module] = f
 
-        ext_lists = TagsDB._extension_list_manifests()
+        installed = TagsDB._installed_manifests()
+        ext_lists = TagsDB._extension_list_manifests(installed)
         no_source = {module for module, (_, m) in ext_lists.items() if _has_no_tag_source(m)}
+        first: dict[str, object] = {}
+        for m in installed:  # the first manifest of an abbreviation is the module's (as in extension_lists)
+            first.setdefault(m.abbr, m)
+        merging = {module for module, m in first.items() if _merges(m)}
         for module, (f, _) in ext_lists.items():
             consider(module, f, False)
         for d in reversed(dirs):
@@ -917,12 +960,17 @@ class TagsDB:
                         continue
                     if module in no_source and files.get(module) == ext_lists[module][0]:
                         continue  # no source writes there for it: a learned list whose stamp was lost (a quit while it was written)
+                    if module in merging and module in ext_lists and files.get(module) == ext_lists[module][0] and not _merged_here(f):
+                        continue  # only its merge writes there: anything else (a learned list that lost its stamp) never hides it
                 consider(module, f, d == env_dir)
             if alias_file is None and (alias := d / FILE_NAME_ALIASES).is_file():
                 alias_file = alias
         bundled = {module: BundledList(f, m.id, m.version) for module, (f, m) in ext_lists.items()
                    if module in no_source and files.get(module) == f}
-        additions = {module: f for module in bundled if (f := _learned_additions(module) or learned.get(module)) is not None}
+        # before the learned lists are added: a learned list is never a base, it is what goes on top
+        bases = {module: b.path for module, b in bundled.items()}
+        bases.update({module: files[module] for module in merging if module in files})
+        additions = {module: f for module in bases if (f := _learned_additions(module) or learned.get(module)) is not None}
         for module, f in learned.items():
             files.setdefault(module, f)
         with TagsDB._lock:
@@ -931,6 +979,8 @@ class TagsDB:
             TagsDB.DBFiles.update(files)
             TagsDB.Bundled.clear()
             TagsDB.Bundled.update(bundled)
+            TagsDB.LearningBases.clear()
+            TagsDB.LearningBases.update(bases)
             TagsDB.Additions.clear()
             TagsDB.Additions.update(additions)
             if alias_file is not None and FILE_NAME_ALIASES not in TagsDB.AuxDBFiles:

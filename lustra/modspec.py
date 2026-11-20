@@ -28,6 +28,15 @@ re_entry = re.compile(r'^(?:[\w.]+|[\w-]+\.py):[A-Za-z_]\w*$', re.ASCII)
 re_min_sdk = re.compile(r'^\d{1,3}\.\d{1,3}(?:\.\d{1,3})?$', re.ASCII)
 re_tag_update_entry = re.compile(r'^[A-Za-z_][\w-]*\.py:[A-Za-z_]\w*$', re.ASCII)
 
+TAG_UPDATE_KEYS = ('entry', 'merge')
+'''keys of a manifest's tagUpdate. Cores before 2.0.10 know only 'entry' and refuse a manifest with 'merge' (the installed version
+stays)'''
+TAG_UPDATE_KEYS_SINCE = {'merge': '2.0.10'}
+'''the Lustra release that first accepts each tagUpdate key after 'entry': older cores refuse the whole manifest
+(tools/build_catalog.py warns about a catalog that holds one)'''
+TAG_MERGE_MIN_POSTS = (2, 1_000_000)
+'''bounds of tagUpdate.merge.minPosts (1 would be every tag of the site: a whole list, not a merge)'''
+
 
 class ManifestError(ValueError):
     pass
@@ -106,7 +115,9 @@ class ExtensionManifest:
     '''lowest lustra.sdk version ('MAJOR.MINOR') the extension needs; checked when it is installed and loaded'''
     tagUpdate: dict = field(default_factory=dict)
     '''the extension's own tag list update, {"entry": "tags.py:read_tags"}: a function of a .py file at the top of the extension folder,
-    called with a lustra.sdk.TagJob (SDK 1.1) only when the user asks (lustra/tags_updater.py, EXTENSION_JOB)'''
+    called with a lustra.sdk.TagJob (SDK 1.1) only when the user asks (lustra/tags_updater.py, EXTENSION_JOB). Optional
+    "merge": {"minPosts": N} (Lustra 2.0.10+): the function reads only the tags with N or more posts, every one of them, and Lustra
+    merges them into the list in use instead of replacing it (TagSource.merge)'''
     # runtime (not part of the file)
     generator: dict = field(default_factory=dict)
     '''origin of a generated extension, from the '$generator' key (lustra.extgen / lustra.aigen): shown as a badge (rule R13)'''
@@ -188,10 +199,18 @@ class ExtensionManifest:
         if self.minSdkVersion and not re_min_sdk.fullmatch(self.minSdkVersion):
             raise ManifestError(f'invalid minSdkVersion \'{self.minSdkVersion}\' (expected \'MAJOR.MINOR\', ex. \'1.0\')')
         if self.tagUpdate:
-            if unknown := [k for k in self.tagUpdate if k != 'entry']:
+            if unknown := [k for k in self.tagUpdate if k not in TAG_UPDATE_KEYS]:
                 raise ManifestError(f'unknown tagUpdate field(s): {", ".join(map(str, unknown))}')
             if not isinstance(entry := self.tagUpdate.get('entry'), str) or not re_tag_update_entry.fullmatch(entry):
                 raise ManifestError('invalid tagUpdate.entry (expected \'tags.py:function_name\', a file at the top of the extension folder)')
+            if 'merge' in self.tagUpdate:
+                merge = self.tagUpdate['merge']
+                n = merge.get('minPosts') if isinstance(merge, dict) else None
+                lo, hi = TAG_MERGE_MIN_POSTS
+                if (not isinstance(merge, dict) or set(merge) != {'minPosts'} or not isinstance(n, int) or isinstance(n, bool)
+                        or not lo <= n <= hi):
+                    raise ManifestError(f'invalid tagUpdate.merge (expected {{"minPosts": N}}, N from {lo:d} to {hi:d}: the update reads '
+                                        f'every tag with at least N posts)')
 
     @property
     def is_file_entry(self) -> bool:

@@ -219,7 +219,8 @@ def m_ext_uninstall(p: dict) -> dict:
 
 
 def _refresh_learned(module: str) -> None:
-    """The bundled list the learning adds to came, changed or went with the extension: the learned list is written again for it"""
+    """The list the learning adds to came, changed or went with the extension, or a merge update rewrote it (TagSource.merge): the
+    learned list is written again for it (the learned tags it now has leave the additions)"""
     try:
         if module:
             tags_learned.refresh(module)
@@ -305,40 +306,44 @@ def m_tags_fuzzy(p: dict) -> list[dict]:
 def m_tags_status(_: dict) -> list[dict]:
     """learned: the list is learned from the posts seen here (lustra/tags_learned.py), its counts are not the site's.
     bundled: the list ships inside an installed extension that has no tag source (version: that extension's), it is not updated and
-    the learning adds the tags it lacks (added: how many are served on top of it).
+    the learning adds the tags it lacks.
     shipped: the list in use is still the one shipped inside an installed extension that has a tag source (its own job, an engine,
     a reviewed module), not updated here yet (version: that extension's). For both, mtime is the time of the file (the build or
-    the install), not the date of the data"""
+    the install), not the date of the data.
+    added: learned tags served on top of the list, for every list the learning adds to (TagsDB.LearningBases: a bundled list, or
+    the list of a module whose own update merges, shipped or merged)"""
     rows = []
     own = TagsDB._extension_list_manifests()
     for module, path in sorted(TagsDB.files().items()):
         st = path.stat() if path.is_file() else None
         bundled = TagsDB.bundled(module)
         on_base = bundled is not None and bundled.path == path
+        on_top = TagsDB.learning_base(module) == path
         ext = own.get(module)
         shipped = not on_base and ext is not None and ext[0] == path
         rows.append({'module': module, 'path': path.as_posix(), 'size': st.st_size if st else 0, 'mtime': st.st_mtime if st else 0,
                      'loaded': TagsDB.is_loaded(module), 'learned': tags_learned.is_learned(module, path), 'bundled': on_base,
                      'shipped': shipped, 'version': bundled.version if on_base else ext[1].version if shipped else '',
-                     'added': tags_learned.added_count(module) if on_base and TagsDB.get_additions(module) else 0})
+                     'added': tags_learned.added_count(module) if on_top and TagsDB.get_additions(module) else 0})
     return rows
 
 
 def m_tags_learn(p: dict) -> dict:
-    """Learns a module's tag list from its downloaded files (download index) when it has no list from a source; the app calls it
-    after each download job. No request is made. -> {module, learned, posts, tags (status), newPosts, written (the list served for
-    the module changed: the app asks its tags again), mayLearn (False: nothing is learned, the module has a list from a source, see
-    sourceList), sourceList, indexed (the download index holds posts of the module), bundled (the learning adds to a list shipped
-    inside the extension), added (learned tags that list lacks)}"""
+    """Learns a module's tag list from its downloaded files (download index) when it has no list from a source, or on top of the
+    list it adds to; the app calls it after each download job. No request is made. -> {module, learned, posts, tags (status),
+    newPosts, written (the list served for the module changed: the app asks its tags again), mayLearn (False: nothing is learned,
+    the module has a list from a source, see sourceList), sourceList, indexed (the download index holds posts of the module),
+    bundled (the learning adds to a list shipped inside an extension that has no tag source), added (learned tags the list it adds
+    to lacks: a bundled list, or the list of a module whose own update merges)}"""
     module = str(p.get('module', ''))
     if not re_abbr.fullmatch(module):
         raise RpcError(-32602, f'invalid module \'{module}\'')
     may = tags_learned.may_learn(module)
     res = tags_learned.learn_from_index(module) if may else tags_learned.Learned(0, False)
-    bundled = tags_learned.base_list(module) is not None
+    base = tags_learned.base_list(module)
     return {'module': module, **tags_learned.status(module), 'newPosts': res.posts, 'written': res.written, 'mayLearn': may,
-            'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module), 'bundled': bundled,
-            'added': tags_learned.added_count(module) if bundled else 0}
+            'sourceList': tags_learned.has_source_list(module), 'indexed': tags_learned.indexed(module),
+            'bundled': base is not None and TagsDB.bundled(module) is not None, 'added': tags_learned.added_count(module) if base else 0}
 
 
 def _learn_from_preview(module: str, items: list[dict]) -> None:
@@ -368,8 +373,10 @@ def _running_tag_updates() -> dict[str, dict]:
 
 
 def m_tags_sources(_: dict) -> list[dict]:
-    """Installed modules with a tag list source (the five reviewed ones, extensions made from a known engine): the Tags A-Z page
-    shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates those with key 'none' / 'optional'.
+    """Installed modules with a tag list source (the five reviewed ones, extensions made from a known engine, extensions with their
+    own update): the Tags A-Z page shows an update button for each, the system schedule ('lustra-core tags --modules auto') updates
+    those with key 'none' / 'optional' and onDemand false. merge / mergeMinPosts: the extension's own update reads only the tags
+    with mergeMinPosts or more posts and merges them into the list in use (TagSource.as_dict).
     running: an update of the module runs in this core (count: tags read so far, message: its last progress line, startedAt: epoch s)"""
     from .tags_updater import tag_sources
     running = _running_tag_updates()
@@ -409,6 +416,7 @@ def m_tags_update(p: dict) -> dict:
                                   source=source, full=p.get('full') is True, progress=progress)
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
+                _refresh_learned(module)  # a merge rewrote the list the learning adds to: the tags it brought leave the additions
             done = {'job': job, 'ok': True, **res.as_dict()}
         except Exception as err:
             done = {'job': job, 'module': module, 'ok': False, 'written': False, 'message': _redact(f'failed: {err}')}

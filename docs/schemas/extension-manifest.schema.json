@@ -82,6 +82,20 @@
           "type": "string",
           "pattern": "^[A-Za-z_][\\w-]*\\.py:[A-Za-z_]\\w*$",
           "description": "'tags.py:read_tags': a function of a .py file at the top of the extension folder, called with a lustra.sdk.TagJob; it yields (name, posts, type) for each tag of the site"
+        },
+        "merge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minPosts"],
+          "properties": {
+            "minPosts": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 1000000,
+              "description": "the update reads every tag of the site with at least this many posts (Lustra asks the job with job.min_posts >= minPosts)"
+            }
+          },
+          "description": "the update reads only part of the site's list: every tag with at least minPosts posts. Lustra merges the read into the list in use (the tags read take their new counts, new tags are added, every other tag is kept) instead of replacing it. Lustra 2.0.10 and later; older cores refuse a manifest with this key"
         }
       },
       "description": "the extension's own tag list update (needs minSdkVersion '1.1'). Lustra runs it only when the user asks (Tags A-Z button, 'lustra-core tags --modules <abbr>'), never on the app's schedule, when the app opens or after the install; its requests go through the core (lustra/tags_updater.py, TagJob). The extension ships its list as 'tagList'"

@@ -15,8 +15,10 @@ Run: python -m unittest lustra.tests.test_tag_sources
 #
 #
 
+import contextlib
 import csv
 import datetime
+import functools
 import gzip
 import hashlib
 import html
@@ -49,7 +51,7 @@ from lustra.extgen.sandbox import pack  # noqa: E402
 from lustra.extgen.scaffold import create_draft, survey  # noqa: E402
 from lustra.extgen.taglist import bundle_tag_list  # noqa: E402
 from lustra.extgen.templates import make_manifest  # noqa: E402
-from lustra.modspec import ExtensionManifest  # noqa: E402
+from lustra.modspec import ExtensionManifest, ManifestError  # noqa: E402
 from lustra.module import ProcModule  # noqa: E402
 from lustra.robots import RobotsRules  # noqa: E402
 from lustra.tags import TagTypes  # noqa: E402
@@ -979,10 +981,8 @@ class LearnedTagListTests(_DataDirTest):
         self.assertTrue(server.m_tags_learn({'module': 'rp'})['sourceList'])
 
 
-class BundledListLearningTests(_DataDirTest):
-    """a list shipped inside an extension that has no tag source (Rule34Hentai, Paheal, Rule34.us 1.0.2) is never updated: the tags
-    of the posts previewed and downloaded that it lacks are learned on top of it, in a small file of their own (rule34.us: 18.9 MB,
-    544k tags, never rewritten or parsed again for it)"""
+class _ShippedListTest(_DataDirTest):
+    """An extension 'fakebooru' (fq) installed the way ext.install does it, with the list it ships; the learning is on"""
     BUNDLED = {'sky': (5000, 'general'), 'skyline': (40, 'general'), 'tree': (300, 'general')}
 
     def setUp(self) -> None:
@@ -998,6 +998,8 @@ class BundledListLearningTests(_DataDirTest):
         m['tagList'] = f'{m["abbr"]}_tags.json'
         (src / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
         tags_updater.write_tag_list(src / m['tagList'], tags)
+        if 'tagUpdate' in m:
+            (src / 'tags.py').write_text(MERGE_JOB_FILE, encoding='utf-8')
         return src
 
     def _install(self, tags: dict | None = None, version: str = '1.0.2', engine: str = 'custom', src: pathlib.Path | None = None,
@@ -1029,6 +1031,12 @@ class BundledListLearningTests(_DataDirTest):
         names = [name for name, _ in rows]
         assert len(names) == len(set(names)) == total, names  # never a duplicate
         return {name: info.posts_count for name, info in rows}
+
+
+class BundledListLearningTests(_ShippedListTest):
+    """a list shipped inside an extension that has no tag source (Rule34Hentai, Rule34.us 1.0.2; Paheal 1.0.2) is never updated: the
+    tags of the posts previewed and downloaded that it lacks are learned on top of it, in a small file of their own (rule34.us:
+    18.9 MB, 544k tags, never rewritten or parsed again for it)"""
 
     def test_tags_the_bundled_list_lacks_are_learned_on_top_of_it(self) -> None:
         self._install()
@@ -1522,6 +1530,19 @@ class ExtensionJobTests(_DataDirTest):
                     {'entry': 'tags.py:read_tags', 'every': 7}, {'entry': 5}, 'tags.py:read_tags'):
             with self.assertRaises(Exception, msg=str(bad)):
                 ExtensionManifest.from_dict({**base, 'tagUpdate': bad}, None, 'user')
+        # merge (Lustra 2.0.10): the update reads every tag with minPosts or more posts, and only those
+        entry = 'tags.py:read_tags'
+        for n in (100, 2, 1_000_000):
+            m = ExtensionManifest.from_dict({**base, 'tagUpdate': {'entry': entry, 'merge': {'minPosts': n}}}, None, 'user')
+            self.assertEqual({'entry': entry, 'merge': {'minPosts': n}}, m.tagUpdate)
+        for merge in (True, {}, {'minPosts': 1}, {'minPosts': 0}, {'minPosts': '100'}, {'minPosts': True}, {'minPosts': 10 ** 7},
+                      {'minPosts': 100, 'x': 1}, {'minPosts': 100.0}, [100], 100):
+            with self.subTest(merge=merge), self.assertRaisesRegex(ManifestError, r'^invalid tagUpdate\.merge \(expected'):
+                ExtensionManifest.from_dict({**base, 'tagUpdate': {'entry': entry, 'merge': merge}}, None, 'user')
+        with self.assertRaisesRegex(ManifestError, r'^invalid tagUpdate\.entry'):  # never a merge without its job
+            ExtensionManifest.from_dict({**base, 'tagUpdate': {'merge': {'minPosts': 100}}}, None, 'user')
+        with self.assertRaisesRegex(ManifestError, r'^unknown tagUpdate field\(s\): every$'):
+            ExtensionManifest.from_dict({**base, 'tagUpdate': {'entry': entry, 'merge': {'minPosts': 100}, 'every': 7}}, None, 'user')
 
     def test_the_generator_never_runs_a_drafts_job_but_checks_and_packs_it(self) -> None:
         from lustra.extgen.sandbox import _policy_checks
@@ -1541,6 +1562,437 @@ class ExtensionJobTests(_DataDirTest):
         with zipfile.ZipFile(pack(draft, self.root / 'fakebooru.zip')['path']) as zf:
             self.assertTrue({'fakebooru/tags.py', 'fakebooru/fq_tags.json'} <= set(zf.namelist()))
         self.assertFalse(marker.exists())
+
+
+MERGE_JOB_FILE = '''# coding=UTF-8
+
+
+def read_tags(job):
+    """every tag with job.min_posts or more posts, as a site with a list by popularity answers it"""
+    page = job.get_json(f'{job.site}popular.json?min={job.min_posts:d}') or {}
+    for name, posts, kind in page.get('tags', ()):
+        yield name, posts, kind
+    if page.get('cut'):
+        raise RuntimeError('the page is cut short')
+'''
+MERGE = {'entry': 'tags.py:read_tags', 'merge': {'minPosts': 100}}
+
+
+class PopularSite:
+    """A site that lists its tags by popularity (MERGE_JOB_FILE): it answers its tags whatever 'min' asks (the core drops those
+    under it) and records each 'min' asked"""
+
+    def __init__(self, tags: dict) -> None:
+        self.tags = tags
+        '''name -> posts, or (posts, type); 'general' when no type is given'''
+        self.asked: list[int] = []
+        self.status = 200
+        self.cut = False
+
+    def __call__(self, url: str, _headers: dict) -> tuple[int, bytes, dict]:
+        p = url_parse.urlsplit(url)
+        if p.path == '/robots.txt':
+            return 200, b'User-agent: *\nAllow: /\n', {'content-type': 'text/plain'}
+        if p.path != '/popular.json':
+            return 404, b'<html>not found</html>', {'content-type': 'text/html'}
+        self.asked.append(int(url_parse.parse_qs(p.query)['min'][0]))
+        if self.status != 200:
+            return self.status, b'', {'content-type': 'text/html'}
+        rows = [[name, *(v if isinstance(v, tuple) else (v, 'general'))] for name, v in self.tags.items()]
+        return _json({'tags': rows, 'cut': self.cut})
+
+
+class MergeUpdateTests(_DataDirTest):
+    """an extension whose own update reads only the most used tags (manifest tagUpdate.merge, Paheal from 1.0.3): the core merges
+    the read into the list in use (the tags read take their new counts, new tags are added, every other tag is kept) instead of
+    replacing it; the list the extension ships is never written"""
+    SHIPPED = ('"hero": "900 posts (character)"', '"old": "150 posts"', '"rare": "7 posts"', '"sky": "5000 posts"',
+               '"skyline": "40 posts"', '"tree": "300 posts"')
+    '''lines without a type, as 2tags/rp_tags.json has them, and one with a type'''
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.folder = self._extension()
+        self.site = PopularSite({'sky': 6000, 'tree': 310, 'brand_new': 150, 'hero': 950, 'low': 50})
+
+    def _extension(self, tag_list: bool = True) -> pathlib.Path:
+        m = make_manifest(ext_id='mergesite', abbr='mq', name='Mergesite', site=SITE, engine='custom', media=['image'])
+        m.update({'tagUpdate': MERGE, 'minSdkVersion': '1.1', **({'tagList': 'mq_tags.json'} if tag_list else {})})
+        folder = self.data / 'extensions' / 'mergesite'
+        folder.mkdir(parents=True)
+        (folder / 'manifest.json').write_text(json.dumps(m), encoding='utf-8')
+        (folder / 'downloader.py').write_text('# test\n', encoding='utf-8')
+        (folder / 'tags.py').write_text(MERGE_JOB_FILE, encoding='utf-8')
+        if tag_list:
+            self._ship(folder, self.SHIPPED)
+        TagsDB.locate_default_lists(reload=('mq',))
+        return folder
+
+    @staticmethod
+    def _ship(folder: pathlib.Path, lines, age: float = 60.0) -> pathlib.Path:
+        """The extension's list; its file time 'age' seconds back: an update writes a newer file (the newest list wins, and of two
+        lists with the same time the first one found, the extension's)"""
+        path = folder / 'mq_tags.json'
+        path.write_text('{\n' + ',\n'.join(lines) + '\n}\n', encoding='utf-8')
+        when = time.time() - age
+        os.utime(path, (when, when))
+        TagsDB.locate_default_lists(reload=('mq',))
+        return path
+
+    def _update(self, **kw) -> tuple[tags_updater.UpdateResult, FakeSession, list[str]]:
+        """update_tag_list as the app's button runs it: the list in use is the reference"""
+        notes: list[str] = []
+        kw.setdefault('reference', TagsDB.get_file('mq'))
+        session = FakeSession(self.site)
+        res = update_tag_list('mq', self.data / 'tags', session=session, allow_local=True, delay=0, min_interval=0.0,
+                              progress=lambda msg, _n: notes.append(msg), **kw)
+        return res, session, notes
+
+    def _written(self) -> dict[str, str]:
+        return _read_list(self.data / 'tags' / 'mq_tags.json')
+
+    def test_a_merge_source_says_so_and_runs_only_when_asked(self) -> None:
+        src = tag_source('mq')
+        self.assertEqual((tags_updater.EXTENSION_JOB, True, True, 100), (src.engine, src.on_demand, src.merge, src.merge_min_posts))
+        self.assertEqual(self.folder / 'mq_tags.json', pathlib.Path(src.tag_list))
+        self.assertEqual((True, 100), (src.as_dict()['merge'], src.as_dict()['mergeMinPosts']))
+        self.assertTrue(src.description.endswith(': the tags with 100+ posts, merged into the list in use'), src.description)
+        self.assertNotIn('mq', tags_updater._modules_arg('auto'))
+        row = next(r for r in server.m_tags_sources({}) if r['module'] == 'mq')
+        self.assertEqual((True, 100, True), (row['merge'], row['mergeMinPosts'], row['onDemand']))
+        ExtensionJobTests._install(self)  # a job that reads the whole list: it replaces the list, as before
+        plain = tag_source('jq')
+        self.assertEqual((False, 0, False, 0),
+                         (plain.merge, plain.merge_min_posts, plain.as_dict()['merge'], plain.as_dict()['mergeMinPosts']))
+        self.assertEqual("the extension's own update (tags.py:read_tags), run only when asked", plain.description)
+
+    def test_the_read_goes_into_the_list_in_use(self) -> None:
+        shipped = self.folder / 'mq_tags.json'
+        before = shipped.read_bytes()
+        self.assertEqual(shipped, TagsDB.get_file('mq'))
+        res, session, notes = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual([100], self.site.asked)  # the app asks with min_posts 1: the core raises it to merge.minPosts
+        self.assertEqual([f'{SITE}robots.txt', f'{SITE}popular.json?min=100'], [u for u, _ in session.calls])
+        # 'low' (50) is under 100: the job claims nothing there, the core drops it. A line without a type keeps none; a type read as
+        # 'general' (a job that cannot tell) never replaces the type the list has
+        self.assertEqual({'sky': '6000 posts', 'skyline': '40 posts', 'tree': '310 posts', 'old': '150 posts', 'rare': '7 posts',
+                          'hero': '950 posts (character)', 'brand_new': '150 posts (general)'}, self._written())
+        self.assertEqual((7, 6), (res.count, res.previous))
+        self.assertIn('written 7 tags (was 6, 2 requests, the tags with 100+ posts merged into the list in use: 4 read, 1 new, '
+                      '3 updated, 1 no longer listed kept)', res.message)
+        self.assertTrue(any('4 tags read, merging them into the list in use (6 tags)' in n for n in notes), notes)
+        self.assertTrue(any('7 tags in the merged list, writing it' in n for n in notes), notes)
+        self.assertEqual(before, shipped.read_bytes())  # the extension's list is never written
+        TagsDB.locate_default_lists(reload=('mq',))
+        self.assertEqual(self.data / 'tags' / 'mq_tags.json', TagsDB.get_file('mq'))
+        hero, sky = TagsDB.find_tag('mq', 'hero'), TagsDB.find_tag('mq', 'sky')
+        self.assertEqual((950, TagTypes.TAG_TYPE_CHARACTER, 6000, TagTypes.TAG_TYPE_UNKNOWN),
+                         (hero.posts_count, hero.tag_type, sky.posts_count, sky.tag_type))
+        self.assertEqual(7, TagsDB.find_tag('mq', 'rare').posts_count)
+
+    def test_min_posts_raises_the_floor_only(self) -> None:
+        res, _, _ = self._update(min_posts=200)
+        self.assertTrue(res.written, res.message)
+        self.assertEqual([200], self.site.asked)
+        self.assertIn('the tags with 200+ posts merged into the list in use: 3 read, 0 new, 3 updated, 0 no longer listed kept',
+                      res.message)
+        got = self._written()
+        self.assertEqual(('7 posts', '40 posts', '150 posts'), (got['rare'], got['skyline'], got['old']))  # never a filter of the list
+        self.assertNotIn('brand_new', got)
+
+    def test_the_next_merge_starts_from_the_last_one(self) -> None:
+        self._update()
+        TagsDB.locate_default_lists(reload=('mq',))
+        merged = self.data / 'tags' / 'mq_tags.json'
+        self.assertEqual(merged, TagsDB.get_file('mq'))
+        self.site.tags = {'sky': 6100, 'tree': 320, 'hero': 950}  # hero: the count of the last merge
+        res, _, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual((7, 7), (res.count, res.previous))
+        self.assertIn('3 read, 0 new, 2 updated, 2 no longer listed kept', res.message)
+        got = self._written()
+        self.assertEqual(('150 posts (general)', '320 posts', '150 posts'), (got['brand_new'], got['tree'], got['old']))
+
+    def test_a_newer_shipped_list_is_the_base_again(self) -> None:
+        self._update()
+        TagsDB.locate_default_lists(reload=('mq',))
+        # an update of the extension ships a newer list (installed after the merge: a later file time)
+        newer = self._ship(self.folder, ('"fresh": "120 posts"', '"hero": "900 posts (character)"', '"sky": "5500 posts"',
+                                         '"tree": "305 posts"'), age=-60.0)
+        self.assertEqual(newer, TagsDB.get_file('mq'))
+        self.site.tags = {'sky': 6200, 'tree': 330, 'hero': 970}
+        res, _, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual({'fresh': '120 posts', 'hero': '970 posts (character)', 'sky': '6200 posts', 'tree': '330 posts'},
+                         self._written())  # 'brand_new' was only in the list merged before
+
+    def test_a_read_that_misses_the_popular_tags_writes_nothing(self) -> None:
+        out = self.data / 'tags' / 'mq_tags.json'
+        ten = {f't{i}': 100 * (i + 1) for i in range(10)}
+        self._ship(self.folder, [f'"{n}": "{c} posts"' for n, c in sorted(ten.items())])
+        four = {'t0': 101, 't1': 201, 't2': 301, 't3': 401, 'other': 500}
+        self.site.tags = four
+        res, _, _ = self._update()
+        self.assertEqual((False, ('not written: the read lists 4 of the 10 tags with 100+ posts of the list in use (5 tags read; sanity '
+                                  'check failed, use --force)')), (res.written, res.message))
+        self.assertFalse(out.exists())
+        self.site.tags = {n.upper(): c + 1 for n, c in ten.items()}  # names in another form than the list's: never added
+        res, _, _ = self._update()
+        self.assertIn('not written: the read lists 0 of the 10 tags with 100+ posts', res.message)
+        self.assertFalse(out.exists())
+        self.site.tags = four
+        res, _, _ = self._update(force=True)
+        self.assertTrue(res.written, res.message)
+        got = self._written()
+        self.assertEqual(11, len(got))  # every tag of the list in use kept
+        self.assertEqual(('101 posts', '1000 posts', '500 posts (general)'), (got['t0'], got['t9'], got['other']))
+        out.unlink()
+        self.site.tags = {'t0': 101, 't1': 201, 't2': 301, 't3': 401, 't4': 501}  # half of them: written
+        self.assertTrue(self._update()[0].written)
+        out.unlink()
+        self._ship(self.folder, ['"a": "5 posts"', '"b": "99 posts"'])  # no tag at 100+ posts: nothing to compare
+        self.site.tags = {'c': 150}
+        res, _, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertEqual({'a': '5 posts', 'b': '99 posts', 'c': '150 posts (general)'}, self._written())
+
+    def test_failed_or_empty_reads_write_nothing(self) -> None:
+        tags_dir = self.data / 'tags'
+        before = TagsDB.get_file('mq')
+        self.site.tags = {'low': 50, 'lower': 7}  # nothing at 100+ posts
+        for force in (False, True):
+            res, _, _ = self._update(force=force)
+            self.assertEqual((False, 'not written: no tags fetched'), (res.written, res.message))
+        self.site.tags = {'sky': 6000}
+        self.site.status = 500
+        with self.assertRaisesRegex(RuntimeError, 'HTTP 500'):
+            self._update()
+        self.site.status = 200
+        self.site.cut = True  # the job raises after it gave tags
+        with self.assertRaisesRegex(RuntimeError, 'cut short'):
+            self._update()
+        for path in (tags_dir / 'mq_tags.json', tags_dir / tags_updater.PARTIAL_DIR, tags_dir / tags_updater.META_DIR):
+            self.assertFalse(path.exists(), path)
+        TagsDB.locate_default_lists()
+        self.assertEqual(before, TagsDB.get_file('mq'))
+
+    def test_unreadable_lines_of_the_list_in_use_are_never_dropped(self) -> None:
+        self._ship(self.folder, ('"sky": "5000 posts"', '"tree": "300 posts"', '"odd": "about 40 posts"'))
+        res, _, _ = self._update()
+        self.assertEqual((False, ('not written: 1 line of the list in use could not be read: the merged list would lose it (use '
+                                  '--force)')), (res.written, res.message))
+        self.assertFalse((self.data / 'tags' / 'mq_tags.json').exists())
+        self.assertTrue(self._update(force=True)[0].written)
+        self.assertNotIn('odd', self._written())
+
+    def test_a_learned_list_is_never_a_base(self) -> None:
+        os.environ['LUSTRA_TAGS_LEARN'] = '1'  # restored by the patch
+        shutil.rmtree(self.folder)
+        self._extension(tag_list=False)  # a merge job, no list shipped: the module's list is learned from the posts seen
+        tags_learned.learn('mq', [('1', ['sky', 'mine']), ('2', ['sky'])])
+        learned = tags_learned.list_path('mq')
+        self.assertEqual((learned, True), (TagsDB.get_file('mq'), tags_learned.is_learned('mq')))
+        res, _, _ = self._update()
+        self.assertTrue(res.written, res.message)
+        self.assertIn(', the tags with 100+ posts only: no list in use to merge into', res.message)
+        self.assertEqual(0, res.previous)  # nor what the read is measured against: its counts are not the site's
+        self.assertEqual({'sky': '6000 posts (general)', 'tree': '310 posts (general)', 'brand_new': '150 posts (general)',
+                          'hero': '950 posts (general)'}, self._written())
+        TagsDB.locate_default_lists(reload=('mq',))
+        tags_learned.refresh('mq')  # (server.m_tags_update does it after an update)
+        merged = self.data / 'tags' / 'mq_tags.json'
+        self.assertEqual((merged, merged), (TagsDB.get_file('mq'), TagsDB.learning_base('mq')))
+        self.assertEqual({'mine': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('mq')))
+        self.assertEqual((1, 6000), (TagsDB.find_tag('mq', 'mine').posts_count, TagsDB.find_tag('mq', 'sky').posts_count))
+
+    def test_a_merge_never_writes_the_popular_tags_alone_over_a_shipped_list(self) -> None:
+        # 'lustra-core tags --modules mq' on a machine where the extension is not installed: no list in use, the extension of the
+        # catalog bundled with the core is the source, and the list it ships is the base
+        catalog = self.root / 'catalog'
+        catalog.mkdir()
+        shutil.move(self.folder, catalog / 'mergesite')
+        with mock.patch.dict(os.environ, {'LUSTRA_CATALOG_DIR': catalog.as_posix()}):
+            TagsDB.locate_default_lists()
+            self.assertIsNone(TagsDB.get_file('mq'))
+            res, _, _ = self._update(source=tag_source('mq'), reference=None)
+            self.assertTrue(res.written, res.message)
+            self.assertIn('the tags with 100+ posts merged into the list the extension ships: 4 read, 1 new', res.message)
+            self.assertEqual(7, len(self._written()))
+            (self.data / 'tags' / 'mq_tags.json').unlink()
+            (catalog / 'mergesite' / 'mq_tags.json').unlink()  # the list it names is nowhere: the read alone would replace it
+            res, _, _ = self._update(source=tag_source('mq'), reference=None)
+            self.assertEqual((False, ('not written: no list to merge the tags with 100+ posts into (the extension names mq_tags.json, '
+                                      'not found): they would be the whole list (4 tags read, use --force)')), (res.written, res.message))
+            self.assertFalse((self.data / 'tags' / 'mq_tags.json').exists())
+            res, _, _ = self._update(source=tag_source('mq'), reference=None, force=True)
+            self.assertTrue(res.written, res.message)
+            self.assertIn('the tags with 100+ posts only: no list in use to merge into', res.message)
+
+    def test_a_list_the_update_did_not_write_never_hides_the_shipped_list(self) -> None:
+        # a file at <data dir>/tags/mq_tags.json the update did not write, newer than the shipped list: a learned list whose stamp
+        # was lost (a quit while it was written, a profile copied without its file times, the learning's state removed)
+        stray = self.data / 'tags' / 'mq_tags.json'
+        stray.parent.mkdir(parents=True)
+        tags_updater.write_tag_list(stray, {'sky': (3, 'unknown'), 'mine': (1, 'unknown')})
+        TagsDB.clear()
+        TagsDB.locate_default_lists()
+        shipped = self.folder / 'mq_tags.json'
+        self.assertEqual(shipped, TagsDB.get_file('mq'))
+        res, _, _ = self._update()  # its base: the shipped list, never the stray file
+        self.assertTrue(res.written, res.message)
+        got = self._written()
+        self.assertEqual(('7 posts', '6000 posts'), (got['rare'], got['sky']))
+        self.assertNotIn('mine', got)
+        TagsDB.locate_default_lists()
+        self.assertEqual(stray, TagsDB.get_file('mq'))  # what the update wrote: the newest list wins
+        later = time.time() + 60  # its time changed (a copy without file times): not known as the update's any more
+        os.utime(stray, (later, later))
+        TagsDB.locate_default_lists()
+        self.assertEqual(shipped, TagsDB.get_file('mq'))
+
+    def test_the_command_line_merges_into_the_list_in_use(self) -> None:
+        out = self.root / 'lists'
+        update = functools.partial(tags_updater.update_tag_list, session=FakeSession(self.site), allow_local=True, min_interval=0.0)
+        stdout = io.StringIO()
+        with mock.patch.object(tags_updater, 'update_tag_list', update), contextlib.redirect_stdout(stdout):
+            self.assertEqual(0, tags_updater.main(['--modules', 'mq', '--out', str(out), '--delay', '0']))
+        text = stdout.getvalue()
+        self.assertIn("mq: updating (Mergesite: the extension's own update (tags.py:read_tags), run only when asked: the tags with "
+                      "100+ posts, merged into the list in use)...", text)
+        self.assertIn('merged into the list in use: 4 read, 1 new, 3 updated, 1 no longer listed kept', text)
+        self.assertEqual(('7 posts', '6000 posts'), tuple(_read_list(out / 'mq_tags.json')[n] for n in ('rare', 'sky')))
+        self.assertFalse((self.data / 'tags' / 'mq_tags.json').exists())
+
+
+class MergeSourceLearningTests(_ShippedListTest):
+    """the list of a module whose own update merges a partial read into it (TagSource.merge, Paheal from 1.0.3) is learned on top
+    of like a list with no source: the shipped list before the first update, the merged list after it; each update takes over the
+    learned tags it brings (the site's count instead of the one seen here)"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.site = PopularSite({'sky': 6000, 'tree': 310, 'new': 150})
+
+    def _install_merge(self, version: str = '1.0.2') -> dict:
+        src = self._source(self.BUNDLED, version, tagUpdate=MERGE, minSdkVersion='1.1')
+        old = time.time() - 60  # an update writes a newer file (the newest list wins; equal times keep the shipped one)
+        os.utime(src / 'fq_tags.json', (old, old))
+        return self._install(src=src)
+
+    def _update(self) -> dict:
+        """The Tags A-Z button (tags.update) -> its tags.updateDone"""
+        done, notes = threading.Event(), []
+
+        def notify(method: str, params: dict) -> None:
+            notes.append((method, params))
+            if method == 'tags.updateDone':
+                done.set()
+
+        update = functools.partial(tags_updater.update_tag_list, session=FakeSession(self.site), allow_local=True, min_interval=0.0)
+        with mock.patch.object(tags_updater, 'update_tag_list', update), mock.patch.object(server, 'notify', notify):
+            server.m_tags_update({'module': 'fq', 'delay': 0})
+            self.assertTrue(done.wait(WAIT), notes)
+        return notes[-1][1]
+
+    def test_a_merge_source_learns_on_top_of_its_list(self) -> None:
+        self._install_merge()
+        shipped = self.folder / 'fq_tags.json'
+        self.assertTrue(tag_source('fq').merge)
+        self.assertEqual((None, shipped, shipped), (TagsDB.bundled('fq'), TagsDB.get_file('fq'), TagsDB.learning_base('fq')))
+        self.assertTrue(tags_learned.may_learn('fq'))
+        self.assertFalse(tags_learned.has_source_list('fq'))
+        self.assertEqual('tags.learned', self._learn([('1', ['sky', 'new'])])[-1][0])
+        self.assertEqual({'new': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'new': 1}, self._all())
+        self.assertEqual({'bundled': False, 'shipped': True, 'version': '1.0.2', 'added': 1},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'added')})
+        res = server.m_tags_learn({'module': 'fq'})
+        self.assertEqual((True, False, False, 1), (res['mayLearn'], res['sourceList'], res['bundled'], res['added']))
+
+    def test_the_update_folds_the_learned_tags_it_brings(self) -> None:
+        self._install_merge()
+        self._learn([('1', ['sky', 'new']), ('2', ['rare_new'])])
+        added = tags_learned.additions_path('fq')
+        self.assertEqual({'new', 'rare_new'}, set(_read_list(added)))
+        done = self._update()
+        self.assertTrue(done['written'], done)
+        self.assertIn('merged into the list in use', done['message'])
+        merged = self.data / 'tags' / 'fq_tags.json'
+        self.assertEqual((merged, merged), (TagsDB.get_file('fq'), TagsDB.learning_base('fq')))
+        self.assertEqual({'rare_new': '1 posts (unknown)'}, _read_list(added))  # 'new' came with the merge: the site's count
+        self.assertEqual(150, TagsDB.find_tag('fq', 'new').posts_count)
+        self.assertEqual({'sky': 6000, 'skyline': 40, 'tree': 310, 'new': 150, 'rare_new': 1}, self._all())
+        self.assertEqual({'bundled': False, 'shipped': False, 'version': '', 'added': 1},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'added')})
+        self.assertTrue(next(r for r in server.m_tags_sources({}) if r['module'] == 'fq')['merge'])
+
+    def test_learning_goes_on_after_the_update(self) -> None:
+        self._install_merge()
+        self.assertTrue(self._update()['written'])
+        merged = self.data / 'tags' / 'fq_tags.json'
+        before = merged.read_bytes()
+        self.assertEqual('tags.learned', self._learn([('3', ['tree', 'another'])])[-1][0])
+        self.assertEqual({'another': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        self.assertEqual(1, self._all()['another'])
+        self.assertEqual((merged, before), (TagsDB.get_file('fq'), merged.read_bytes()))  # never written by the learning
+        self.assertEqual(1, self._row()['added'])
+
+    def test_from_no_source_to_a_merge_source_keeps_the_additions(self) -> None:
+        self._install()  # 1.0.2: no source, a bundled list
+        self.assertIsNotNone(TagsDB.bundled('fq'))
+        self._learn([('1', ['sky', 'new'])])
+        self._install_merge('1.0.3')  # Paheal 1.0.2 -> 1.0.3
+        self.assertIsNone(TagsDB.bundled('fq'))
+        self.assertEqual(self.folder / 'fq_tags.json', TagsDB.learning_base('fq'))
+        self.assertEqual({'new': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        self.assertEqual(1, self._all()['new'])
+        self.assertEqual({'bundled': False, 'shipped': True, 'version': '1.0.3', 'added': 1},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'added')})
+
+    def test_the_learning_never_removes_a_list_the_update_wrote(self) -> None:
+        # the whole learned list of before is removed once the learning adds to a base. For a merge source that path is also where
+        # its update writes: an update that lands while the learning writes its additions (Preview runs on a thread of its own) is
+        # never removed with it
+        tags_learned.learn('fq', [('0', ['sky', 'old'])])  # learned before the extension shipped its list
+        whole = tags_learned.list_path('fq')
+        write = tags_learned.write_tag_list
+
+        def merge_lands(path: pathlib.Path, tags: dict) -> None:
+            write(path, tags)
+            if path != whole:
+                tags_updater.write_tag_list(whole, {'sky': (6000, 'general')})  # what update_tag_list writes there meanwhile
+
+        with mock.patch.object(tags_learned, 'write_tag_list', merge_lands):
+            self._install_merge()  # ext.install: the learned list moves onto the shipped one (tags_learned.refresh)
+        self.assertEqual({'old': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
+        self.assertEqual({'sky': '6000 posts (general)'}, _read_list(whole))
+
+    def test_a_lost_stamp_never_hides_the_shipped_list(self) -> None:
+        # as for a list with no source (BundledListLearningTests): a whole learned list left behind without its stamp is not taken
+        # for the module's list, nor for the base of the next update
+        tags_learned.learn('fq', [('0', ['sky', 'old'])])  # learned before the extension shipped its list
+        whole = tags_learned.list_path('fq')
+        kept = whole.read_bytes()
+        self._install_merge()
+        self._learn([('1', ['sky', 'new_a'])])
+        added = tags_learned.additions_path('fq')
+        self.assertEqual({'old', 'new_a'}, set(_read_list(added)))
+        whole.write_bytes(kept)  # left behind (a quit before it was removed), its stamp lost
+        later = time.time() + 60
+        for f in (whole, added):
+            os.utime(f, (later, later))
+        (self.data / 'tags' / 'learned' / 'fq.sqlite').unlink()
+        TagsDB.clear()
+        TagsDB.locate_default_lists()  # a restart
+        shipped = self.folder / 'fq_tags.json'
+        self.assertEqual((shipped, shipped, added), (TagsDB.get_file('fq'), TagsDB.learning_base('fq'), TagsDB.get_additions('fq')))
+        self.assertEqual(5000, self._all()['sky'])
+        done = self._update()
+        self.assertTrue(done['written'], done)
+        got = _read_list(self.data / 'tags' / 'fq_tags.json')
+        self.assertEqual(('40 posts (general)', '6000 posts (general)'), (got['skyline'], got['sky']))  # merged into the shipped list
+        self.assertNotIn('old', got)
 
 #
 #
