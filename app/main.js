@@ -2871,7 +2871,9 @@ async function selfTestContract(js, quick) {
   }
   out.selectedDownload = await selfTestSelectedDownload(js);
   // posts without a preview address, or whose preview does not load (here a loopback address, refused by lustra-thumb without
-  // a request): a placeholder tile instead of the broken image icon, and the card still selects
+  // a request): a placeholder tile instead of the broken image icon, and the card still selects. The grid's images load lazily,
+  // and a window the system reports hidden or occluded (the Windows and macOS CI runners) never lays them out in view: the test
+  // asks for them now (loading = eager), the error path is the app's own
   try {
     out.thumbPlaceholder = await js(`(async () => {
       const pause = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -2882,6 +2884,7 @@ async function selfTestContract(js, quick) {
       S.preview.key = previewKey();
       S.preview.selected.clear();
       renderGrid();
+      document.querySelectorAll('#grid img').forEach((img) => { img.loading = 'eager'; });
       for (let i = 0; i < 50 && document.querySelectorAll('#grid .thumb-ph').length < 3; i++) await pause(100);
       const tiles = [...document.querySelectorAll('#grid .thumb-ph')].map((e) => e.dataset.kind + ':' + e.textContent);
       const first = document.querySelector('#grid .card');
