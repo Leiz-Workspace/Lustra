@@ -1103,7 +1103,7 @@ Chủ repo hỏi: "Khảo sát RN, RP, RS để thêm tags.py đi, và RN, RP, R
 - **RN / RP / RS đã có tag chưa:** có danh sách, chưa có nguồn cập nhật.
   - Từ 1.0.2 (7ba, mục 10), cả ba mang danh sách `2tags/` trong catalog đi kèm app và trong zip của catalog chính thức: rn 55.393 tag (≥ 1 post), rp 162.526 tag (≥ 5 post), rs 543.814 tag (≥ 5 post). Thư mục dữ liệu của chủ repo có đúng các số này (đọc, không sửa).
   - Lõi học thêm tag từ post đã xem / đã tải trên danh sách đó (7bb); máy chủ repo chưa có post nào được học cho rn, rp.
-  - `source_for_manifest` trả `None` cho cả ba, nên Tags A–Z không có nút "Cập nhật" cho chúng. Sau khảo sát này vẫn vậy.
+  - `source_for_manifest` trả `None` cho cả ba, nên Tags A–Z không có nút "Cập nhật" cho chúng. Sau khảo sát này vẫn vậy (rp có nút từ 1.0.3, 7bd).
 - **Khảo sát** (workflow: mỗi site một người khảo sát, hai người cố bác bỏ kết luận theo hai góc luật và đúng sai). Chỉ qua fetcher của lõi / trình tạo, robots.txt áp chặt theo RFC 9309, không cookie. Quyền đổi thứ tự tham số quanh một luật robots (2026-11-20) chỉ dành cho rule34video, không dùng ở đây.
   - **rn (rule34hentai.net): không làm được (R5).**
     - robots.txt do Cloudflare quản lý: `User-agent: *` `Allow: /`, kèm `Content-Signal`; chỉ các bot AI có tên bị chặn.
@@ -1119,7 +1119,8 @@ Chủ repo hỏi: "Khảo sát RN, RP, RS để thêm tags.py đi, và RN, RP, R
     - Muốn thay danh sách đi kèm (162.526 tag), lần cập nhật phải qua sanity check 50 % (≥ 81.263 tag), tức N ≤ khoảng 18 (ước từ danh sách đi kèm: ≥ 18 post khoảng 83 nghìn tag, 14,5 MB; ≥ 10 post khoảng 116 nghìn tag, 20 MB).
     - Chạy thật job (bản thử `tags.py`, paheal 1.0.3 cài vào thư mục dữ liệu tạm, qua `update_tag_list` như nút "Cập nhật"): `mincount=10` trả **HTTP 500**, thân rỗng, sau 3,7 giây; thử lại một lần qua fetcher của trình tạo: vẫn 500. `mincount=18` cũng 500. Không thử thêm ngưỡng nào.
     - Kết luận: không có ngưỡng nào vừa đủ tag để qua sanity check vừa được site trả. Hạ sanity check, hay đọc ≥ 100 post (26 nghìn tag) rồi gộp lên danh sách đi kèm, là thay đổi luật của lõi: để chủ repo quyết. rp giữ 1.0.2, danh sách đi kèm và việc học thêm.
-    - Bản thử (job `tags.py`, manifest 1.0.3, luật build mang `2tags/` cho extension có job chỉ chạy khi bấm, 10 test, fixture) nằm ở nhánh cục bộ `wip/rp-tag-job-500`, không push.
+      - **Sau đó (7bd):** chủ repo chọn đọc các tag có từ 100 post rồi gộp. Paheal 1.0.3 có nút "Cập nhật".
+    - Bản thử (job `tags.py`, manifest 1.0.3, luật build mang `2tags/` cho extension có job chỉ chạy khi bấm, 10 test, fixture) nằm ở nhánh cục bộ `wip/rp-tag-job-500`, không push. 7bd dùng lại job, fixture và test; ngưỡng thành 100, cách ghi thành gộp, luật build chỉ còn cho nguồn gộp.
   - **rs (rule34.us): không làm được, vì site không có danh sách tag nào để đọc.**
     - robots.txt: HTTP 404, không có file. Theo RFC 9309, 4xx nghĩa là không giới hạn. Không có `Crawl-delay`, nên nhịp là sàn 1 giây của trang html, như downloader.
     - Điều khoản: site không có trang điều khoản hay luật nào. Menu (Images, Comments, Top Character List, Settings, Help) và chân trang (chỉ có "DMCA") không link tới trang như vậy.
@@ -1146,7 +1147,58 @@ Chủ repo hỏi: "Khảo sát RN, RP, RS để thêm tags.py đi, và RN, RP, R
 - **Ghi chú cho skill** (nằm ngoài repo, chưa sửa): template `reference/tag-jobs/shimmie_api.py` chỉ khớp thuộc tính trong nháy kép; trên paheal (nháy đơn) nó đọc ra 0 tag.
 - **Lọc giới tính, mục 2 của 7ba:** ngày 2026-11-20 chủ repo xác nhận "Loại Chỉ nam" + `amputee` đã chạy đúng; dòng đính chính ở 7ba đã ghi lại.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7bc)
+### 7bd. Paheal 1.0.3: nút "Cập nhật" đọc các tag dùng nhiều rồi gộp vào danh sách — 2026-11-20
+Chủ repo chọn cách gộp cho rp (7bc để ngỏ). Job của extension chỉ đọc các tag có từ 100 post, một trang. Lõi gộp lần đọc đó vào danh sách đang dùng, không thay cả danh sách.
+- **Khai báo:** `"tagUpdate": {"entry": "tags.py:read_tags", "merge": {"minPosts": 100}}` (`lustra/modspec.py`, schema). `minPosts` từ 2 tới 1.000.000. Job phải đọc đủ mọi tag có từ `minPosts` post. `lustra.sdk` không thêm tên nào, nên `SDK_VERSION` giữ 1.1 và Paheal 1.0.3 khai báo `minSdkVersion` 1.1.
+- **Lõi** (`update_tag_list`):
+  - Ngưỡng N = max(`--min-posts`, `minPosts`). Lõi đưa N vào `job.min_posts` và lọc lần đọc theo N. App hỏi với 1, nên N = 100.
+  - Nền là danh sách đang dùng. Lần đầu là danh sách đi kèm extension, sau đó là file ở `<thư mục dữ liệu>/tags/`. Cập nhật extension có danh sách mới hơn thì nền là danh sách đó. Danh sách học từ post không bao giờ là nền, và không được tính là số tag cũ của sanity check.
+  - Không có danh sách đang dùng (dòng lệnh trên máy chưa cài Paheal) thì nền là danh sách extension mang theo, kể cả bản trong catalog của lõi. Extension khai báo `tagList` mà không có danh sách nào thì không ghi, trừ khi dùng `--force`: lần đọc một mình sẽ thành cả danh sách.
+  - Tag trong lần đọc lấy số post mới. Tag mới được thêm. Mọi tag khác giữ nguyên số post, kể cả tag có từ N post mà lần đọc không còn liệt kê (thông báo đếm là "no longer listed kept"). Không tag nào bị bỏ: nền có dòng không đọc được thì không ghi, trừ khi dùng `--force`.
+  - Loại `general` hay `unknown` của lần đọc không đè loại của nền. Dòng không ghi loại vẫn không ghi loại (`write_tag_list` ghi `"N posts"` khi loại rỗng). Danh sách rp giữ dạng và cỡ cũ (khoảng 4,3 MB). Tag mới ghi `(unknown)`, vì site không có loại tag.
+  - `_merge_counts` dùng chung với phần cuối danh sách của rx. Không có `.partial`. Lần gộp ghi cỡ và giờ của file vừa ghi vào `<thư mục ra>/.meta/<abbr>_tags.json`.
+  - Thông báo có dạng `written N tags (was M, 2 requests, the tags with 100+ posts merged into the list in use: … read, … new, … updated, … no longer listed kept)`. `UpdateResult` không thêm trường nào; toast của app giữ nguyên.
+- **Sanity check:** lần đọc rỗng thì không ghi, kể cả với `--force`. Lần đọc phải có ít nhất một nửa số tag có từ N post của nền, so theo tên; thiếu thì không ghi, trừ khi dùng `--force`. Cách này bắt được lần đọc bị cắt, trang khác, tên sai dạng (hoa thường, escape hai lần). Kiểm tra 50 % cũ vẫn chạy trên danh sách sau khi gộp.
+- **TagsDB:** với module có job gộp, file ở `<thư mục dữ liệu>/tags/` chỉ thay danh sách đi kèm khi có dấu của lần gộp (cỡ và giờ khớp `.meta`). Danh sách học được mất dấu (app tắt lúc ghi, chép hồ sơ không giữ giờ) không che danh sách đi kèm, nên cũng không thành nền. rp có sự che chắn này từ 2.0.10 vì là module không có nguồn; 7bd giữ nó khi rp có nguồn.
+- **Học thêm:** vẫn chạy cho rp, trên danh sách đi kèm rồi trên file đã gộp (`TagsDB.LearningBases`, `TagsDB.learning_base`).
+  - Sau mỗi lần cập nhật (`server.m_tags_update`), tag đã học mà danh sách nay có bị bỏ khỏi `tags/learned/rp_added.json` và lấy số post của site.
+  - Cập nhật Paheal 1.0.2 → 1.0.3 giữ nguyên phần học thêm.
+  - `added` của `tags.status` và `tags.learn` tính cho mọi danh sách mà việc học thêm vào. `tags.learn` không thêm trường mới (không có chỗ nào dùng).
+  - Việc học không xoá file `<thư mục dữ liệu>/tags/<abbr>_tags.json` nếu file đã đổi từ lúc nó đọc: lần gộp ghi đúng chỗ đó.
+- **Tags A–Z:**
+  - Cột "Nguồn" ghi "Rule34 Paheal"; rê chuột để xem cách gộp. Nút "Cập nhật" có cùng chú thích.
+  - Tới lần bấm đầu, cột "Cập nhật" ghi "theo extension v1.0.3". Sau đó cột ghi giờ của lần gộp; rê chuột thấy tag nào mang số post của site lúc đó.
+  - "+N tag học thêm" vẫn hiện.
+  - Toast là thông báo của lõi.
+  - Mock của trình duyệt: dòng rp có `merge`, `mergeMinPosts`, `shipped`, `added`.
+- **Build:** catalog đi kèm app và zip vẫn mang `2tags/rp_tags.json` làm nền. Thiếu thì `build_catalog.py` dừng. Danh sách cạnh manifest hay trong `--lists` ít hơn một nửa danh sách `2tags/` cũng làm build dừng (đó là danh sách job ghi một mình). Job thay cả danh sách vẫn không mang danh sách `2tags/`.
+- **Bản cũ:**
+  - Lõi 2.0.7 tới 2.0.10-rc.109 từ chối cài 1.0.3 (`unknown tagUpdate field(s): merge`) ở `ExtensionManifest.load`, trước `_check_sdk` và trước khi chép gì, nên giữ bản đang có. Lõi 2.0.6 báo `unknown field(s): tagUpdate`.
+  - Đã thử offline: nạp manifest 1.0.3 bằng `lustra/modspec.py` của v2.0.6, v2.0.7, v2.0.9 và v2.0.10-rc.109 (`git archive`). Thẻ "Cập nhật" và "Cài" của catalog từ xa đi qua cùng `_install_tree` (đọc mã của v2.0.9). Danh sách catalog từ xa vẫn đọc được: mục của index không mang trường nào của manifest.
+  - Catalog đi kèm 2.0.9 và rc.109 có Paheal 1.0.2; 2.0.7 có 1.0.0, 2.0.8 có 1.0.1.
+  - `build_catalog.py` in một dòng trên stderr cho manifest có khoá mà lõi cũ từ chối (`TAG_UPDATE_KEYS_SINCE` trong `lustra/modspec.py`). operations mục 3d có cách build catalog giữ Paheal 1.0.2 tới khi 2.0.10 lên production.
+  - Plan ext-tag-jobs sửa dòng `minSdkVersion`: lõi 2.0.6 cũng đọc manifest trước khi kiểm SDK.
+  - Quay về 2.0.9 sau khi cài 1.0.3: Paheal không nạp được, cài lại 1.0.2 từ catalog đi kèm. Trên 2.0.9 file đã gộp vẫn được dùng (mới nhất thắng). Trên rc.109 thì không: bản đó bỏ qua file ở thư mục dữ liệu của module không có nguồn.
+- **Trình tạo bằng AI:** paheal là mẫu của engine `shimmie_api`. Manifest mẫu đưa cho model nay bỏ `tagUpdate` (`lustra/aigen/tools.py`), vì trình tạo không viết `tags.py`; bản nháp chép khoá đó sẽ hỏng ở bước kiểm.
+- **Test** (offline; mỗi test mới đã được thử với mã bị làm hỏng một chỗ, và báo lỗi):
+  - `test_tag_sources`: `MergeUpdateTests` (12), `MergeSourceLearningTests` (6), `PahealTagJobTests` (12, lấy từ nhánh `wip/rp-tag-job-500` rồi sửa); `test_the_manifest_entry_is_checked` thêm phần `merge`.
+  - `test_catalog_trust`: `test_a_merge_source_takes_the_repository_list_and_needs_one`, `test_a_replace_job_never_takes_the_repository_list`.
+  - `test_batch_d_app`: `test_catalog_extensions_that_need_their_shipped_list_carry_it` (đổi tên), `test_paheal_updates_to_its_merge_job_and_a_refused_install_keeps_1_0_2`. Test sau dùng lõi mới với danh sách khoá cũ, nên chỉ kiểm việc cài có giao dịch; bằng chứng về bản cũ là lần thử bằng tay ở trên.
+  - `test_the_real_shipped_list_merges_without_loss` chạy trên `2tags/rp_tags.json` thật (file có trong repo). Số mong đợi tính từ file, nên test vẫn đúng khi danh sách đổi.
+  - Danh sách unittest của CI: 480 test OK (1 bỏ qua); `tests.py`; ruff; `npm run check`; `icon-utils`.
+- **Request tới site:** không có; số đo lấy từ 7bc.
+- **Còn lại:**
+  - Lần chạy thật đầu tiên với site (2 request) làm sau, ngoài lượt này. Lần đầu nên báo "new" chừng vài trăm (trang có 26.343 tag, danh sách đi kèm có 25.520 tag từ 100 post). "new" lên hàng nghìn nghĩa là tên trên trang không cùng dạng với danh sách (dấu `&`, dấu nháy, chữ có dấu): mỗi tên như vậy thành một tag thứ hai.
+  - Chủ repo bấm thử "Cập nhật" trong app (từ nhánh này hoặc bản rc sau), rồi build lại và ký lại catalog chính thức. Paheal 1.0.3 chỉ lên catalog chính thức sau khi 2.0.10 lên production; trước đó build giữ 1.0.2 (operations mục 3d).
+  - Skill `new-site-extension` (ngoài repo) chưa biết `merge`: cần ghi khi nào khai báo, rằng cần Lustra 2.0.10, và `build_catalog.py` khi đó cần danh sách `2tags/`.
+  - Rủi ro đã nhận:
+    - tag rời khỏi nhóm ≥ 100 post giữ số cũ mãi, và vẫn tính vào mẫu số của kiểm tra 50 % (phải nhiều năm mới đáng kể; danh sách đi kèm mới đặt lại nền);
+    - tag dưới 100 post không bao giờ lấy lại số post của site; tag mới dưới 100 post chỉ đến qua việc học (số post ở máy này);
+    - cài một bản Paheal mới hơn sau lần gộp thì danh sách của bản đó thắng tới lần bấm sau;
+    - một lần đọc thiếu tới một nửa số tag dùng nhiều vẫn được ghi (các tag thiếu giữ số cũ);
+    - dòng lệnh không làm mới "+N tag học thêm" tới lần học sau.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7bd)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
@@ -1161,4 +1213,7 @@ Chủ repo hỏi: "Khảo sát RN, RP, RS để thêm tags.py đi, và RN, RP, R
   - model: head A1 / phương án B, int8, DirectML / CoreML; image Docker có ffmpeg ~1,05 GB (PyAV nhẹ hơn);
   - CI trên GitHub: job macOS hay không có máy nhận (4 lần trong ngày 18/11); có thể chỉ chạy macOS với Python 3.11 và 3.15 (2 job thay vì 5).
   - danh sách tag: chạy thử updater với một site thật cho mỗi engine mới (trình tạo đã đọc robots.txt bằng `lustra/robots.py` như updater, 7aw).
-  - danh sách tag của rn / rp / rs: không có nguồn cập nhật, giữ danh sách đi kèm và việc học thêm (7bc). rn: bot challenge của Cloudflare (R5). rs: không có trang danh sách tag. rp: trang `tags/popularity` đủ lớn để qua sanity check trả HTTP 500; đọc ≥ 100 post rồi gộp lên danh sách đi kèm là thay đổi của lõi, chờ chủ repo quyết.
+  - danh sách tag của rn / rs: không có nguồn cập nhật, giữ danh sách đi kèm và việc học thêm (7bc; lý do giữ nguyên). rp: từ 1.0.3 gộp các tag có từ 100 post vào danh sách đang dùng, tag dưới 100 post giữ số post của danh sách đi kèm, việc học thêm vẫn chạy (7bd); chủ repo bấm thử rồi mới đăng catalog chính thức, sau khi 2.0.10 lên production.
+  - tuỳ chọn: kiểm `minSdkVersion` từ json thô trước khi kiểm manifest chặt, để lần nâng SDK sau báo rõ trên 2.0.10 trở đi;
+  - tuỳ chọn: engine `philomena_json` (10.000 tag dùng nhiều nhất) cũng có thể gộp thay vì thay;
+  - skill `new-site-extension`: thêm `tagUpdate.merge` (7bd, mục còn lại).

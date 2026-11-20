@@ -87,7 +87,10 @@
     { id: 'rule34', name: 'Rule34', abbr: 'rx', version: '2.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['api_key', 'api_key_required', 'gender_tags', 'parent_child', 'preview'],
       site: 'https://rule34.xxx/', description: 'Gelbooru-based DAPI (XML). API key + user id recommended.', auth: { apiKey: true, apiKeyFormat: 'KEY,USER_ID', rateLimit: { requests: 60, seconds: 60 } }, syntax: { maxTags: 0 } },
     { id: 'e621', name: 'e621', abbr: 'en', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://e621.net/', description: 'e621 JSON API (2 requests/second).', auth: {}, syntax: { maxTags: 40 } },
-    { id: 'paheal', name: 'Rule34 Paheal', abbr: 'rp', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://rule34.paheal.net/', description: 'Shimmie danbooru-compatible API. Max 3 tags.', auth: {}, syntax: { maxTags: 3 } },
+    // its own update reads only the tags with 100+ posts and the core merges them into its list (tagUpdate.merge, tags.sources merge)
+    { id: 'paheal', name: 'Rule34 Paheal', abbr: 'rp', version: '1.0.3', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://rule34.paheal.net/',
+      description: 'Shimmie danbooru-compatible API. Max 3 tags.', auth: {}, syntax: { maxTags: 3 }, tagList: 'rp_tags.json',
+      tagUpdate: { entry: 'tags.py:read_tags', merge: { minPosts: 100 } }, minSdkVersion: '1.1' },
     { id: 'xbooru', name: 'Xbooru', abbr: 'xb', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://xbooru.com/', description: 'Gelbooru-based DAPI (XML).', auth: {}, syntax: { maxTags: 0 } },
     // made by the extension generator (lustra.extgen): its tag list comes from its engine (tags.sources)
     { id: 'fakebooru', name: 'Fakebooru', abbr: 'fb', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://fakebooru.example/',
@@ -272,14 +275,17 @@
           { module: 'rx', name: 'Rule34', engine: 'gelbooru_dapi', site: 'https://api.rule34.xxx/', key: 'required', keyFormat: 'KEY,USER_ID', robots: false, curated: true, tailUpdates: true, description: 'DAPI tag index, pages by number (pid)' },
           { module: 'db', name: 'Danbooru', engine: 'danbooru_json', site: 'https://danbooru.donmai.us/', key: 'optional', keyFormat: 'API_KEY,LOGIN', robots: false, curated: true, description: 'tags.json, id cursor' },
           { module: 'fb', name: 'Fakebooru', engine: 'gelbooru_dapi', site: 'https://fakebooru.example/', key: 'optional', keyFormat: 'API_KEY,USER_ID', robots: true, curated: false, tailUpdates: false, description: 'DAPI tag index, pages by number (pid)' },
-          { module: 'tb', name: 'TBIB', engine: 'extension_job', site: 'https://tbib.org/', key: 'none', keyFormat: '', robots: true, curated: false, tailUpdates: false, onDemand: true, job: 'tags.py:read_tags', description: "the extension's own update (tags.py:read_tags), run only when asked" },
+          { module: 'tb', name: 'TBIB', engine: 'extension_job', site: 'https://tbib.org/', key: 'none', keyFormat: '', robots: true, curated: false, tailUpdates: false, onDemand: true, merge: false, mergeMinPosts: 0, job: 'tags.py:read_tags', description: "the extension's own update (tags.py:read_tags), run only when asked" },
+          { module: 'rp', name: 'Rule34 Paheal', engine: 'extension_job', site: 'https://rule34.paheal.net/', key: 'none', keyFormat: '', robots: true, curated: false, tailUpdates: false, onDemand: true, merge: true, mergeMinPosts: 100, job: 'tags.py:read_tags', description: "the extension's own update (tags.py:read_tags), run only when asked: the tags with 100+ posts, merged into the list in use" },
         ].map((s) => ({ ...s, running: mockTagRuns.has(s.module), count: mockTagRuns.get(s.module)?.count || 0, message: mockTagRuns.get(s.module)?.message || '' }));
       }
       if (method === 'tags.learn') {
-        return { module: p.module, learned: p.module !== 'vb', posts: 132, tags: 845, newPosts: 12, written: true, mayLearn: true, sourceList: false, indexed: true,
-          bundled: p.module === 'vb', added: p.module === 'vb' ? 37 : 0 };
+        // vb: on top of a bundled list; rp: on top of the list of a merge source (no button calls it, the learning after a download does)
+        const onTop = p.module === 'vb' || p.module === 'rp';
+        return { module: p.module, learned: !onTop, posts: 132, tags: 845, newPosts: 12, written: true, mayLearn: true, sourceList: false, indexed: true,
+          bundled: p.module === 'vb', added: p.module === 'vb' ? 37 : p.module === 'rp' ? 12 : 0 };
       }
-      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9, shipped: true, version: '1.0.0' }, { module: 'vb', path: '~/.config/Lustra/extensions/videosite/vb_tags.json', size: 18.9e6, mtime: Date.now() / 1000 - 7200, learned: false, bundled: true, version: '1.0.2', added: 37 }];
+      if (method === 'tags.status') return [{ module: 'hs', path: '~/.config/Lustra/tags/hs_tags.json', size: 0.03e6, mtime: Date.now() / 1000 - 3600, learned: true }, { module: 'db', path: '2tags/db_tags.json', size: 21e6, mtime: Date.now() / 1000 }, { module: 'rx', path: '2tags/rx_tags.json', size: 24.6e6, mtime: Date.now() / 1000 - 86400 * 56 }, { module: 'tb', path: '~/.config/Lustra/extensions/tbib/tb_tags.json', size: 3.2e6, mtime: Date.now() / 1000 - 86400 * 9, shipped: true, version: '1.0.0' }, { module: 'rp', path: '~/.config/Lustra/extensions/paheal/rp_tags.json', size: 4.33e6, mtime: Date.now() / 1000 - 86400 * 2, learned: false, bundled: false, shipped: true, version: '1.0.3', added: 12 }, { module: 'vb', path: '~/.config/Lustra/extensions/videosite/vb_tags.json', size: 18.9e6, mtime: Date.now() / 1000 - 7200, learned: false, bundled: true, version: '1.0.2', added: 37 }];
       if (method === 'files.nonEmpty') return { exists: true, nonEmpty: false };
       if (method === 'index.stats') {
         const now = Date.now() / 1000;
