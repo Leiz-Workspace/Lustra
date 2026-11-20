@@ -1094,6 +1094,7 @@ Chủ repo hỏi về các dòng Tags A–Z của RN / RP / RS và RV, và về 
   - Self-test nhanh: bước mới `contract.thumbPlaceholder` và `contract.tagLearned` đạt.
   - App thật dưới xvfb, không mạng: cài rn 1.0.2 từ catalog, rg / rv 1.0.1 từ zip; dòng Tags A–Z; học từ file đã tải (+2, rồi không ghi lại khi không có gì mới); gợi ý tag vừa học và tag đi kèm (giữ số post 8.0K); ô thay thế ảnh trên lưới và lightbox.
   - Chưa kiểm: học từ Preview với site thật (cần mạng), cập nhật / gỡ rn trong app (có unittest), bản đóng gói.
+- **Phát hành:** version 2.0.10 (lõi `2.0 r10`; `APP_REV_DATE` của 2.0.9 còn ghi 19/11, nay là 20/11), ghi chú `docs/releases/v2.0.10.md`. Đưa lên `staging` theo lời chủ repo. Lên `production` là quyết định của chủ repo.
 
 ### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7bb)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
