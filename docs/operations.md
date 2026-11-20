@@ -287,7 +287,7 @@ python tools/sign_catalog.py pubkey --key ~/lustra-keys/signing-key.pem    # in 
 ```
 Dán mục in ra vào `"keys"` của `lustra/safety_data/catalog_keys.json`, commit file đó (chỉ có khoá công khai) rồi phát hành bản Lustra mới. Không bao giờ commit khoá bí mật (`.gitignore` bỏ qua `*.pem`, `*.key`, `signing-key*`); có thể tạo khoá bằng `openssl genpkey -algorithm ed25519 -out signing-key.pem`, cùng định dạng.
 
-Cập nhật catalog chính thức (khi một extension trong `extensions/` đổi `version`, và trước ngày `expires`, hiện là 2027-05-17):
+Cập nhật catalog chính thức (khi một extension trong `extensions/` đổi `version`, và trước ngày `expires`, hiện là 2027-05-19):
 ```bash
 python tools/build_catalog.py --out /tmp/lustra-catalog --lists ~/lustra-tag-lists     # zip tất định cho mỗi extension + index.json
 python tools/sign_catalog.py sign /tmp/lustra-catalog/index.json --key ~/lustra-keys/signing-key.pem --expires-days 180
