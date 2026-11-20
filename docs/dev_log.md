@@ -1053,7 +1053,7 @@ Chủ repo báo 11 lỗi rồi đi ngủ, dặn: chỗ nào cần chọn thì ch
   - nút chính hỏi khi có lựa chọn;
   - bộ phận cơ thể nữ là bằng chứng mạnh như bên nam; `femboy 1boy breasts` thành "cả hai" để "chỉ nam" chặt;
   - rn / rp / rs mang danh sách `2tags/` và lên 1.0.2.
-- **Phát hành:** version 2.0.9 (lõi `2.0 r9`), ghi chú `docs/releases/v2.0.9.md`. Đưa lên `staging` để có bản rc cho chủ repo thử. Lên `production` là quyết định của chủ repo.
+- **Phát hành:** version 2.0.9 (lõi `2.0 r9`), ghi chú `docs/releases/v2.0.9.md`. Bản này còn có PR #37: 10 extension mới trong catalog đi kèm app, không cài sẵn (7ay, 7az). Nó cũng có PR #49: báo cần khởi động lại khi cài zip đè lên extension đang chạy. Đưa lên `staging` (theo lời chủ repo) để có bản rc cho chủ repo thử. Lên `production` là quyết định của chủ repo.
 - **Sau khi phát hành:** build và ký lại catalog chính thức (`build_catalog.py --lists`), để bản đã cài nhận rn / rp / rs 1.0.2 có danh sách. Việc này cần khoá ký của chủ repo.
 
 ### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7ba)
