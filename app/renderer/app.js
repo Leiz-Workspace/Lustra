@@ -2540,8 +2540,9 @@ async function refreshTagStatus() {
       const shippedTitle = src?.merge
         ? `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ` Bấm "Cập nhật" để lấy số post mới của các tag có từ ${nf.format(src.mergeMinPosts)} post và thêm tag mới; các tag khác giữ nguyên.`}`
         : `Danh sách đi kèm extension, chưa cập nhật ở máy này. Không rõ ngày của dữ liệu.${keyMissing ? '' : ' Bấm "Cập nhật" để đọc danh sách mới từ site.'}`;
-      const writtenTitle = src?.merge
-        ? `Giờ của lần cập nhật gần nhất. Tag có từ ${nf.format(src.mergeMinPosts)} post: số post của site lúc đó. Tag khác: số post của danh sách trước đó.`
+      // merged: the core says an update that merges wrote this list (a list of 2tags/, when the app runs from the source, is not one)
+      const writtenTitle = src?.merge && r?.merged
+        ? `Giờ của lần cập nhật gần nhất. Tag site liệt kê ở mức từ ${nf.format(src.mergeMinPosts)} post: số post của site lúc đó. Tag khác: số post của danh sách trước đó.`
         : '';
       const [updText, updTitle] = run ? [tagRunningText(run.count), run.message || '']
         : shipped ? [`theo extension${ver ? ` v${ver}` : ''}`, bundled

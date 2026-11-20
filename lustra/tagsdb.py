@@ -654,11 +654,13 @@ def _merges(manifest) -> bool:
         return False
 
 
-def _merged_here(path: pathlib.Path) -> bool:
-    """The list at <data dir>/tags is the one a merge update wrote there last (lustra/tags_updater.py is_merged_list)"""
+def _merge_of(path: pathlib.Path, shipped: pathlib.Path) -> bool:
+    """The list at <data dir>/tags is the one a merge update wrote there last, and its merges started from the list the extension
+    ships now (lustra/tags_updater.py merged_onto: the same content, whatever the file times)"""
     try:
-        from .tags_updater import is_merged_list
-        return is_merged_list(path)
+        from .tags_updater import list_digest, merged_onto
+        onto = merged_onto(path)
+        return onto is not None and onto == list_digest(shipped)
     except Exception:  # an unreadable stamp: not the update's
         return False
 
@@ -922,9 +924,9 @@ class TagsDB:
         lacks are added (TagsDB.Additions), and no other file of <data dir>/tags outranks it (nothing but the learning writes there for
         such a module: a learned list that lost its stamp is not taken for a newer list). The same goes for a module whose own update
         merges a partial read into its list (TagSource.merge): the learned tags are served on top of the list in use, the shipped one
-        or the merged one (TagsDB.LearningBases), and a file of <data dir>/tags outranks the shipped list only when the merge wrote it
-        (its stamp, lustra/tags_updater.py is_merged_list). Loaded lists stay in memory unless their file changed or they are listed
-        in 'reload'"""
+        or the merged one (TagsDB.LearningBases), and a file of <data dir>/tags replaces the shipped list only when it is the merge of
+        that very list (its stamp, lustra/tags_updater.py merged_onto), and then whatever their file times. Loaded lists stay in
+        memory unless their file changed or they are listed in 'reload'"""
         from .extensions import data_dir
         env = os.environ.get('LUSTRA_TAGS_DIR')
         env_dir = pathlib.Path(env).expanduser() if env else None
@@ -960,8 +962,12 @@ class TagsDB:
                         continue
                     if module in no_source and files.get(module) == ext_lists[module][0]:
                         continue  # no source writes there for it: a learned list whose stamp was lost (a quit while it was written)
-                    if module in merging and module in ext_lists and files.get(module) == ext_lists[module][0] and not _merged_here(f):
-                        continue  # only its merge writes there: anything else (a learned list that lost its stamp) never hides it
+                    if module in merging and module in ext_lists and files.get(module) == ext_lists[module][0]:
+                        # only the merge of the list it ships replaces it, newer or older: a learned list that lost its stamp never
+                        # does, nor a merge of the list a version before shipped (the shipped list is the base of the next one)
+                        if _merge_of(f, files[module]):
+                            files[module] = f
+                        continue
                 consider(module, f, d == env_dir)
             if alias_file is None and (alias := d / FILE_NAME_ALIASES).is_file():
                 alias_file = alias

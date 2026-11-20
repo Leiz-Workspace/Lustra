@@ -1039,25 +1039,60 @@ def _list_stamp(path: pathlib.Path) -> list[int] | None:
     return [st.st_size, st.st_mtime_ns]
 
 
-def _save_merged(meta_path: pathlib.Path, src: TagSource, written: pathlib.Path, cover: int) -> None:
-    """<out>/.meta/<abbr>_tags.json of a merge: the size and time of the list it wrote (is_merged_list)"""
+_digests: dict[str, tuple[list[int], str]] = {}
+'''path -> (size and time of the file, its sha256): list_digest'''
+
+
+def list_digest(path: pathlib.Path) -> str:
+    """sha256 of a list file, '' when it cannot be read; kept while the file's size and time stay the same (TagsDB compares the
+    list a merging extension ships each time it locates the lists)"""
+    stamp = _list_stamp(path)
+    if stamp is None:
+        return ''
+    key = os.fspath(path)
+    if (hit := _digests.get(key)) is not None and hit[0] == stamp:
+        return hit[1]
+    h = hashlib.sha256()
+    try:
+        with open(path, 'rb') as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+    except OSError:
+        return ''
+    _digests[key] = (stamp, h.hexdigest())
+    return h.hexdigest()
+
+
+def _save_merged(meta_path: pathlib.Path, src: TagSource, written: pathlib.Path, cover: int, onto: str) -> None:
+    """<out>/.meta/<abbr>_tags.json of a merge: the size and time of the list it wrote (is_merged_list), the list its merges
+    started from (merged_onto)"""
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = meta_path.with_name(f'{meta_path.name}.{uuid.uuid4().hex[:8]}.tmp')
-    tmp.write_text(json.dumps({'site': src.site, 'engine': src.engine, 'merged': _list_stamp(written), 'minPosts': cover,
-                               'updatedAt': time.time()}), encoding=UTF8)
+    tmp.write_text(json.dumps({'site': src.site, 'engine': src.engine, 'merged': _list_stamp(written), 'onto': onto,
+                               'minPosts': cover, 'updatedAt': time.time()}), encoding=UTF8)
     os.replace(tmp, meta_path)
 
 
-def is_merged_list(path: pathlib.Path) -> bool:
-    """The list at path is the one a merge (TagSource.merge) wrote there last: its size and time are in <its folder>/.meta/.
-    TagsDB lets only such a file of <data dir>/tags outrank the list a merging extension ships (a learned list that lost its stamp
-    is never taken for it)"""
+def merged_onto(path: pathlib.Path) -> str | None:
+    """The list at path is the one a merge (TagSource.merge) wrote there last (its size and time are in <its folder>/.meta/): the
+    sha256 of the list the first of its merges went into (list_digest; each merge into a merged list keeps it), '' when it went
+    into none. None: not a merged list (no stamp, or the file changed since).
+    TagsDB lets a file of <data dir>/tags replace the list a merging extension ships only when it is the merge of that very list:
+    a learned list that lost its stamp never is, and an extension update that ships another list makes that list the base again,
+    whatever the file times (a zip install gives its files the install's time, the catalog bundled with the app the build's)"""
     try:
         d = json.loads((path.parent / META_DIR / path.name).read_text(encoding=UTF8))
     except (OSError, ValueError):
-        return False
+        return None
     stamp = _list_stamp(path)
-    return isinstance(d, dict) and stamp is not None and d.get('merged') == stamp
+    if not isinstance(d, dict) or stamp is None or d.get('merged') != stamp:
+        return None
+    return str(d.get('onto') or '')
+
+
+def is_merged_list(path: pathlib.Path) -> bool:
+    """The list at path is the one a merge (TagSource.merge) wrote there last (merged_onto)"""
+    return merged_onto(path) is not None
 
 
 def _load_partial(path: pathlib.Path, src: TagSource) -> tuple[str, int, dict[str, tuple[int, str]], dict] | None:
@@ -1121,7 +1156,7 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     A source with merge reads only the tags with cover = max(min_posts, merge_min_posts) or more posts and merges them into the list
     in use (reference, else the list of <out>, else the one the extension ships), never into a learned list: the tags read take
     their counts (and their types, unless the read says only 'general' or 'unknown'), new ones are added, every other tag is kept
-    (a line without a type keeps none); written to <out> with its stamp in <out>/.meta/ (is_merged_list), never over the base"""
+    (a line without a type keeps none); written to <out> with its stamp in <out>/.meta/ (merged_onto), never over the base"""
     src = source or tag_source(module)
     if src is None:
         raise ValueError(f'module \'{module}\' has no tag list source (reviewed: {", ".join(CURATED)}; extensions with their own '
@@ -1134,6 +1169,8 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     client = PoliteClient(src, delay=delay, budget=budget, allow_local=allow_local, session=session, min_interval=min_interval,
                           deadline=deadline)
     tags: dict[str, tuple[int, str]] = {}
+    onto = ''
+    '''a merge: the list its line of merges started from (merged_onto)'''
     if progress:
         client.notify = lambda msg: progress(f'[{module}] {msg}', len(tags))
     # page / id cursor listings keep their progress in <out>/.partial/: a list stopped half way (rate limit, network, closed app)
@@ -1228,6 +1265,10 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
                            f'use --force)')
             return res
         into = 'the list in use' if base_path in (reference, res.path) else 'the list the extension ships'
+        # the list this line of merges started from (before the write: the base may be the list of <out>, merged before)
+        if base_path is not None:
+            onto = merged_onto(base_path)
+            onto = list_digest(base_path) if onto is None else onto
         tags, unread = _read_list_lines(base_path, '') if base_path is not None else ({}, 0)  # lines without a type keep none
         if unread and not force:
             res.count = len(fetched)
@@ -1269,7 +1310,7 @@ def update_tag_list(module: str, out_dir: pathlib.Path, *, min_posts=1, delay=0.
     if src.tail_updates and src.engine == 'gelbooru_dapi' and (resume is not None or state is not None):
         _save_meta(meta_path, src, end_page, meta['fullAt'] if state is not None else time.time())
     if src.merge:
-        _save_merged(meta_path, src, res.path, cover)
+        _save_merged(meta_path, src, res.path, cover, onto)
     waited = f', waited {res.waited:.0f} s for the site\'s rate limit' if res.waited else ''
     res.message = f'written {res.count:d} tags (was {res.previous:d}, {res.requests:d} requests{detail}{waited})'
     return res

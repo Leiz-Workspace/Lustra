@@ -330,10 +330,13 @@ def learn_from_index(module: str) -> Learned:
     return Learned(new, written)
 
 
-def refresh(module: str) -> bool:
+def refresh(module: str, recheck: bool = False) -> bool:
     """After an extension of the module was installed, updated or uninstalled, or a merge update rewrote the list the learning adds
     to: when that base changed, the learned list is written again (the additions the new list has are dropped; with no base any
-    more, the whole learned list). Nothing learned yet: nothing to do. -> written"""
+    more, the whole learned list). Nothing learned yet: nothing to do.
+    recheck: the base was rewritten at its path and TagsDB has just loaded it again (server.m_tags_update after a merge): the whole
+    learned set is checked against it whatever stamp the state holds. A learn that ran on another thread between the write and the
+    reload took the new file's stamp while it looked the tags up in the list still loaded. -> written"""
     if not may_learn(module) or not _store_path(module).is_file():
         return False
     base = base_list(module)
@@ -342,6 +345,8 @@ def refresh(module: str) -> bool:
         if conn is None:
             return False
         with contextlib.closing(conn):
+            if recheck and base is not None:
+                conn.execute("DELETE FROM meta WHERE k = 'base'")
             written = _flush(module, conn, base, _sync_base(module, conn, base, set()))
     if written:
         TagsDB.locate_default_lists(reload=(module,))

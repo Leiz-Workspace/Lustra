@@ -105,8 +105,10 @@ lustra/builtin_ext/rule34/manifest.json      entry: lustra.download_rx:Downloade
 lustra/builtin_ext/danbooru/manifest.json    entry: lustra.download_db:DownloaderDb  (default)
 extensions/<id>/{manifest.json, downloader.py}   catalog cục bộ: rule34hentai, rule34us, paheal, e621, xbooru, bbooru
 extensions/<id>/{…, tags.py, specs.md}       kèm job riêng (tagUpdate): gelbooru, tbib, hypnohub, safebooru, yandere,
-                                             sakugabooru, realbooru, rule34xyz, rule34world, zerochan, paheal (gộp); tag list
+                                             sakugabooru, realbooru, rule34xyz, rule34world, zerochan; tag list
                                              <abbr>_tags.json chỉ nằm trong zip (không commit, docs/plans/ext-tag-jobs.md)
+extensions/paheal/{…, tags.py}               job gộp (tagUpdate.merge, từ 1.0.3), không có specs.md: khảo sát site nằm ở
+                                             docstring của tags.py; zip mang 2tags/rp_tags.json làm nền
 <data dir>/extensions/<id>/                  extension người dùng đã cài
 ```
 

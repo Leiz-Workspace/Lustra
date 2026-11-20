@@ -30,6 +30,7 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -1565,6 +1566,23 @@ class ExtensionJobTests(_DataDirTest):
             self.assertTrue({'fakebooru/tags.py', 'fakebooru/fq_tags.json'} <= set(zf.namelist()))
         self.assertFalse(marker.exists())
 
+    def test_the_generator_needs_the_list_a_merge_job_goes_into(self) -> None:
+        # a job that reads only the most used tags (tagUpdate.merge) never makes a whole list: the app could never give the draft
+        # its first list with it (update_tag_list refuses a merge with no list to go into), so the draft must ship one
+        draft = self._install(ext_id='fakebooru', abbr='fq', where=self.root / 'drafts', job=MERGE_JOB_FILE)
+        m = json.loads((draft / 'manifest.json').read_text(encoding='utf-8'))
+        (draft / 'manifest.json').write_text(json.dumps({**m, 'tagUpdate': MERGE}), encoding='utf-8')
+        site = PopularSite({'sky': 6000})
+        res = bundle_tag_list(draft, session=FakeSession(site), allow_local=True, min_interval=0.0)
+        self.assertEqual(('failed', '', 0), (res['status'], res['file'], res['requests']), res)
+        self.assertEqual("tags.py:read_tags reads only the tags with 100+ posts and merges them into the list the extension ships "
+                         "(tagUpdate.merge): put fq_tags.json next to manifest.json, or remove 'merge' if the job reads the whole "
+                         "list", res['message'])
+        self.assertEqual([], site.asked)
+        (draft / 'fq_tags.json').write_text('{\n"sky": "5000 posts"\n}\n', encoding='utf-8')
+        res = bundle_tag_list(draft, session=FakeSession(site), allow_local=True, min_interval=0.0)
+        self.assertEqual(('bundled', 1), (res['status'], res['count']), res)
+
 
 MERGE_JOB_FILE = '''# coding=UTF-8
 
@@ -1719,15 +1737,36 @@ class MergeUpdateTests(_DataDirTest):
     def test_a_newer_shipped_list_is_the_base_again(self) -> None:
         self._update()
         TagsDB.locate_default_lists(reload=('mq',))
-        # an update of the extension ships a newer list (installed after the merge: a later file time)
-        newer = self._ship(self.folder, ('"fresh": "120 posts"', '"hero": "900 posts (character)"', '"sky": "5500 posts"',
-                                         '"tree": "305 posts"'), age=-60.0)
-        self.assertEqual(newer, TagsDB.get_file('mq'))
+        merged = self.data / 'tags' / 'mq_tags.json'
+        self.assertEqual(merged, TagsDB.get_file('mq'))
+        # an update of the extension ships another list: the base again, whatever its file time. Installed from a zip, the install's
+        # (later than the merge); from the catalog bundled with an app built before the merge, the build's (earlier)
+        for age in (-60.0, 3600.0):
+            newer = self._ship(self.folder, ('"fresh": "120 posts"', '"hero": "900 posts (character)"', '"sky": "5500 posts"',
+                                             '"tree": "305 posts"'), age=age)
+            self.assertEqual(newer, TagsDB.get_file('mq'), age)
         self.site.tags = {'sky': 6200, 'tree': 330, 'hero': 970}
         res, _, _ = self._update()
         self.assertTrue(res.written, res.message)
         self.assertEqual({'fresh': '120 posts', 'hero': '970 posts (character)', 'sky': '6200 posts', 'tree': '330 posts'},
                          self._written())  # 'brand_new' was only in the list merged before
+
+    def test_the_merged_list_stays_while_the_extension_ships_the_list_it_went_into(self) -> None:
+        # the same list installed again (a reinstall from a zip, a version that ships it unchanged) gets the install's file time,
+        # later than the merge: the merged list stays the list in use, and so after the next merge (it keeps the list it came from)
+        merged = self.data / 'tags' / 'mq_tags.json'
+        self.assertTrue(self._update()[0].written)
+        for i in (1, 2):
+            self._ship(self.folder, self.SHIPPED, age=-60.0 * i)
+            self.assertEqual(merged, TagsDB.get_file('mq'))
+            self.site.tags = {'sky': 6000 + i, 'tree': 310 + i, 'hero': 950 + i}
+            res, _, _ = self._update()
+            self.assertTrue(res.written, res.message)
+            self.assertIn('merged into the list in use: 3 read, 0 new, 3 updated, 2 no longer listed kept', res.message)
+            got = self._written()
+            self.assertEqual(('150 posts (general)', f'{6000 + i:d} posts'), (got['brand_new'], got['sky']))  # brand_new: of the merge
+        TagsDB.locate_default_lists()
+        self.assertEqual(merged, TagsDB.get_file('mq'))
 
     def test_a_read_that_misses_the_popular_tags_writes_nothing(self) -> None:
         out = self.data / 'tags' / 'mq_tags.json'
@@ -1847,7 +1886,7 @@ class MergeUpdateTests(_DataDirTest):
         self.assertEqual(('7 posts', '6000 posts'), (got['rare'], got['sky']))
         self.assertNotIn('mine', got)
         TagsDB.locate_default_lists()
-        self.assertEqual(stray, TagsDB.get_file('mq'))  # what the update wrote: the newest list wins
+        self.assertEqual(stray, TagsDB.get_file('mq'))  # what the update wrote, the merge of the shipped list: it replaces it
         later = time.time() + 60  # its time changed (a copy without file times): not known as the update's any more
         os.utime(stray, (later, later))
         TagsDB.locate_default_lists()
@@ -1907,8 +1946,8 @@ class MergeSourceLearningTests(_ShippedListTest):
         self.assertEqual('tags.learned', self._learn([('1', ['sky', 'new'])])[-1][0])
         self.assertEqual({'new': '1 posts (unknown)'}, _read_list(tags_learned.additions_path('fq')))
         self.assertEqual({'sky': 5000, 'skyline': 40, 'tree': 300, 'new': 1}, self._all())
-        self.assertEqual({'bundled': False, 'shipped': True, 'version': '1.0.2', 'added': 1},
-                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'added')})
+        self.assertEqual({'bundled': False, 'shipped': True, 'merged': False, 'version': '1.0.2', 'added': 1},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'merged', 'version', 'added')})
         res = server.m_tags_learn({'module': 'fq'})
         self.assertEqual((True, False, False, 1), (res['mayLearn'], res['sourceList'], res['bundled'], res['added']))
 
@@ -1925,9 +1964,79 @@ class MergeSourceLearningTests(_ShippedListTest):
         self.assertEqual({'rare_new': '1 posts (unknown)'}, _read_list(added))  # 'new' came with the merge: the site's count
         self.assertEqual(150, TagsDB.find_tag('fq', 'new').posts_count)
         self.assertEqual({'sky': 6000, 'skyline': 40, 'tree': 310, 'new': 150, 'rare_new': 1}, self._all())
-        self.assertEqual({'bundled': False, 'shipped': False, 'version': '', 'added': 1},
-                         {k: self._row()[k] for k in ('bundled', 'shipped', 'version', 'added')})
+        self.assertEqual({'bundled': False, 'shipped': False, 'merged': True, 'version': '', 'added': 1},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'merged', 'version', 'added')})
         self.assertTrue(next(r for r in server.m_tags_sources({}) if r['module'] == 'fq')['merge'])
+
+    def test_the_status_says_no_merge_wrote_a_list_of_another_folder(self) -> None:
+        # the app run from the source: the repository's catalog has no list next to the manifest (.gitignore), the list in use is
+        # one of another folder (2tags/ of the repository; here LUSTRA_TAGS_DIR). No update wrote it: Tags A-Z gives its file time
+        # without calling it the time of the last update (tags.status merged)
+        src = self._source(self.BUNDLED, '1.0.3', tagUpdate=MERGE, minSdkVersion='1.1')
+        (src / 'fq_tags.json').unlink()
+        self._install(src=src)
+        other = self.root / 'lists'
+        other.mkdir()
+        tags_updater.write_tag_list(other / 'fq_tags.json', self.BUNDLED)
+        os.environ['LUSTRA_TAGS_DIR'] = other.as_posix()  # restored by the patch
+        TagsDB.locate_default_lists()
+        self.assertEqual((other / 'fq_tags.json').as_posix(), self._row()['path'])
+        self.assertEqual({'bundled': False, 'shipped': False, 'merged': False, 'version': ''},
+                         {k: self._row()[k] for k in ('bundled', 'shipped', 'merged', 'version')})
+
+    def test_a_learn_while_the_update_writes_never_keeps_what_it_brought(self) -> None:
+        # a Preview learns on a thread of its own: from the second merge on the list keeps its path, and a learn that lands between
+        # the write and the reload of the list takes the new file's stamp while it looks the tags up in the list still loaded
+        self._install_merge()
+        self._learn([('1', ['sky', 'new', 'rare'])])
+        self.site.tags = {'sky': 6000, 'tree': 310}  # 'new' is not one of the most used tags yet
+        self.assertTrue(self._update()['written'])
+        added = tags_learned.additions_path('fq')
+        self.assertEqual({'new', 'rare'}, set(_read_list(added)))
+        self.assertTrue(TagsDB.count('fq') and TagsDB.is_loaded('fq'))  # loaded (a search, the autocomplete)
+        self.site.tags = {'sky': 6100, 'tree': 320, 'new': 150}  # now it is
+        save = tags_updater._save_merged
+
+        def learn_meanwhile(*args, **kw) -> None:
+            save(*args, **kw)
+            self.assertTrue(TagsDB.is_loaded('fq'))  # the list of the last merge: the update thread reloads it next
+            tags_learned.learn('fq', [('2', ['other'])])
+
+        with mock.patch.object(tags_updater, '_save_merged', learn_meanwhile):
+            self.assertTrue(self._update()['written'])
+        self.assertEqual({'other', 'rare'}, set(_read_list(added)))  # 'new' came with the merge
+        self.assertEqual((2, 2, 150), (tags_learned.added_count('fq'), self._row()['added'], TagsDB.find_tag('fq', 'new').posts_count))
+
+    def test_an_install_keeps_the_merged_list_unless_it_ships_another(self) -> None:
+        # which list is in use never hangs on how the extension came: a zip gives the list it ships the install's file time, the
+        # catalog bundled with the app the build's
+        self._install_merge('1.0.3')
+        self._learn([('1', ['sky', 'new', 'rare_new'])])
+        self.assertTrue(self._update()['written'])
+        merged = self.data / 'tags' / 'fq_tags.json'
+        state = ('path', 'shipped', 'version', 'added')
+        after_merge = {'path': merged.as_posix(), 'shipped': False, 'version': '', 'added': 1}
+        self.assertEqual(after_merge, {k: self._row()[k] for k in state})
+        # Paheal removed, then installed again from a zip: the same list, a file time later than the merge
+        server.m_ext_uninstall({'id': 'fakebooru'})
+        same = self.root / 'src' / '1.0.3' / 'fakebooru'
+        later = time.time() + 60
+        os.utime(same / 'fq_tags.json', (later, later))
+        self._install(src=same)
+        self.assertEqual(after_merge, {k: self._row()[k] for k in state})
+        self.assertEqual({'sky': 6000, 'skyline': 40, 'tree': 310, 'new': 150, 'rare_new': 1}, self._all())
+        # an update that ships another list, from a catalog built before the merge (an earlier file time): its list is the base
+        newer = self._source({**self.BUNDLED, 'fresh': (120, 'general')}, '1.0.4', tagUpdate=MERGE, minSdkVersion='1.1')
+        earlier = time.time() - 3600
+        os.utime(newer / 'fq_tags.json', (earlier, earlier))
+        self._install(src=newer)
+        shipped = self.folder / 'fq_tags.json'
+        self.assertEqual({'path': shipped.as_posix(), 'shipped': True, 'version': '1.0.4', 'added': 2},
+                         {k: self._row()[k] for k in state})  # 'new' is a learned tag again, until the next update
+        self.assertEqual((shipped, 1, 120), (TagsDB.learning_base('fq'), self._all()['new'], self._all()['fresh']))
+        self.assertTrue(self._update()['written'])
+        self.assertEqual({'sky': 6000, 'skyline': 40, 'tree': 310, 'new': 150, 'rare_new': 1, 'fresh': 120}, self._all())
+        self.assertEqual(after_merge, {k: self._row()[k] for k in state})
 
     def test_learning_goes_on_after_the_update(self) -> None:
         self._install_merge()
@@ -2075,6 +2184,12 @@ class PahealTagJobTests(_DataDirTest):
         for name, meta in files.items():
             data = (PAHEAL_FIXTURES / name).read_bytes()
             self.assertEqual((meta['bytes'], meta['sha256']), (len(data), hashlib.sha256(data).hexdigest()), name)
+        # byte for byte on every system: git never turns their line ends into CRLF (a Windows checkout, the CI's windows-latest)
+        rel = [(PAHEAL_FIXTURES / name).relative_to(ROOT).as_posix() for name in files]
+        attrs = subprocess.run(('git', 'check-attr', 'text', '--', *rel), cwd=ROOT, capture_output=True, timeout=60)
+        if attrs.returncode == 0:  # else not a git checkout (a source archive): its files are as they were packed
+            self.assertEqual({f'{r}: text: unset' for r in rel}, set(attrs.stdout.decode('utf-8').splitlines()),
+                             '.gitattributes must mark lustra/tests/fixtures/** -text')
         cut = files[PAHEAL_SECTION]['excerpt']
         self.assertEqual(cut['end'] - cut['start'], files[PAHEAL_SECTION]['bytes'])
         self.assertTrue(self.section.startswith("<section id='unknownmain'>") and self.section.endswith('</section>'))

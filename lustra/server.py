@@ -218,12 +218,12 @@ def m_ext_uninstall(p: dict) -> dict:
     return {'ok': True}
 
 
-def _refresh_learned(module: str) -> None:
+def _refresh_learned(module: str, recheck: bool = False) -> None:
     """The list the learning adds to came, changed or went with the extension, or a merge update rewrote it (TagSource.merge): the
-    learned list is written again for it (the learned tags it now has leave the additions)"""
+    learned list is written again for it (the learned tags it now has leave the additions). recheck: see tags_learned.refresh"""
     try:
         if module:
-            tags_learned.refresh(module)
+            tags_learned.refresh(module, recheck)
     except Exception as err:
         Logger.log(f'Warning: learned tag list of {module} not refreshed: {err}', False, False)
 
@@ -311,7 +311,10 @@ def m_tags_status(_: dict) -> list[dict]:
     a reviewed module), not updated here yet (version: that extension's). For both, mtime is the time of the file (the build or
     the install), not the date of the data.
     added: learned tags served on top of the list, for every list the learning adds to (TagsDB.LearningBases: a bundled list, or
-    the list of a module whose own update merges, shipped or merged)"""
+    the list of a module whose own update merges, shipped or merged).
+    merged: the list is the one an update that merges (TagSource.merge) wrote there last: mtime is that update's time (the counts
+    of the tags it read are of that time, the other tags keep theirs). Not for a list no update wrote (shipped, 2tags/)"""
+    from .tags_updater import is_merged_list
     rows = []
     own = TagsDB._extension_list_manifests()
     for module, path in sorted(TagsDB.files().items()):
@@ -323,7 +326,8 @@ def m_tags_status(_: dict) -> list[dict]:
         shipped = not on_base and ext is not None and ext[0] == path
         rows.append({'module': module, 'path': path.as_posix(), 'size': st.st_size if st else 0, 'mtime': st.st_mtime if st else 0,
                      'loaded': TagsDB.is_loaded(module), 'learned': tags_learned.is_learned(module, path), 'bundled': on_base,
-                     'shipped': shipped, 'version': bundled.version if on_base else ext[1].version if shipped else '',
+                     'shipped': shipped, 'merged': is_merged_list(path),
+                     'version': bundled.version if on_base else ext[1].version if shipped else '',
                      'added': tags_learned.added_count(module) if on_top and TagsDB.get_additions(module) else 0})
     return rows
 
@@ -416,7 +420,9 @@ def m_tags_update(p: dict) -> dict:
                                   source=source, full=p.get('full') is True, progress=progress)
             if res.written:
                 TagsDB.locate_default_lists(reload=(module,))  # TagsDB locks itself: readers keep the old list until this swap
-                _refresh_learned(module)  # a merge rewrote the list the learning adds to: the tags it brought leave the additions
+                # a merge rewrote the list the learning adds to: the tags it brought leave the additions, also those a learn took
+                # for lacking while the old list was still loaded (recheck)
+                _refresh_learned(module, recheck=True)
             done = {'job': job, 'ok': True, **res.as_dict()}
         except Exception as err:
             done = {'job': job, 'module': module, 'ok': False, 'written': False, 'message': _redact(f'failed: {err}')}
