@@ -999,6 +999,7 @@ Ghi theo thứ tự thời gian. Mỗi mục gồm: việc đã làm, quyết đ
 Chủ repo báo 11 lỗi rồi đi ngủ, dặn: chỗ nào cần chọn thì chọn theo khuyến nghị. Các lựa chọn đó ghi ở cuối mục. Mục 1, 4, 5, 11 làm trực tiếp (commit `e4c11fd`). Mục 2, 3, 6–10 chia ba nhánh làm song song trong worktree riêng (tìm kiếm, danh sách tag, thùng rác), gộp lại. Sau đó 5 người rà soát theo 5 góc, mỗi phát hiện được hai người kiểm chéo: 20 lỗi được xác nhận và sửa, 12 bị bác.
 - **1. Preview còn ảnh sau khi xoá hết tag.** Xoá tag cuối cùng thì lưới, lựa chọn và dòng kết quả được dọn; câu trả lời đến muộn bị bỏ (`S.preview.seq`). Đổi tag, module, ngày, bộ lọc giới tính hay ô chặn nội dung thì lưới cũ bị làm mờ, kèm ghi chú "kết quả của truy vấn hoặc bộ lọc trước: bấm Preview để xem lại". Đặt lại giá trị cũ thì lưới hết mờ. Một lần lật trang lỗi cũng làm mờ lưới.
 - **2. "Chỉ nam" + `amputee` vẫn ra post có nữ.** Bộ lọc không dùng "hoặc": nó lọc kết quả của truy vấn. Lỗi nằm ở bảng luật: post `amputee 1boy 1girl breasts` trên Rule34 bị xếp "chỉ nam", vì bảng của rx thiếu `1girl` và không coi bộ phận cơ thể nữ là bằng chứng (`penis` thì có).
+  - **Đính chính (7bb):** chủ repo chọn **Loại** "Chỉ nam" (bỏ post chỉ nam), không phải giữ "Chỉ nam"; phần trên đọc nhầm thiết lập. Bản sửa bảng luật vẫn đúng, nhưng chưa giải thích được điều chủ repo thấy: post không có `amputee` mà có tag nữ trong Preview. Truy vấn gửi lên site đã kiểm là đúng `tags=amputee` (bộ lọc giới tính chỉ lọc kết quả trong lõi, không thêm gì vào truy vấn). Đang chờ id post để kiểm.
   - Bảng rx / bb / gelbooru_generic / db: thêm `1girl`, `female_focus` (rx thêm cả `male_focus`) và khoá mới `femaleBodypart` (`pussy`, `vagina`, `breasts` mọi cỡ, `faceless_female`, `female_pov`…), đối xứng với bên nam. Cờ futa thêm `gynomorph`, `herm`; futaMale thêm `andromorph`, `maleherm`, `male_with_breasts` (db: `cuntboy`), để các nhân vật này không thành "cả hai".
   - e621 chỉ thêm `female_pov`, `faceless_female`, như danh sách nam của nó.
   - Kết quả model đã lưu cache được tính lại khi bảng luật của db đổi (khoá cache có mã băm của bảng).
@@ -1056,7 +1057,46 @@ Chủ repo báo 11 lỗi rồi đi ngủ, dặn: chỗ nào cần chọn thì ch
 - **Phát hành:** version 2.0.9 (lõi `2.0 r9`), ghi chú `docs/releases/v2.0.9.md`. Bản này còn có PR #37: 10 extension mới trong catalog đi kèm app, không cài sẵn (7ay, 7az). Nó cũng có PR #49: báo cần khởi động lại khi cài zip đè lên extension đang chạy. Đưa lên `staging` (theo lời chủ repo) để có bản rc cho chủ repo thử. Lên `production` là quyết định của chủ repo.
 - **Sau khi phát hành:** build và ký lại catalog chính thức (`build_catalog.py --lists`), để bản đã cài nhận rn / rp / rs 1.0.2 có danh sách. Việc này cần khoá ký của chủ repo.
 
-### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7ba)
+### 7bb. Danh sách tag đi kèm học thêm tag, thumbnail của rule34gen / rule34video — 2026-11-20
+Chủ repo hỏi về các dòng Tags A–Z của RN / RP / RS và RV, và về ảnh xem trước không hiện trên rule34gen.
+- **Catalog chính thức** (việc còn lại của 7ba): build lại (`build_catalog.py --lists`), ký bằng khoá của catalog (`sign_catalog.py`, hạn 2027-05-19) và đăng lên release `catalog`. Có 16 extension: 6 cũ (rn / rp / rs 1.0.2 mang danh sách tag) và 10 extension mới của PR #37. Zip của 10 extension mới trùng từng byte với zip chủ repo đã cài thử. Cả 16 zip cài được (thử offline); chữ ký kiểm được bằng khoá đi kèm app.
+- **Tags A–Z, RN / RP / RS:** dòng ghi "không có nguồn" và giờ cài file, trông như lỗi.
+  - Cột "Nguồn" nay ghi "đi kèm extension" (chú thích: site không có nguồn, danh sách không tự cập nhật).
+  - Cột "Cập nhật" ghi "theo extension v<phiên bản>", không ghi giờ. Giờ của file là giờ lúc build extension: cài từ catalog chép file giữ nguyên giờ.
+- **Học thêm tag trên danh sách đi kèm:**
+  - Danh sách đi kèm một extension không có nguồn tag thì không bao giờ được cập nhật, nên lõi học thêm từ post đã xem trong Preview và đã tải.
+  - Chỉ những tag danh sách đó chưa có được ghi, vào file riêng `tags/learned/<abbr>_added.json`. Tên file không có đuôi `_tags.json`, nên không bao giờ bị lấy làm danh sách của module.
+  - Khi nạp, `TagsDB` ghép các tag đó vào danh sách đi kèm bằng cách cắt nối byte; số post của danh sách đi kèm giữ nguyên. Đo trên rule34.us (544k tag, 1.000 tag thêm): khoảng 35 ms.
+  - File chỉ được ghi khi có thay đổi (một tag danh sách chưa có, hoặc số post của tag đó tăng), không ghi sau mỗi lần Preview.
+  - Cài, cập nhật hay gỡ extension thì tính lại. Gỡ extension thì danh sách học được thành danh sách của module.
+  - Cờ `pending` trong sqlite: app tắt giữa lúc ghi thì lần học sau ghi nốt.
+  - Dòng Tags A–Z có "+N tag học thêm" và nút "Học từ file đã tải".
+  - `tags.status` có thêm `bundled`, `version`, `added`; `tags.learn` có thêm `written`, `bundled`, `added`.
+  - Thông báo `tags.learned` chỉ gửi khi có ghi. App hỏi lại tag của các chip đang hiện mà giữ gợi ý cũ cho tới khi có câu trả lời, nên chip không nháy.
+- **Tags A–Z, RV:** robots.txt của rule34video cấm đọc API danh sách tag, nên RV chỉ học từ post đã xem / đã tải. RV mới cài, chưa Preview lần nào nên chưa có gì. Dòng nay ghi "chưa học tag nào" kèm hướng dẫn, thay cho "chưa có".
+- **Thumbnail của rule34gen / rule34video** (bản nháp, ngoài repo):
+  - Trang danh sách của hai site (cùng nền KVS) chỉ cho vài thẻ đầu ảnh ngay. Các thẻ sau tải ảnh lười: ảnh thật ở `data-rd-src`, còn `src` là GIF rỗng dạng `data:`.
+  - Extension chỉ đọc `data-original` / `src`, nên lõi lấy link MP4 480p làm ảnh xem trước và app hiện biểu tượng ảnh vỡ.
+  - Bản 1.0.1 đọc lần lượt `data-rd-src`, `data-original`, `data-src`, `src`, `data-rd-jpg`, lấy thuộc tính đầu tiên khớp đúng mẫu đường dẫn ảnh của site.
+  - Mỗi bản nháp có thêm `tests/test_previews.py`, so ảnh xem trước của mọi thẻ trên các trang đã ghi với `listingPreviews` trong `expected.json`. Trên trang đã ghi: rg 75/75 thẻ có ảnh (bản cũ 3/75), rv 25/25 (bản cũ 1/25).
+  - Zip 1.0.0 của hai extension đã xoá, `SHA256SUMS.txt` đã cập nhật. Cũng đã xoá `naughtymachinima-1.0.0.zip` (giữ 1.1.0).
+- **App:** thẻ Preview không có ảnh xem trước, hoặc ảnh không tải được, hiện ô thay thế theo loại (ảnh / video / âm thanh) và ghi "không có ảnh xem trước" / "không tải được ảnh xem trước", thay cho biểu tượng ảnh vỡ. Lightbox cũng vậy. Thẻ vẫn bấm chọn được.
+- **Rà soát:** 3 góc rà soát (lõi học tag, giao diện, bản nháp), mỗi phát hiện hai người cố bác bỏ. 8 phát hiện được xác nhận (gộp lại còn 6 lỗi) và đã sửa; 1 bị bác (ảnh âm thanh trong lightbox không hiện biểu tượng vỡ vì `alt=""`).
+  - file tag học thêm mất dấu (app tắt giữa lúc ghi, sửa tay) thì che mất danh sách đi kèm và việc học dừng hẳn;
+  - tag học từ lần tải của rn / rp / rs không tới được app (`main.js` đòi `learned`);
+  - mỗi lần Preview ghi lại file và bỏ danh sách 544k tag khỏi bộ nhớ;
+  - chip nháy sau mỗi lần Preview;
+  - "Học từ file đã tải" để chip còn ghi "tag lạ" với tag vừa học;
+  - không test nào chạy chỗ sửa thumbnail của bản nháp.
+- **Kiểm:**
+  - danh sách unittest của CI: 446 test OK (1 bỏ qua); `tests.py`; ruff; `npm run check`; `icon-utils`.
+  - 12 test mới trong `test_tag_sources.BundledListLearningTests`.
+  - Self-test nhanh: bước mới `contract.thumbPlaceholder` và `contract.tagLearned` đạt.
+  - App thật dưới xvfb, không mạng: cài rn 1.0.2 từ catalog, rg / rv 1.0.1 từ zip; dòng Tags A–Z; học từ file đã tải (+2, rồi không ghi lại khi không có gì mới); gợi ý tag vừa học và tag đi kèm (giữ số post 8.0K); ô thay thế ảnh trên lưới và lightbox.
+  - Chưa kiểm: học từ Preview với site thật (cần mạng), cập nhật / gỡ rn trong app (có unittest), bản đóng gói.
+- **Phát hành:** version 2.0.10 (lõi `2.0 r10`; `APP_REV_DATE` của 2.0.9 còn ghi 19/11, nay là 20/11), ghi chú `docs/releases/v2.0.10.md`. Đưa lên `staging` theo lời chủ repo. Lên `production` là quyết định của chủ repo.
+
+### 8. Việc tiếp theo (cập nhật 2026-11-20, sau 7x–7bb)
 - Đã xong trong ngày: đóng gói app và model server chạy độc lập (7x), video nhiều khung P4 (7y), công cụ index (7z), danh sách chặn tên miền, ký catalog, `lustra.sdk`, eval trình tạo (7aa), công cụ đánh giá model giới tính và đánh giá silver (7ab).
 - Plan: [search-engine](plans/search-engine.md), [site-extension-skill-and-ai-generator](plans/site-extension-skill-and-ai-generator.md), [gender-filter-model](plans/gender-filter-model.md).
 - Đã phát hành `v2.0.1` (7ac): 6 nền tảng, model server chạy độc lập, image Docker công khai trên ghcr (đã kéo thử không đăng nhập, 7ad); README mới (7ad). `v2.0.2` (7ae), `v2.0.3` (7ah), bản sau cùng có thêm bản Linux x64 trên Forgejo, ký minisign / cosign.
