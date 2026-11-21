@@ -39,6 +39,19 @@ TAG_MERGE_MIN_POSTS = (2, 1_000_000)
 MANIFEST_KEYS_SINCE = {'search': '2.0.11'}
 '''the Lustra release that first accepts each top-level key added after 2.0.7: older cores refuse the whole manifest with
 'unknown field(s): <key>' (the installed version stays; tools/build_catalog.py warns about a catalog that holds one)'''
+NEWER_CORE_HINT = ' (bản extension này viết cho Lustra mới hơn: cập nhật Lustra rồi cài lại)'
+'''added by the installer and the scan of installed extensions (lustra/extensions.py, with_newer_core_hint) to the 'unknown
+field(s)' refusals: there a key this core does not know is almost always one of a newer Lustra (the owner read "unknown field(s):
+search" from 2.0.10 on a 2.0.11 extension zip, 2026-11-21, without a hint of what to do). Not added here: the generator checks the
+manifests it writes with the same parser, where an unknown key is a mistake of the draft, not a newer core'''
+UNKNOWN_KEY_REFUSALS = ('unknown field(s): ', 'unknown tagUpdate field(s): ')
+'''the refusals of keys this core does not know (_from_dict, _check_tag_update)'''
+
+
+def with_newer_core_hint(err: Exception) -> str:
+    """The message of a refused manifest, with NEWER_CORE_HINT when it names keys this core does not know"""
+    text = str(err)
+    return f'{text}{NEWER_CORE_HINT}' if text.startswith(UNKNOWN_KEY_REFUSALS) and not text.endswith(NEWER_CORE_HINT) else text
 SDK_VERSIONS_SINCE = {'1.2': '2.0.11'}
 '''the Lustra release that first has each SDK version after 1.1 (2.0.7 to 2.0.10: SDK 1.1): older cores refuse to install a manifest
 whose minSdkVersion is newer than their SDK (the installed version stays; tools/build_catalog.py warns about it)'''

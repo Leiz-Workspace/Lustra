@@ -341,6 +341,59 @@ class EngineSourceTests(TestCase):
         self.assertEqual(sum(tags_updater.RATE_LIMIT_WAITS), client.waited)
         self.assertGreaterEqual(client.interval, 1.0)  # slowed down
 
+    def test_a_gateway_error_is_tried_again(self) -> None:
+        # one 502 / 504 of a proxy in front of the site does not end the list: tried again after 5 s, 10 s...
+        site = FakeTagSite()
+        site.answers.extend([(502, b'<html>Bad Gateway</html>', {'content-type': 'text/html'}),
+                             (504, b'<html>Gateway Timeout</html>', {'content-type': 'text/html'})])
+        t = FakeClock()
+        client = PoliteClient(TagSource('zq', 'gelbooru_dapi', SITE), delay=0, allow_local=True, session=FakeSession(site),
+                              sleep=t.sleep, clock=t.clock)
+        told: list[str] = []
+        client.notify = told.append
+        tags = list(tags_updater._iter_gelbooru(client, '', 1, 0))
+        self.assertEqual(set(EXPECTED), {x[0] for x in tags})
+        self.assertEqual([tags_updater.GATEWAY_WAIT, 2 * tags_updater.GATEWAY_WAIT],
+                         [s for s in t.sleeps if s >= tags_updater.GATEWAY_WAIT])
+        self.assertEqual([f'{HOST} answered HTTP 502: trying again in 5 s', f'{HOST} answered HTTP 504: trying again in 10 s'], told)
+        self.assertEqual(0, client.waited)  # not a wait the site asked for
+        # every try a gateway error: the list stops after TRIES of them, with what the site answered
+        site = FakeTagSite()
+        site.answers.extend([(502, b'<html>Bad Gateway</html>', {'content-type': 'text/html'})] * tags_updater.TRIES)
+        client = PoliteClient(TagSource('zq', 'gelbooru_dapi', SITE), delay=0, allow_local=True, session=FakeSession(site),
+                              sleep=FakeClock().sleep, clock=t.clock)
+        with self.assertRaisesRegex(RuntimeError, rf'answered HTTP 502 for /index.php \({tags_updater.TRIES:d} failed tries, '
+                                                  rf'{tags_updater.TRIES:d} of them HTTP 502 / 504\)'):
+            list(tags_updater._iter_gelbooru(client, '', 1, 0))
+        # network errors and gateway errors share the tries; the wait grows with the gateway errors only
+        import requests
+
+        class Flaky(FakeSession):
+            def __init__(self, route, fail: int) -> None:
+                super().__init__(route)
+                self.fail = fail
+
+            def request(self, method, url, headers=None, **kw):
+                if not url.endswith('/robots.txt') and self.fail > 0:
+                    self.fail -= 1
+                    raise requests.ConnectionError('reset')
+                return super().request(method, url, headers, **kw)
+
+        site = FakeTagSite()
+        site.answers.extend([(502, b'x', {'content-type': 'text/plain'})] * 2)
+        clock = FakeClock()
+        client = PoliteClient(TagSource('zq', 'gelbooru_dapi', SITE), delay=0, allow_local=True, session=Flaky(site, 3),
+                              sleep=clock.sleep, clock=clock.clock)
+        with self.assertRaisesRegex(RuntimeError, r'\(5 failed tries, 2 of them HTTP 502 / 504\)'):
+            client.get(f'{SITE}index.php')
+        self.assertEqual([2.0, 4.0, 6.0, tags_updater.GATEWAY_WAIT], [s for s in clock.sleeps if s >= 2.0])
+        # a status the caller accepts is returned as it is
+        site = FakeTagSite()
+        site.answers.append((502, b'x', {'content-type': 'text/plain'}))
+        client = PoliteClient(TagSource('zq', 'gelbooru_dapi', SITE), delay=0, allow_local=True, session=FakeSession(site),
+                              sleep=FakeClock().sleep, clock=t.clock)
+        self.assertEqual(502, client.get(f'{SITE}x', ok=(200, 502)).status)
+
     def test_a_stopped_update_continues_where_it_stopped(self) -> None:
         for engine in ('gelbooru_dapi', 'danbooru_json'):
             with self.subTest(engine=engine):
@@ -2196,7 +2249,7 @@ class PahealTagJobTests(_DataDirTest):
         self.assertNotIn('auth_token', self.section)
 
     def test_its_own_update_is_a_merge_source_rn_and_rs_have_none(self) -> None:
-        self.assertEqual(('rp', '1.0.3', '1.1', 'rp_tags.json'),
+        self.assertEqual(('rp', '1.0.4', '1.1', 'rp_tags.json'),
                          (self.manifest.abbr, self.manifest.version, self.manifest.minSdkVersion, self.manifest.tagList))
         self.assertEqual({'entry': 'tags.py:read_tags', 'merge': {'minPosts': 100}}, self.manifest.tagUpdate)
         spec = importlib.util.spec_from_file_location('lustra_test_paheal_tags', PAHEAL / 'tags.py')
@@ -2351,7 +2404,7 @@ class PahealTagJobTests(_DataDirTest):
         text = reference_text('paheal')
         self.assertNotIn('tagUpdate', text)
         manifest = json.loads(text.split('### extensions/paheal/manifest.json\n', 1)[1])
-        self.assertEqual(('rp', '1.0.3', 'rp_tags.json'), (manifest['abbr'], manifest['version'], manifest['tagList']))
+        self.assertEqual(('rp', '1.0.4', 'rp_tags.json'), (manifest['abbr'], manifest['version'], manifest['tagList']))
         self.assertIn('class DownloaderRp', text)
 
 #

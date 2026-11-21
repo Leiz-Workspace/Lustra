@@ -4,7 +4,7 @@ Lustra: regression tests for audit batch D, desktop app side (docs/reports/audit
 - frozen core entry (lustra/frozen_main.py): 'server' / 'cli' dispatch used by the packaged app
 - headers / cookies with '"' or '\\' as the app passes them ('-header name=value' / '-cookie name=value', see app/main.js connectionArgs)
 - tools/build_core.py data staging: everything the frozen core needs at run time; the catalog extensions without a tag source, and
-  the one whose own update merges the most used tags into its list (Paheal 1.0.3), carry their 2tags/ list, which an install from
+  the one whose own update merges the most used tags into its list (Paheal 1.0.3 and later), carry their 2tags/ list, which an install from
   that catalog brings to the core; an install a core refuses keeps the version installed before
 - tools/check_selftest.py: a failed step names its false checks and shows each value on a line of its own
 Run: python -m unittest lustra.tests.test_batch_d_app
@@ -127,7 +127,7 @@ class BuildCoreTests(TestCase):
             catalog = bc._stage_catalog(pathlib.Path(tmp) / 'extensions')
             with_list = {p.parent.name: p.name for p in catalog.glob('*/*_tags.json')}
             self.assertEqual({'rule34hentai': 'rn_tags.json', 'paheal': 'rp_tags.json', 'rule34us': 'rs_tags.json'}, with_list)
-            versions = {'rule34hentai': '1.0.2', 'paheal': '1.0.3', 'rule34us': '1.0.2'}  # installs before are offered the update
+            versions = {'rule34hentai': '1.0.3', 'paheal': '1.0.4', 'rule34us': '1.0.2'}  # installs before are offered the update
             for ext_id, name in with_list.items():
                 self.assertEqual((ROOT / '2tags' / name).stat().st_size, (catalog / ext_id / name).stat().st_size)
                 manifest = json.loads((catalog / ext_id / 'manifest.json').read_text(encoding='utf-8'))
@@ -174,15 +174,15 @@ class BuildCoreTests(TestCase):
                 self.assertEqual('1.0.2', json.loads((installed / 'manifest.json').read_text(encoding='utf-8'))['version'])
                 self.assertEqual(listed, (installed / 'rp_tags.json').read_bytes())
                 self.assertFalse((installed / 'tags.py').exists())
-                m = Extensions.install_from_catalog('paheal')  # "Cập nhật v1.0.2 → v1.0.3"
-                self.assertEqual(('rp', '1.0.3'), (m.abbr, m.version))
+                m = Extensions.install_from_catalog('paheal')  # "Cập nhật v1.0.2 → v1.0.4"
+                self.assertEqual(('rp', '1.0.4'), (m.abbr, m.version))
                 self.assertTrue(tag_source('rp').merge)
                 TagsDB.clear()
                 TagsDB.locate_default_lists(reload=('rp',))
                 self.assertEqual(installed / 'rp_tags.json', TagsDB.get_file('rp'))
                 from lustra import server
                 row = next(r for r in server.m_tags_status({}) if r['module'] == 'rp')
-                self.assertEqual((True, '1.0.3', False), (row['shipped'], row['version'], row['bundled']))
+                self.assertEqual((True, '1.0.4', False), (row['shipped'], row['version'], row['bundled']))
                 Extensions.uninstall('paheal')
 
     def _keep_registry(self) -> None:
@@ -229,15 +229,19 @@ class BuildCoreTests(TestCase):
             TagsDB.locate_default_lists()
             self.assertIsNone(TagsDB.get_file('rn'))
             row = next(r for r in Extensions.list_all() if r['id'] == 'rule34hentai')
-            self.assertEqual((True, '1.0.2'), (row['updateAvailable'], row['catalogVersion']))  # "có bản v1.0.2"
-            m = Extensions.install_from_catalog('rule34hentai')  # "Cập nhật lên v1.0.2"
-            self.assertEqual(('rn', '1.0.2'), (m.abbr, m.version))
+            self.assertEqual((True, '1.0.3'), (row['updateAvailable'], row['catalogVersion']))  # "có bản v1.0.3"
+            m = Extensions.install_from_catalog('rule34hentai')  # "Cập nhật lên v1.0.3"
+            self.assertEqual(('rn', '1.0.3'), (m.abbr, m.version))
             installed = Extensions.user_dir() / 'rule34hentai' / 'rn_tags.json'
             self.assertTrue(installed.is_file())
             TagsDB.clear()
             TagsDB.locate_default_lists(reload=('rn',))
             self.assertEqual(installed, TagsDB.get_file('rn'))
             self.assertGreater(TagsDB.count('rn'), 10000)
+            from lustra.tags import TagTypes
+            kinds = TagsDB.type_counts('rn')  # 2tags/rn_tags.json typed by name since 1.0.3 (tools/type_tag_list.py, dev log 7bf)
+            self.assertGreater(min(kinds.get(t, 0) for t in (TagTypes.TAG_TYPE_ARTIST, TagTypes.TAG_TYPE_CHARACTER,
+                                                              TagTypes.TAG_TYPE_COPYRIGHT)), 1000, kinds)
             for ext_id in ('paheal', 'rule34us'):  # within the installer's limits (size, files, denied domains)
                 Extensions._check_tree(catalog / ext_id)
                 self.assertIsNone(denied_in_extension(catalog / ext_id))

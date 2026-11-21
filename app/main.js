@@ -1995,7 +1995,7 @@ function registerIpc() {
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'tags.sources', 'tags.learn', 'tags.resolve', 'tags.fuzzy', 'tags.kinds', 'files.nonEmpty', 'files.identify',
+      'tags.validate', 'tags.status', 'tags.sources', 'tags.learn', 'tags.resolve', 'tags.fuzzy', 'tags.kinds', 'tags.types', 'files.nonEmpty', 'files.identify',
       'index.search', 'index.stats'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};

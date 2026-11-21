@@ -138,6 +138,15 @@
     // category rows of a site listing (an extension's own tag job may list them with their token)
     ['category:city_nights', 812, 'copyright'], ['category:cloud_stories', 240, 'copyright'],
   ];
+  // the tag list in use per module, as tags.browse / tags.types / tags.kinds read it: db, rx and vb have typed lists, fb's engine
+  // gives general tags only, the lists of the others carry no type (a site that gives none, a learned list), cv has none yet
+  const UNTYPED = TAGS.map(([tag, posts]) => [tag, posts, 'unknown']);
+  const listRows = (module) => {
+    if (['db', 'rx', 'vb'].includes(module)) return TAGS;
+    if (module === 'cv') return [];
+    if (module === 'fb') return TAGS.filter((t) => t[2] === 'general');
+    return UNTYPED;
+  };
   const ALIASES = { kitty_ears: 'cat_ears', clouds: 'cloud', sunset_sky: 'sunset', blue_skies: 'blue_sky', cloudy_sky: 'cloud' };
   const META = /^(?:id|score|rating|user|md5|width|height|parent|source|order|date|status|fav|pool|filetype|limit|age|ordfav)[:=<>]/;
   const tagRow = (name) => TAGS.find((t) => t[0] === name);
@@ -253,17 +262,22 @@
         return rows.map(([tag, posts, type]) => ({ tag, posts, type, insert: `${neg ? '-' : ''}${token && !tag.startsWith(token) ? token : ''}${tag}` }));
       }
       if (method === 'tags.kinds') {
-        // the type kinds the module's list has (db and rx share the mock list; learned / bundled lists of the others have no types);
-        // rows named '<token><value>' of the module's kinds ('category:x') are not counted, like the core
+        // the type kinds the module's list has (listRows); rows named '<token><value>' of the module's kinds ('category:x') are not
+        // counted, like the core
         const types = {};
+        const rows = listRows(p.module);
         const tokens = (modules.find((m) => m.abbr === p.module)?.search?.kinds || []).map((k) => k.token).filter(Boolean);
-        if (['db', 'rx', 'vb'].includes(p.module)) {
-          for (const t of ['artist', 'character', 'copyright']) {
-            const n = TAGS.filter((x) => x[2] === t && !tokens.some((tok) => x[0].startsWith(tok))).length;
-            if (n) types[t] = n;
-          }
+        for (const t of ['artist', 'character', 'copyright']) {
+          const n = rows.filter((x) => x[2] === t && !tokens.some((tok) => x[0].startsWith(tok))).length;
+          if (n) types[t] = n;
         }
-        return { module: p.module, hasList: true, types };
+        return { module: p.module, hasList: rows.length > 0, types };
+      }
+      if (method === 'tags.types') {
+        // every type of the module's list in use (listRows, the rows tags.browse filters), '<token><value>' rows included
+        const types = {};
+        for (const [, , t] of listRows(p.module)) types[t] = (types[t] || 0) + 1;
+        return { module: p.module, hasList: listRows(p.module).length > 0, types };
       }
       if (method === 'files.identify') {
         const items = (p.names || []).map((raw) => {
@@ -301,7 +315,7 @@
         }), hasList: true };
       }
       if (method === 'tags.browse') {
-        let rows = TAGS.filter((t) => (p.prefix === '#' ? !/^[a-z]/.test(t[0]) : t[0].startsWith(p.prefix)) && t[1] >= (p.minPosts || 0)
+        let rows = listRows(p.module).filter((t) => (p.prefix === '#' ? !/^[a-z]/.test(t[0]) : t[0].startsWith(p.prefix)) && t[1] >= (p.minPosts || 0)
           && (!p.types?.length || p.types.includes(t[2])));
         rows = p.sort === 'posts' ? rows.sort((a, b) => b[1] - a[1]) : rows.sort((a, b) => a[0].localeCompare(b[0]));
         return { total: rows.length, items: rows.slice(p.offset, p.offset + p.limit).map(([tag, posts, type]) => ({ tag, posts, type })) };

@@ -370,6 +370,8 @@ body.safe .card:hover img { filter: none; }
 }
 .pill.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .pill.on.ex { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); text-decoration: line-through; }
+/* a type filter the module's tag list has no tag of (A-Z): shown, not clickable */
+.pill.off { opacity: .45; border-style: dashed; cursor: not-allowed; }
 .az-list { flex: 1; overflow: auto; padding: 0 6px 6px; border-top: 1px solid var(--border); }
 .az-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm); }
 .az-row:hover { background: var(--panel-2); }
