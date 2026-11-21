@@ -12,8 +12,9 @@ Moebooru tag index: tag.json?limit=1000&page=N&order=name (pages from 1), until 
 
 PAGE_LIMIT = 1000
 MAX_PAGES = 5000
-TYPES = {0: 'general', 1: 'artist', 3: 'copyright', 4: 'character', 5: 'artist', 6: 'metadata'}
-'''moebooru: 5 is 'circle' (a group of artists), 6 'faults' (image defects)'''
+TYPES = {0: 'general', 1: 'artist', 3: 'copyright', 4: 'general', 5: 'metadata'}
+'''Sakugabooru's own types (its /tag page, 2026-11-21): General 0, Artist 1, Copyright 3, Terminology 4, Meta 5 ('presumed',
+'remake'). Not yande.re's: there 4 is character and 5 'circle' (a group of artists)'''
 
 
 def _int(value) -> int:

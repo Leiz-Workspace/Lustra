@@ -2,7 +2,7 @@
   "id": "realbooru",
   "name": "Realbooru",
   "abbr": "rb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,
@@ -13,8 +13,8 @@
   ],
   "tagList": "rb_tags.json",
   "entry": "downloader.py:DownloaderRb",
-  "minSdkVersion": "1.1",
-  "description": "Realbooru, Gelbooru 0.2 HTML pages (its API is offline): listing pages + one post page per downloaded post. No favorites / pools / comments / date filter.",
+  "minSdkVersion": "1.2",
+  "description": "Realbooru, Gelbooru 0.2 HTML pages (its API is offline): listing pages + one post page per downloaded post; a pool (pool:<id>) or a user's favorites (favorited_by:<user id>) read from their own pages, in the site's order. No comments / date filter.",
   "syntax": {
     "concat": "+",
     "idSep": ":",
@@ -33,5 +33,25 @@
   },
   "tagUpdate": {
     "entry": "tags.py:read_tags"
+  },
+  "search": {
+    "kinds": [
+      {
+        "id": "pool",
+        "token": "pool:",
+        "value": "[0-9]+",
+        "input": "id",
+        "listing": true,
+        "example": "1234"
+      },
+      {
+        "id": "favorites",
+        "token": "favorited_by:",
+        "value": "[0-9]+",
+        "input": "id",
+        "listing": true,
+        "example": "1234"
+      }
+    ]
   }
 }

@@ -13,8 +13,9 @@ site cannot, and download in the background, at the pace each site allows.
 </p>
 
 - **Search**: tag chips with post counts and alias hints, offline autocomplete and an A–Z tag browser, "did you mean"
-  for typos, related tags, counting, preview of images, videos and audio, download of the posts you pick. The query
-  language is in [docs/tag-syntax.md](docs/tag-syntax.md).
+  for typos, related tags, counting, preview of images, videos and audio, download of the posts you pick. "Tìm theo"
+  searches by artist, character or series (suggestions of that tag type only), uploader, user favorites, pool, and the
+  listings an extension declares. The query language is in [docs/tag-syntax.md](docs/tag-syntax.md).
 - **Downloads**: a background queue with progress, speed and time left; saved queries that download new posts on a
   schedule; one query on several sites at once, with files already downloaded from another site skipped.
 - **Local index**: every finished file is recorded (tags, score, rating, md5, path), so the **Downloaded** page searches

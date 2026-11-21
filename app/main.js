@@ -287,10 +287,13 @@ const autoKeyOf = (e) => `${e.module}\n${e.tags}`;
 function sanitizeAuto(a) {
   if (!isPlainObject(a) || !AUTO_EVERY_HOURS.includes(a.every)) return null;
   const num = (v) => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+  const lastStatus = ['', 'baseline', 'running', 'done', 'failed', 'cancelled'].includes(a.lastStatus) ? a.lastStatus : '';
   return {
-    every: a.every, maxId: num(a.maxId), lastRun: num(a.lastRun), lastCount: num(a.lastCount),
-    lastStatus: ['', 'baseline', 'running', 'done', 'failed', 'cancelled'].includes(a.lastStatus) ? a.lastStatus : '',
+    every: a.every, maxId: num(a.maxId), lastRun: num(a.lastRun), lastCount: num(a.lastCount), lastStatus,
     lastError: typeof a.lastError === 'string' ? a.lastError.slice(0, 200) : '',
+    // "only newer posts from now": its baseline id was never passed by a finished run. Schedules saved before 2.0.11 have no such
+    // field: a baseline id without any run that finished or downloaded something
+    fromNow: typeof a.fromNow === 'boolean' ? a.fromNow : num(a.maxId) > 0 && lastStatus !== 'done' && !(num(a.lastCount) > 0),
   };
 }
 
@@ -299,7 +302,7 @@ function mergeAutoRuntime(incoming) {
   const current = new Map((settings.search.saved || []).map((e) => [autoKeyOf(e), e.auto]));
   for (const e of incoming) {
     const cur = current.get(autoKeyOf(e));
-    if (e.auto && cur) Object.assign(e.auto, { maxId: cur.maxId, lastRun: cur.lastRun, lastCount: cur.lastCount, lastStatus: cur.lastStatus, lastError: cur.lastError });
+    if (e.auto && cur) Object.assign(e.auto, { maxId: cur.maxId, lastRun: cur.lastRun, lastCount: cur.lastCount, lastStatus: cur.lastStatus, lastError: cur.lastError, fromNow: cur.fromNow });
   }
 }
 
@@ -329,6 +332,26 @@ function coreMaxId(module) {
   });
 }
 
+// A scheduled run looks for newer posts only with 'id:>N': where the module searches by id (manifest search.idSearch, true when
+// absent) and the query does not select another site listing (a listing kind of search.kinds: its own order, no id filter there)
+function autoIdSearch(info, tags) {
+  if (!info || info.search?.idSearch === false) return false;
+  const listing = (Array.isArray(info.search?.kinds) ? info.search.kinds : []).filter((k) => k && k.listing && k.token);
+  return !String(tags || '').split(/\s+/).some((t) => listing.some((k) => t.replace(/^%/, '').startsWith(k.token)));
+}
+// ' id:>N' added to the saved query of a scheduled run ('' when the module cannot filter by id, or uses another metatag separator)
+function autoIdFilter(info, tags, maxId) {
+  return maxId > 0 && autoIdSearch(info, tags) && (info.syntax?.idSep || ':') === ':' ? ` id:>${maxId}` : '';
+}
+// A schedule set to "only newer posts from now" whose query cannot filter by id any more (an extension update set search.idSearch
+// false: 2.0.10 sent 'id:>N' there and the run failed): run as is it would download the whole result. Held with this message
+const AUTO_BASELINE_LOST = 'truy vấn này không còn lọc được theo id post nên “Chỉ post mới từ bây giờ” sẽ tải cả kết quả hiện có. '
+  + 'Muốn vậy thì tắt tự tải lại rồi bật lại với “Tải cả kết quả hiện có” (file đã tải được bỏ qua)';
+function autoHeld(info, e) {
+  const a = e?.auto;
+  return a?.fromNow && a.maxId > 0 && !autoIdSearch(info, e.tags) ? AUTO_BASELINE_LOST : '';
+}
+
 async function setSavedAuto(key, every, from) {
   const e = (settings.search.saved || []).find((x) => autoKeyOf(x) === key);
   if (!e) throw new Error('không tìm thấy truy vấn đã lưu');
@@ -336,9 +359,13 @@ async function setSavedAuto(key, every, from) {
     delete e.auto;
   } else {
     if (!AUTO_EVERY_HOURS.includes(every)) throw new Error('chu kỳ không hợp lệ');
+    if (!e.auto && from === 'now') { // "only newer posts from now" needs an id filter
+      const info = (await sidecar.call('ext.list', {}).catch(() => [])).find((m) => m.abbr === e.module && m.installed);
+      if (info && !autoIdSearch(info, e.tags)) throw new Error('truy vấn này không lọc được theo id post: chọn “Tải cả kết quả hiện có”');
+    }
     if (e.auto) e.auto.every = every; // keeps where it stopped
-    else if (from === 'now') e.auto = sanitizeAuto({ every, maxId: await coreMaxId(e.module), lastRun: Date.now(), lastStatus: 'baseline' });
-    else e.auto = sanitizeAuto({ every, maxId: 0, lastRun: 0 }); // first run: everything that matches (files already downloaded are skipped)
+    else if (from === 'now') e.auto = sanitizeAuto({ every, maxId: await coreMaxId(e.module), lastRun: Date.now(), lastStatus: 'baseline', fromNow: true });
+    else e.auto = sanitizeAuto({ every, maxId: 0, lastRun: 0, fromNow: false }); // first run: everything that matches (files already downloaded are skipped)
   }
   saveSettings();
   setTimeout(() => runDueSaved().catch(() => {}), 2000);
@@ -360,8 +387,11 @@ async function runDueSaved() {
         modules = modules || await sidecar.call('ext.list', {});
         const info = modules.find((m) => m.abbr === e.module && m.installed);
         if (!info) throw new Error(`module ${e.module} chưa được cài`);
-        // only newer posts: 'id:>N' where the site uses ':' metatags, and files already in the download index are skipped anyway
-        const idFilter = a.maxId > 0 && (info.syntax?.idSep || ':') === ':' ? ` id:>${a.maxId}` : '';
+        const held = autoHeld(info, e);
+        if (held) throw new Error(held);
+        // only newer posts: 'id:>N' where the site searches by id with ':' metatags, and files already in the download index are
+        // skipped anyway (the only filter where it cannot: search.idSearch false, a site listing)
+        const idFilter = autoIdFilter(info, e.tags, a.maxId);
         await jobs.start({ module: e.module, tags: `${e.tags}${idFilter}`, label: `Tự cập nhật: ${e.name}`, path: settings.download.path,
           options: { skipKnown: true }, autoKey: autoKeyOf(e), allowDuplicate: false });
         Object.assign(a, { lastRun: now, lastStatus: 'running', lastError: '' });
@@ -380,7 +410,7 @@ function autoJobFinished(job) {
   if (!e?.auto) return;
   const p = job.progress || {};
   if (job.status === 'done') {
-    Object.assign(e.auto, { lastStatus: 'done', lastCount: Number(p.success) || 0, lastError: '', maxId: Math.max(e.auto.maxId, Number(p.maxId) || 0) });
+    Object.assign(e.auto, { lastStatus: 'done', lastCount: Number(p.success) || 0, lastError: '', maxId: Math.max(e.auto.maxId, Number(p.maxId) || 0), fromNow: false });
   } else {
     Object.assign(e.auto, { lastStatus: job.status === 'cancelled' ? 'cancelled' : 'failed', lastError: String(job.error || '').slice(0, 200) });
   }
@@ -1965,7 +1995,8 @@ function registerIpc() {
   handle('rpc', async (_e, method, params) => {
     // installs never go through the generic rpc channel (see ext:* handlers): they need main-side checks and confirmation
     const allowed = ['app.info', 'ext.list', 'ext.uninstall', 'ext.remoteCatalog', 'tags.autocomplete', 'tags.browse',
-      'tags.validate', 'tags.status', 'tags.sources', 'tags.learn', 'tags.resolve', 'tags.fuzzy', 'files.nonEmpty', 'files.identify', 'index.search', 'index.stats'];
+      'tags.validate', 'tags.status', 'tags.sources', 'tags.learn', 'tags.resolve', 'tags.fuzzy', 'tags.kinds', 'files.nonEmpty', 'files.identify',
+      'index.search', 'index.stats'];
     if (!allowed.includes(method)) throw new Error(`method not allowed: ${method}`);
     params = params && typeof params === 'object' ? params : {};
     if (method === 'ext.uninstall' && !RE_EXT_ID.test(String(params.id || ''))) throw new Error('invalid extension id');
@@ -2871,6 +2902,7 @@ async function selfTestContract(js, quick) {
     jobs.pump = realPump;
   }
   out.selectedDownload = await selfTestSelectedDownload(js);
+  out.searchKinds = await selfTestSearchKinds(js);
   // posts without a preview address, or whose preview does not load (here a loopback address, refused by lustra-thumb without
   // a request): a placeholder tile instead of the broken image icon, and the card still selects. The grid's images load lazily,
   // and a window the system reports hidden or occluded (the Windows and macOS CI runners) never lays them out in view: the test
@@ -3088,6 +3120,237 @@ async function selfTestSelectedDownload(js) {
     && out.setup.stale === false && argsOk(out.selected) && out.ask?.open && out.ask.closed && out.ask.buttons.join('|') === 'Huỷ|Tải cả truy vấn|Tải 1 post đã chọn'
     && argsOk(out.askSelected) && out.failedPage?.dimmed === true && out.failedPage.stale === true && out.failedPage.asked === true
     && out.failedPage.picked === 1 && out.failedPage.button === 'Tải đã chọn (1)' && out.stale?.dimmed === true && out.stale.stale === true && out.stale.asked === false && out.staleJobs === 2);
+  return out;
+}
+
+// "Tìm theo" (search kinds): the core's type kinds of a tag list (tags.kinds, autocomplete by type with a token); in the renderer,
+// with fake modules (no request): the picker shown or hidden, a value typed with a kind (token, '_', %…% escape), kind chips, the
+// autocomplete request of a kind, the multi-site guard, the date fields of a site listing, the idSearch rules, the Preview hint;
+// main's scheduled runs add 'id:>N' only where it works. Everything shown is restored
+const SELFTEST_KIND_MODULES = (() => {
+  const base = { source: 'user', default: false, installed: true, loaded: true, media: ['image', 'video'], capabilities: ['preview'], syntax: { idSep: ':' } };
+  const kind = (k) => ({ token: '', value: '', input: 'tag', tagType: '', listing: false, pageSize: 0, example: '', label: '', use: '', order: 'id', ...k });
+  const uploader = kind({ id: 'uploader', token: 'user:', value: '[^\\s:]+', input: 'text' });
+  return [
+    { ...base, id: 'selftest-kinds', name: 'Selftest kinds', abbr: 'zk', search: { idSearch: false, metaNames: ['vote'], kinds: [
+      kind({ id: 'artist', token: 'artist:', value: '[a-z0-9_-]+', tagType: 'artist', listing: true, pageSize: 24, example: 'some_artist' }),
+      uploader, kind({ id: 'keyword', token: 'search:', input: 'text', value: '\\S+', listing: true })] } },
+    { ...base, id: 'selftest-nokinds', name: 'Selftest no kinds', abbr: 'zl', search: { idSearch: true, metaNames: [], kinds: [] } },
+    { ...base, id: 'selftest-uploader', name: 'Selftest uploader', abbr: 'zm', search: { idSearch: true, metaNames: [], kinds: [uploader] } },
+    // the same kind (id, token) as zm, but a listing there: a second site that takes 'user:x' in its own order (no dates)
+    { ...base, id: 'selftest-uploader-listing', name: 'Selftest uploader listing', abbr: 'zn', search: { idSearch: true, metaNames: [],
+      kinds: [{ ...uploader, listing: true }] } },
+  ];
+})();
+const SELFTEST_KIND_ABBRS = SELFTEST_KIND_MODULES.map((m) => m.abbr);
+
+async function selfTestSearchKinds(js) {
+  const out = {};
+  // main: 'id:>N' only where the module searches by id, the query is not a site listing and metatags use ':'
+  const listingInfo = SELFTEST_KIND_MODULES[0];
+  const f = {
+    plain: autoIdFilter({ syntax: { idSep: ':' } }, 'scenery', 5),
+    noIdSearch: autoIdFilter(listingInfo, 'scenery', 5),
+    listing: autoIdFilter({ ...listingInfo, search: { ...listingInfo.search, idSearch: true } }, 'artist:x solo', 5),
+    escapedListing: autoIdFilter({ ...listingInfo, search: { ...listingInfo.search, idSearch: true } }, '%artist:X.y% solo', 5),
+    otherKind: autoIdFilter({ ...listingInfo, search: { ...listingInfo.search, idSearch: true } }, 'user:Some.Name', 5),
+    otherSep: autoIdFilter({ syntax: { idSep: '=' } }, 'scenery', 5),
+    noBaseline: autoIdFilter({ syntax: { idSep: ':' } }, 'scenery', 0),
+  };
+  out.autoIdFilter = { ...f, ok: f.plain === ' id:>5' && f.noIdSearch === '' && f.listing === '' && f.escapedListing === ''
+    && f.otherKind === ' id:>5' && f.otherSep === '' && f.noBaseline === '' };
+  // a "from now" schedule saved before its module stopped searching by id is held (not run on the whole result)
+  const legacy = (a) => sanitizeAuto({ every: 24, maxId: 5, lastRun: 1, ...a });
+  const held = {
+    legacyNow: legacy({ lastStatus: 'failed' }).fromNow, legacyDone: legacy({ lastStatus: 'done' }).fromNow,
+    legacyCounted: legacy({ lastStatus: 'failed', lastCount: 3 }).fromNow, kept: legacy({ fromNow: false, lastStatus: 'failed' }).fromNow,
+    noId: autoHeld(listingInfo, { tags: 'scenery', auto: legacy({ lastStatus: 'failed' }) }),
+    byId: autoHeld({ syntax: { idSep: ':' } }, { tags: 'scenery', auto: legacy({ lastStatus: 'failed' }) }),
+    all: autoHeld(listingInfo, { tags: 'scenery', auto: legacy({ fromNow: false }) }),
+    noBaseline: autoHeld(listingInfo, { tags: 'scenery', auto: sanitizeAuto({ every: 24, maxId: 0, fromNow: true }) }),
+  };
+  out.autoHeld = { ...held, ok: held.legacyNow === true && held.legacyDone === false && held.legacyCounted === false && held.kept === false
+    && /Tải cả kết quả hiện có/.test(held.noId) && held.byId === '' && held.all === '' && held.noBaseline === '' };
+  // the core: kinds of a real list (a packaged core may ship no db list: then only the shape is checked)
+  try {
+    const r = await js(`(async () => {
+      const kinds = await window.lustra.rpc('tags.kinds', { module: 'db' });
+      const ac = await window.lustra.rpc('tags.autocomplete', { module: 'db', prefix: 'sa', limit: 8, types: ['artist'] });
+      const tok = await window.lustra.rpc('tags.autocomplete', { module: 'db', prefix: '-sa', limit: 3, types: ['artist'], token: 'user:' });
+      return { types: kinds.types, hasList: kinds.hasList, acTypes: [...new Set(ac.map((x) => x.type))], ac: ac.length, tokInsert: tok.map((x) => x.insert) };
+    })()`);
+    r.ok = typeof r.types === 'object' && r.tokInsert.every((x) => x.startsWith('-user:'))
+      && (!(r.types.artist > 0) || (r.ac > 0 && r.acTypes.join() === 'artist' && r.tokInsert.length > 0));
+    out.server = r;
+  } catch (e) {
+    out.server = { ok: false, error: String(e.message || e) };
+  }
+  try {
+    out.ui = await js(`(async () => {
+      const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelector('[data-page="search"]').click();
+      const fake = ${JSON.stringify(SELFTEST_KIND_MODULES)};
+      let store = null;
+      try { store = localStorage.getItem(KIND_STORE); } catch { /* no storage */ }
+      const keep = { modules: S.modules, module: S.module, kind: S.kind, chips: S.chips, multi: [...multi], dmin: $('#f-datemin').value,
+        ac: S.settings.search.autocomplete, L, types: new Map(typeKinds), asked: new Set(typeKindsAsked), store, input: tagInput.value };
+      const r = {};
+      const use = (abbr) => { S.module = abbr; S.kind = 'tag'; renderModuleButton(); renderChips(); onQueryChanged(); };
+      const options = () => [...$('#kind-select').options].map((o) => o.value + '=' + o.textContent);
+      const typed = (text, exclude = false) => { tagInput.value = text; return commitTyped(exclude); };
+      try {
+        const fakeAbbrs = ${JSON.stringify(SELFTEST_KIND_ABBRS)};
+        S.modules = [...keep.modules.filter((m) => !fakeAbbrs.includes(m.abbr)), ...fake];
+        S.chips = [];
+        for (const m of fakeAbbrs) { typeKinds.set(m, m === 'zk' ? { artist: 5, character: 3 } : {}); typeKindsAsked.add(m); }
+        // type kinds of a real list: what tags.kinds says db has, next to db's declared kinds (builtin manifest, ext.list)
+        typeKindsAsked.delete('db');
+        await loadTypeKinds('db');
+        const dbTypes = typeKinds.get('db') || {};
+        r.dbKinds = moduleKinds('db').map((k) => k.id);
+        r.dbTypeKindsOk = ['artist', 'character', 'copyright'].every((t) => r.dbKinds.includes(t) === (Number(dbTypes[t]) > 0))
+          && ['uploader', 'favorites', 'pool'].every((t) => r.dbKinds.includes(t));
+        use('zl');
+        r.hiddenNoKinds = $('#kind-picker').hidden;
+        use('zk');
+        r.shown = !$('#kind-picker').hidden;
+        r.options = options();
+        r.meta = [parseToken('vote:3:bob').kind, parseToken('artist:x').kind, parseToken('solo').kind];
+        // a value typed with a kind: the token, spaces as '_', the %…% escape when the kind's value regex refuses it
+        setKind('uploader', false);
+        r.placeholder = tagInput.placeholder;
+        typed('Some Name');
+        setKind('artist', false);
+        r.artistPlaceholder = tagInput.placeholder;
+        typed('Ab.c');
+        r.backToTag = S.kind === 'tag'; // a site listing appears once: the picker goes back to Tag
+        setKind('artist', false);
+        const before = S.chips.length;
+        typed('-other');
+        r.listingNotNegated = S.chips.length === before;
+        setKind('tag', false);
+        typed('solo');
+        r.chips = S.chips.map(chipToString);
+        r.chipLabels = [...document.querySelectorAll('#chips .chip.kind')].map((e) => e.querySelector('.k').textContent + e.querySelector('.t').textContent);
+        const poolId = { id: 'pool', token: 'pool:', input: 'id', value: '\\\\d+' };
+        r.kindTag = [kindTag(poolId, ' 1234 ').tag, kindTag(poolId, '12 34').error || '', kindTag({ id: 'pool', token: 'pool:', input: 'id' }, 'abc').error || '',
+          kindTag({ id: 'artist', token: '', input: 'tag', tagType: 'artist' }, 'Some Artist').tag];
+        // favorites / pool kinds ('use') follow the core's tag check, not their regex: lower case, %…% for other characters. The
+        // real core (db, builtin manifest) takes what the app builds
+        const dbKind = (id) => declaredKinds('db').find((k) => k.id === id);
+        r.useKinds = dbKind('favorites') && dbKind('pool') ? [kindTag(dbKind('favorites'), 'Some Name').tag, kindTag(dbKind('pool'), 'My Pool').tag,
+          kindTag(dbKind('favorites'), 'a:b').tag] : [];
+        r.useValid = [];
+        for (const t of r.useKinds) r.useValid.push((await keep.L.rpc('tags.validate', { module: 'db', tags: t })).valid);
+        // ± of a kind chip: built again from its value ('-' inside an escape), a listing is never excluded
+        const pm = { kind: 'meta', text: '%user:a:b%', exclude: false, id: ++S.chipSeq };
+        const pmBefore = toggleChipExclude(pm);
+        r.toggle = { escaped: [pmBefore, chipToString(pm)] };
+        toggleChipExclude(pm);
+        r.toggle.back = chipToString(pm);
+        const plain = { kind: 'meta', text: 'user:Bob', exclude: false, id: ++S.chipSeq };
+        toggleChipExclude(plain);
+        r.toggle.plain = chipToString(plain);
+        r.toggle.listing = toggleChipExclude({ kind: 'meta', text: 'artist:x', exclude: false, id: ++S.chipSeq });
+        // date fields: off with a site listing in the query, the typed range is kept for later
+        $('#f-datemin').value = '2026-01-01';
+        renderDateFields();
+        r.dates = { disabled: $('#f-datemin').disabled, sent: currentQuery().dateMin, title: Boolean($('#f-datemin').closest('.field').title) };
+        S.chips = S.chips.filter((c) => !tagKind(c.text)?.kind.listing);
+        renderChips(); onQueryChanged();
+        r.dates.after = { disabled: $('#f-datemin').disabled, sent: currentQuery().dateMin };
+        // a picked second site that lists the same kind in its own order: the dates go to every site, so they are off too
+        use('zm');
+        S.chips = [{ kind: 'meta', text: 'user:x', exclude: false, id: ++S.chipSeq }];
+        renderChips(); onQueryChanged();
+        r.dates.multi = { alone: $('#f-datemin').disabled };
+        multi.clear(); multi.add('zn'); renderMultiSites();
+        Object.assign(r.dates.multi, { picked: $('#f-datemin').disabled, sent: currentQuery().dateMin, title: /Selftest uploader listing/.test($('#f-datemin').closest('.field').title),
+          guard: multiKindConflict('user:x', 'zm', ['zn']) });
+        multi.clear(); renderMultiSites();
+        r.dates.multi.cleared = $('#f-datemin').disabled;
+        use('zk');
+        S.chips = [];
+        // multi-site: a kind another picked site does not declare (same id, same token) is refused
+        r.multi = { listing: multiKindConflict('artist:x solo', 'zk', ['zm']), uploader: multiKindConflict('user:x', 'zk', ['zm']),
+          missing: multiKindConflict('(user:a~user:b)', 'zk', ['zl']), typeKind: multiKindConflict('some_artist', 'zk', ['zl']) };
+        S.chips = [{ kind: 'meta', text: 'artist:x', exclude: false, id: ++S.chipSeq }];
+        multi.clear(); multi.add('zm');
+        renderMultiSites();
+        r.multi.warn = $('#f-multi-warn .kind-conflict')?.textContent || '';
+        multi.clear();
+        renderMultiSites();
+        // idSearch false: no "Theo tên file", no "Tải đã chọn", no "only newer posts" schedule
+        Object.assign(S.preview, { module: 'zk', items: [{ id: '1', excludedBy: [] }], tags: 'artist:x', site: '', page: 0, hasMore: false,
+          dateFilter: '', localUnchecked: true });
+        S.preview.key = previewKey();
+        S.preview.selected.clear(); S.preview.selected.add('1');
+        renderGrid();
+        r.preview = $('#results-info').textContent.includes('chưa lọc cục bộ trong Preview');
+        r.ids = { files: $('#btn-files').disabled, selected: $('#dl-selected').disabled, title: $('#dl-selected').title === ID_SEARCH_OFF,
+          autoListing: autoIdFilterOk({ module: 'zm', tags: 'user:x' }), autoNoId: autoIdFilterOk({ module: 'zk', tags: 'solo' }) };
+        use('zm');
+        S.preview.module = 'zm'; updateSelButton();
+        r.ids.otherFiles = $('#btn-files').disabled; r.ids.otherSelected = $('#dl-selected').disabled;
+        S.preview.selected.clear(); clearPreview();
+        // autocomplete of a kind: the request carries its type and token, rows are shown without the token and inserted with it
+        use('zk');
+        S.settings.search.autocomplete = true;
+        const calls = [];
+        L = { ...keep.L, rpc: async (m, p) => { calls.push([m, p]); return m === 'tags.autocomplete'
+          ? [{ tag: 'artist:abc', posts: 3, type: 'copyright' }, { tag: 'abd', posts: 2, type: 'artist' }] : keep.L.rpc(m, p); } };
+        S.chips = []; renderChips();
+        setKind('artist', false);
+        tagInput.value = 'ab';
+        tagInput.dispatchEvent(new Event('input', { bubbles: true }));
+        for (let i = 0; i < 40 && !document.querySelector('#ac .ac-item'); i++) await pause(25);
+        const call = calls.find((c) => c[0] === 'tags.autocomplete')?.[1] || {};
+        r.ac = { types: call.types, token: call.token, prefix: call.prefix, shown: [...document.querySelectorAll('#ac .ac-item .nm')].map((e) => e.textContent) };
+        pickAc(1);
+        r.ac.picked = S.chips.map(chipToString);
+        // the last choice per module is kept (this computer)
+        rememberKind('zk', 'uploader');
+        r.stored = storedKinds().zk;
+        r.errorVi = parseErrorVi('one site listing per search: artist:a search:b');
+        r.errorVi2 = [parseErrorVi("artist:a is a site listing: 'or' groups cannot be used with it"),
+          parseErrorVi("pool:12 lists posts in the site's order: 'or' groups cannot be used with it"),
+          parseErrorVi("'-%user:a:b%': write the '-' inside the escape: '%-user:a:b%'")];
+      } finally {
+        L = keep.L;
+        try { if (keep.store === null) localStorage.removeItem(KIND_STORE); else localStorage.setItem(KIND_STORE, keep.store); } catch { /* none */ }
+        typeKinds.clear(); keep.types.forEach((v, k) => typeKinds.set(k, v));
+        typeKindsAsked.clear(); keep.asked.forEach((k) => typeKindsAsked.add(k));
+        S.settings.search.autocomplete = keep.ac;
+        multi.clear(); keep.multi.forEach((m) => multi.add(m));
+        $('#f-datemin').value = keep.dmin;
+        S.modules = keep.modules; S.module = keep.module; S.kind = keep.kind; S.chips = keep.chips;
+        hideAc(); tagInput.value = keep.input;
+        clearPreview(); renderModuleButton(); renderChips(); onQueryChanged();
+      }
+      return r;
+    })()`);
+    const u = out.ui;
+    u.ok = Boolean(u.dbTypeKindsOk && u.hiddenNoKinds === true && u.shown === true
+      && u.options.join('|') === 'tag=Tag|artist=Nghệ sĩ|character=Nhân vật|uploader=Người đăng|keyword=Từ khoá'
+      && u.meta.join() === 'meta,meta,tag' && /tên người đăng/.test(u.placeholder) && /chỉ gợi ý nghệ sĩ/.test(u.artistPlaceholder)
+      && u.backToTag && u.listingNotNegated && u.chips.join(' ') === 'user:Some_Name %artist:ab.c% solo'
+      && u.chipLabels.join('|') === 'Người đăng:Some_Name|Nghệ sĩ:ab.c'
+      && u.kindTag.join('|') === 'pool:1234|Pool: chỉ nhập một id|Pool: chỉ nhập số (id)|some_artist'
+      && (!u.useKinds.length || (u.useKinds.join(' ') === 'favorited_by:some_name pool:my_pool %favorited_by:a:b%' && u.useValid.every((v) => v === true)))
+      && u.toggle.escaped.join('|') === '|%-user:a:b%' && u.toggle.back === '%user:a:b%' && u.toggle.plain === '-user:Bob' && /không loại trừ được/.test(u.toggle.listing)
+      && u.dates.disabled === true && u.dates.sent === '' && u.dates.title && u.dates.after.disabled === false && u.dates.after.sent === '2026-01-01'
+      && u.dates.multi.alone === false && u.dates.multi.picked === true && u.dates.multi.sent === '' && u.dates.multi.title && u.dates.multi.guard === ''
+      && u.dates.multi.cleared === false
+      && /Nghệ sĩ/.test(u.multi.listing) && u.multi.uploader === '' && /Người đăng/.test(u.multi.missing) && u.multi.typeKind === '' && /Nghệ sĩ/.test(u.multi.warn)
+      && u.preview && u.ids.files === true && u.ids.selected === true && u.ids.title && u.ids.autoListing === true && u.ids.autoNoId === false
+      && u.ids.otherFiles === false && u.ids.otherSelected === false
+      && u.ac.types?.join() === 'artist' && u.ac.token === 'artist:' && u.ac.prefix === 'ab' && u.ac.shown.join() === 'abc,abd'
+      && u.ac.picked.join() === 'artist:abd' && u.stored === 'uploader' && /^mỗi lần tìm/.test(u.errorVi)
+      && /nhóm OR/.test(u.errorVi2[0]) && /thứ tự của site, không dùng nhóm OR/.test(u.errorVi2[1]) && /dấu - phải nằm trong/.test(u.errorVi2[2]));
+  } catch (e) {
+    out.ui = { ok: false, error: String(e.message || e) };
+  }
+  out.ok = Boolean(out.autoIdFilter.ok && out.autoHeld.ok && out.server.ok && out.ui.ok);
   return out;
 }
 

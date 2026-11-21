@@ -101,6 +101,17 @@ members only posts are left out of both.
   download runs — and 3 × `/<id>?json`).
 - `check`: ok, replay 5 requests, same posts as the recorded run.
 
+## No id searches (1.1.0, 2026-11-21)
+- Zerochan has no id (or date) filter in its API (only `p` and `l`), so an `id:` query is searched as a tag. Lustra appends
+  `id:>N` to a scheduled re-run of a saved query ("Chỉ post mới từ bây giờ"), and "Tải đã chọn" / "Theo tên file" search `id:` too: on this
+  module they gave wrong results. 1.1.0 declares `"search": {"idSearch": false}` (Lustra 2.0.11 manifest key): the app then
+  never sends an `id:` query here (no "only newer posts" schedule; "Tải đã chọn" and "Theo tên file" are disabled).
+- No `metaNames`: the API takes tag names only (its "meta tags" such as Fanart are tag pages, typed `metadata` in the list; the
+  listing filters `d=`, `c=`, `strict` are not used). Search by artist / character / series ("Tìm theo" in the app) comes from
+  the tag list's types (mangaka / studio as artist, Lustra 2.0.11), nothing to declare.
+- Lustra 2.0.7 to 2.0.10 refuse this manifest ("unknown field(s): search") and keep 1.0.0: publish 1.1.0 in the official catalog
+  only after 2.0.11 is released (operations.md, the catalog gate for `search`).
+
 ## Limits / open points
 - 10,000 newest posts per search at most (guest page limit); no date filter; one tag per website query.
 - Tags whose real name holds `_` (ex. `tcp_ppp`) are searched as `tcp ppp`; tag alias redirects were not tested.

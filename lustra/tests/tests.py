@@ -66,8 +66,9 @@ args_argparse_str12_base = (
 )
 args_argparse_str12_1 = args_argparse_str12_base + ' order=id_desc'
 args_argparse_str12_2 = args_argparse_str12_base + ' order=id_asc'
-args_argparse_str13_1 = args_argparse_str12_base + ' order:id'
+args_argparse_str13_1 = args_argparse_str12_base + ' order:id_desc'
 args_argparse_str13_2 = args_argparse_str12_base + ' order:score'
+args_argparse_str13_3 = args_argparse_str12_base + ' order:id'
 args_tagparse_str1 = (
     'sfw asd ned -nds -proxr sort:id sord:score:asc -rating:explicit score:90 '
     '(t1~t2~t3) (t4~t5) -(t6,t7) -(t8,t9,t10) -(t?1,t*2|t?3|t11,t12*,*t13)'
@@ -491,6 +492,15 @@ class DownloaderBaseTests(TestCase):
     @test_prepare()
     def test_cmdline13_2(self) -> None:
         args = args_argparse_str13_2
+        arglist = prepare_arglist(args.split())
+        with _make_downloader(ProcModule.EN) as dwn:
+            dwn._parse_args(arglist, False)
+            self.assertFalse(dwn.default_sort)
+
+    @test_prepare()
+    def test_cmdline13_3(self) -> None:
+        # 'order:id' is oldest first on e621: a custom sort (date limits refused, no id cursor)
+        args = args_argparse_str13_3
         arglist = prepare_arglist(args.split())
         with _make_downloader(ProcModule.EN) as dwn:
             dwn._parse_args(arglist, False)

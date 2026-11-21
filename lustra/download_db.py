@@ -148,7 +148,7 @@ class DownloaderDb(Downloader):
         return True
 
     def _is_custom_sort_tag(self, tag_str: str) -> bool:
-        return tag_str.startswith('order:') and tag_str not in ('order:id', 'order:id_desc')
+        return tag_str.startswith('order:') and tag_str != 'order:id_desc'  # 'order:id' is oldest first
 
     # ----- addresses -----
 
