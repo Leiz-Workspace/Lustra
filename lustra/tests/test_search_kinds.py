@@ -757,6 +757,40 @@ class SidecarKindTests(_KqEnv):
             server.m_tags_kinds({'module': '../x'})
         self.assertIn('tags.kinds', server.METHODS)
 
+    def test_tags_types(self) -> None:
+        # every type the list has, '<token><value>' rows included (the A-Z browser lists them)
+        res = server.m_tags_types({'module': ABBR})
+        self.assertEqual({'module': ABBR, 'hasList': True, 'types': {'general': 1, 'character': 1, 'artist': 2, 'copyright': 1}}, res)
+        TagsDB.load_from_dict('zs', {'a': (TagTypes.TAG_TYPE_SPECIES, 1), 'b': (TagTypes.TAG_TYPE_LORE, 2), 'c': (TagTypes.TAG_TYPE_META, 3),
+                                     'd': (TagTypes.TAG_TYPE_UNKNOWN, 4), 'e': (TagTypes.TAG_TYPE_UNKNOWN, 5), 'f': (G, 6)})
+        self.assertEqual({'species': 1, 'lore': 1, 'metadata': 1, 'unknown': 2, 'general': 1}, server.m_tags_types({'module': 'zs'})['types'])
+        self.assertEqual(['d', 'e'], [r['tag'] for r in server.m_tags_browse({'module': 'zs', 'prefix': '', 'types': ['unknown']})['items']])
+        # no list
+        self.assertEqual({'module': 'zq', 'hasList': False, 'types': {}}, server.m_tags_types({'module': 'zq'}))
+        for bad in ('../x', '', 'Rx', None):
+            with self.assertRaises(server.RpcError):
+                server.m_tags_types({'module': bad})
+        self.assertIn('tags.types', server.METHODS)
+
+    def test_tags_types_of_a_list_file_without_types(self) -> None:
+        # a list read from a site that gives no tag types ("N posts"): every row is 'unknown', browsable by that filter only;
+        # 'tag' rows (rs lists) are general
+        tags_dir = pathlib.Path(self.tmp.name) / 'tags'
+        tags_dir.mkdir(exist_ok=True)
+        (tags_dir / 'zt_tags.json').write_text('{\n"alpha": "5 posts",\n"beta_artist": "7 posts",\n"gamma": "1 posts"\n}\n', encoding='utf-8')
+        (tags_dir / 'zu_tags.json').write_text('{\n"alpha": "5 posts (tag)",\n"beta": "2 posts (artist)"\n}\n', encoding='utf-8')
+        try:
+            TagsDB.locate_default_lists(reload=('zt', 'zu'))
+            self.assertEqual({'module': 'zt', 'hasList': True, 'types': {'unknown': 3}}, server.m_tags_types({'module': 'zt'}))
+            self.assertEqual({'module': 'zt', 'hasList': True, 'types': {}}, server.m_tags_kinds({'module': 'zt'}))
+            self.assertEqual(0, server.m_tags_browse({'module': 'zt', 'prefix': 'b', 'types': ['artist']})['total'])
+            rows = server.m_tags_browse({'module': 'zt', 'prefix': 'b', 'types': ['unknown']})['items']
+            self.assertEqual([{'tag': 'beta_artist', 'posts': 7, 'type': 'unknown'}], rows)
+            self.assertEqual({'general': 1, 'artist': 1}, server.m_tags_types({'module': 'zu'})['types'])
+        finally:
+            for name in ('zt_tags.json', 'zu_tags.json'):
+                (tags_dir / name).unlink(missing_ok=True)
+
     def test_resolve_per_module_metas(self) -> None:
         res = server.m_tags_resolve({'module': ABBR, 'tags': ['vote:3:bob', 'category:foo_game', 'artist:foo', 'foo_char']})
         self.assertEqual(['meta', 'meta', 'meta', 'character'], [r['type'] for r in res['items']])
@@ -836,8 +870,12 @@ class ExtensionGateInstallTests(TestCase):
                 shutil.move(new, pathlib.Path(tmp) / 'new' / 'kindsite2')
                 with mock.patch.dict(ExtensionManifest.__dataclass_fields__):
                     del ExtensionManifest.__dataclass_fields__['search']
-                    with self.assertRaisesRegex(ManifestError, r'unknown field\(s\): search'), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(ManifestError, r'unknown field\(s\): search \(bản extension này viết cho Lustra mới hơn: '
+                                                               r'cập nhật Lustra rồi cài lại\)$'), contextlib.redirect_stdout(io.StringIO()):
                         Extensions.install_from_dir(pathlib.Path(tmp) / 'new' / 'kindsite2')
+                    # the parser itself (the generator checks its drafts with it): no hint, a draft's unknown key is its own mistake
+                    with self.assertRaisesRegex(ManifestError, r'^unknown field\(s\): search$'):
+                        ExtensionManifest.from_dict({**KQ_MANIFEST, 'id': 'kindsite2', 'abbr': 'kz'}, None, 'user')
                 installed = json.loads((Extensions.user_dir() / 'kindsite2' / 'manifest.json').read_text(encoding='utf-8'))
                 self.assertEqual(('1.0.0', False), (installed['version'], 'search' in installed))
             finally:
@@ -854,7 +892,8 @@ class RepoExtensionFixTests(TestCase):
     Gelbooru / TBIB 'or' groups, the API-only sites without favorites / pools, rule34.xyz / rule34.world / Zerochan without id
     searches. Every address is built offline: fetch_html is faked and records what would be requested"""
     PATCHED = {'yandere': 'yr', 'sakugabooru': 'sk', 'gelbooru': 'gb', 'tbib': 'tb'}
-    '''1.0.1: fixes that keep working on Lustra 2.0.7 to 2.0.10 (no new manifest key, SDK 1.1 names only)'''
+    '''1.0.1: fixes that keep working on Lustra 2.0.7 to 2.0.10 (no new manifest key, SDK 1.1 names only); Gelbooru 1.0.2 (posts and
+    tags as gelbooru.com answers them, child elements) keeps that rule'''
     NO_ID_SEARCH = {'rule34xyz': 'rz', 'rule34world': 'rw', 'zerochan': 'zc'}
     '''1.1.0: manifest 'search' {"idSearch": false} (Lustra 2.0.11+)'''
     API_ONLY = {'safebooru': 'sf', 'tbib': 'tb', 'hypnohub': 'hh'}
@@ -906,7 +945,8 @@ class RepoExtensionFixTests(TestCase):
         spec = importlib.util.spec_from_file_location('build_catalog_repo_ext', ROOT / 'tools' / 'build_catalog.py')
         tool = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(tool)
-        rows = [(e, '1.0.1', []) for e in self.PATCHED] + [(e, '1.1.0', ['search (Lustra 2.0.11)']) for e in self.NO_ID_SEARCH]
+        rows = [(e, '1.0.2' if e == 'gelbooru' else '1.0.1', []) for e in self.PATCHED]
+        rows += [(e, '1.1.0', ['search (Lustra 2.0.11)']) for e in self.NO_ID_SEARCH]
         for ext_id, version, gate in rows:
             with self.subTest(ext_id):
                 m = self.manifest(ext_id)

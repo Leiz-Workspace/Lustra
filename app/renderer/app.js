@@ -293,7 +293,11 @@ async function loadModules() {
     return;
   }
   const installed = S.modules.filter((m) => m.installed);
+  const was = S.module;
   if (!installed.some((m) => m.abbr === S.module)) S.module = installed[0]?.abbr || 'rx';
+  noteModuleChanges(S.modules);
+  // the module in use was removed: Tags A-Z follows the one that takes its place (its rows, its type filters)
+  if (S.module !== was) azInstances.forEach((az) => az.reset());
   const updates = S.modules.filter((m) => m.updateAvailable);
   setHidden($('#badge-ext'), !updates.length);
   setText($('#badge-ext'), String(updates.length));
@@ -517,10 +521,44 @@ async function loadTypeKinds(abbr = S.module) {
   typeKinds.set(abbr, r?.types && typeof r.types === 'object' ? r.types : {});
   if (abbr === S.module) renderKindPicker();
 }
-// the module's list changed (an update, tags learned): its types are asked again, the picker keeps the old ones meanwhile
+// the module's list changed (an update, tags learned, its extension): its types are asked again, the picker keeps the old ones
+// meanwhile; the A-Z browser's type filters too (tags.types)
 function refreshTypeKinds(abbr) {
   typeKindsAsked.delete(abbr);
   if (abbr === S.module) loadTypeKinds(abbr);
+  forgetListTypes(abbr);
+}
+// tags.types of a module's list in use, for the A-Z type filters: module -> promise of { hasList, types: { general: n, ... } },
+// or of null when the core is older (no tags.types) or the sidecar did not answer (then asked again next time)
+const listTypes = new Map();
+function loadListTypes(abbr) {
+  if (!L) return Promise.resolve(null);
+  if (!listTypes.has(abbr)) {
+    const ask = rpcOptional('tags.types', { module: abbr })
+      .then((r) => (r?.types && typeof r.types === 'object' ? { hasList: Boolean(r.hasList), types: r.types } : null))
+      .catch(() => {
+        if (listTypes.get(abbr) === ask) listTypes.delete(abbr);
+        return null;
+      });
+    listTypes.set(abbr, ask);
+  }
+  return listTypes.get(abbr);
+}
+function forgetListTypes(abbr) {
+  listTypes.delete(abbr);
+  azInstances.forEach((az) => az.typesChanged(abbr));
+}
+// an extension installed, updated or removed may bring or take a tag list: what ext.list says per abbreviation, the last time
+const moduleStamps = new Map();
+function noteModuleChanges(modules) {
+  const now = new Map();
+  for (const m of modules) now.set(m.abbr, `${now.get(m.abbr) || ''}${m.id}@${m.version}:${m.source}:${m.installed ? 1 : 0};`);
+  const first = !moduleStamps.size;
+  for (const abbr of new Set([...moduleStamps.keys(), ...now.keys()])) {
+    if (!first && moduleStamps.get(abbr) !== now.get(abbr)) refreshTypeKinds(abbr);
+  }
+  moduleStamps.clear();
+  now.forEach((v, k) => moduleStamps.set(k, v));
 }
 function kindTitle(k) {
   if (!k) return 'Tag bất kỳ: gợi ý mọi loại tag';
@@ -2104,9 +2142,23 @@ $('#jobs-clear').addEventListener('click', async () => {
 });
 
 // ---------------- A-Z tag browser (drawer + page) ----------------
+// The type filters follow the module's list in use (tags.types): the usual five are always there, one the list has no tag of is
+// off; the other types the list has (species, lore on e621) get a filter of their own, and its rows without a type (lists of sites
+// that give none) the 'chưa rõ loại' one. An older core (no tags.types): the five filters, all on
+const AZ_TYPES = ['general', 'artist', 'character', 'copyright', 'metadata'];
+const AZ_EXTRA_ORDER = ['species', 'lore', 'invalid1'];
+const AZ_TYPE_LABEL = { invalid1: 'invalid', unknown: 'chưa rõ loại' };
+const azTypeLabel = (t) => AZ_TYPE_LABEL[t] || t;
+// 'loại artist, character', 'chưa rõ loại', 'loại artist hoặc chưa rõ loại' (the filters add up: a tag of any of them)
+function azTypesText(types) {
+  const named = types.filter((t) => t !== 'unknown').map(azTypeLabel);
+  return [named.length ? `loại ${named.join(', ')}` : '', types.includes('unknown') ? 'chưa rõ loại' : ''].filter(Boolean).join(' hoặc ');
+}
 const azInstances = [];
 function createAZ(host) {
-  const st = { letter: 'a', prefix: '', types: new Set(), minPosts: 0, sort: 'posts', offset: 0, total: 0, loading: false, seq: 0 };
+  // info: tags.types of the module shown ({ hasList, types }), null while not known or with an older core
+  const st = { letter: 'a', prefix: '', types: new Set(), minPosts: 0, sort: 'posts', offset: 0, total: 0, loading: false, seq: 0,
+    info: null, infoModule: '', reloads: 0 };
   const letters = h('div', { class: 'az-letters' }, [...'abcdefghijklmnopqrstuvwxyz', '#'].map((ch) =>
     h('button', { class: ch === st.letter ? 'on' : '', onclick: () => { st.letter = ch; st.prefix = ''; prefixInput.value = ''; reload(); } }, ch)));
   const prefixInput = h('input', { type: 'text', placeholder: 'Lọc theo tiền tố (vd: big_)…', oninput: debounce(() => { st.prefix = prefixInput.value.trim().toLowerCase(); reload(); }, 200) });
@@ -2121,12 +2173,74 @@ function createAZ(host) {
     $$('button', sortSeg).forEach((b) => b.classList.toggle('on', b.dataset.s === s));
     reload();
   });
-  const types = h('div', { class: 'az-types' }, ['general', 'artist', 'character', 'copyright', 'metadata'].map((t) =>
-    h('button', { class: 'pill', onclick: (e) => { if (st.types.has(t)) st.types.delete(t); else st.types.add(t); e.currentTarget.classList.toggle('on'); reload(); } },
-      h('span', { class: `type-dot t-${t}` }), t)));
+  const types = h('div', { class: 'az-types' });
+  const typeCount = (t) => Number(st.info?.types?.[t]) || 0;
+  const typeOff = (t) => Boolean(st.info) && typeCount(t) <= 0;
+  const typeBtns = new Map(); // type -> its filter button, kept across renders (focus stays on the one clicked)
+  function typeButton(t) {
+    let b = typeBtns.get(t);
+    if (!b) {
+      b = h('button', { type: 'button', class: 'pill', dataset: { type: t }, onclick: () => {
+        if (typeOff(t)) return;
+        if (st.types.has(t)) st.types.delete(t); else st.types.add(t);
+        renderTypes();
+        reload();
+      } }, h('span', { class: `type-dot t-${t}` }), azTypeLabel(t));
+      typeBtns.set(t, b);
+    }
+    return b;
+  }
+  function renderTypes() {
+    const mod = (st.infoModule || S.module).toUpperCase();
+    const info = st.info;
+    const rank = (t) => (t === 'unknown' ? 1000 : (AZ_EXTRA_ORDER.indexOf(t) + 1 || 100));
+    const extra = info ? Object.keys(info.types).filter((t) => !AZ_TYPES.includes(t) && typeCount(t) > 0)
+      .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)) : [];
+    const btns = [...AZ_TYPES, ...extra].map(typeButton);
+    if (btns.length !== types.children.length || btns.some((b, i) => types.children[i] !== b)) types.replaceChildren(...btns);
+    for (const b of btns) {
+      const t = b.dataset.type;
+      const n = typeCount(t);
+      const off = typeOff(t);
+      let title = '';
+      if (off) title = info.hasList ? `Danh sách tag đang dùng của ${mod} không có tag loại ${azTypeLabel(t)}` : `Chưa có danh sách tag cho ${mod}`;
+      else if (info) title = t === 'unknown' ? `${nf.format(n)} tag (danh sách không ghi loại của chúng)` : `${nf.format(n)} tag`;
+      b.classList.toggle('on', st.types.has(t));
+      b.classList.toggle('off', off);
+      b.setAttribute('aria-pressed', String(st.types.has(t)));
+      if (off) b.setAttribute('aria-disabled', 'true'); else b.removeAttribute('aria-disabled');
+      if (title) b.title = title; else b.removeAttribute('title');
+    }
+  }
+  // the type filters of the module shown (tags.types, asked once per module and list); a selected type its list has no tag of is
+  // dropped, and so is an extra one when the types are not known (its filter is not shown). Returns whether the selection changed
+  async function syncTypes() {
+    const module = S.module;
+    const info = await loadListTypes(module);
+    if (module !== S.module) return false;
+    st.info = info;
+    st.infoModule = module;
+    let dropped = false;
+    for (const t of [...st.types]) {
+      if (info ? typeCount(t) <= 0 : !AZ_TYPES.includes(t)) { st.types.delete(t); dropped = true; }
+    }
+    renderTypes();
+    return dropped;
+  }
+  renderTypes();
   const list = h('div', { class: 'az-list' });
   const foot = h('div', { class: 'az-foot' }, h('span', {}, ''), h('span', { class: 'muted' }, ''));
   host.replaceChildren(letters, h('div', { class: 'az-tools' }, prefixInput, minSel, sortSeg), types, list, foot);
+  // why nothing is listed: no list, or nothing of the selected types / prefix / post count in it
+  function emptyText(prefix) {
+    const info = st.infoModule === S.module ? st.info : null;
+    if (!info) return st.prefix ? 'Không có tag nào với tiền tố này' : 'Chưa có danh sách tag cho module này';
+    if (!info.hasList) return 'Chưa có danh sách tag cho module này';
+    if (!st.types.size && st.prefix && !st.minPosts) return 'Không có tag nào với tiền tố này';
+    const what = st.types.size ? `tag ${azTypesText([...st.types])}` : 'tag nào';
+    const start = prefix === '#' ? 'không bắt đầu bằng chữ cái a–z' : `bắt đầu bằng “${prefix}”`;
+    return `Không có ${what} ${start}${st.minPosts ? ` với ≥ ${fmt(st.minPosts)} post` : ''}`;
+  }
 
   async function load(append) {
     // paging waits for the running load; a reload (letter, prefix, filter or module change) always starts and makes
@@ -2150,25 +2264,35 @@ function createAZ(host) {
         h('button', { class: 'btn sm', title: 'Thêm vào truy vấn', onclick: () => { addChip(it.tag); toast(`Đã thêm ${it.tag}`); } }, '+'),
         h('button', { class: 'btn sm', title: 'Loại trừ', onclick: () => { addChip(`-${it.tag}`); toast(`Đã loại trừ ${it.tag}`); } }, '−'))));
       foot.firstChild.textContent = `${nf.format(st.total)} tag · ${module.toUpperCase()}${st.prefix ? ` · tiền tố “${st.prefix}”` : ''}`;
-      foot.lastChild.textContent = st.total === 0 ? (st.prefix ? 'Không có tag nào với tiền tố này' : 'Chưa có danh sách tag cho module này')
-        : st.offset < st.total ? 'Cuộn để tải thêm' : '';
+      foot.lastChild.textContent = st.total === 0 ? emptyText(prefix) : st.offset < st.total ? 'Cuộn để tải thêm' : '';
     } catch (err) {
       if (seq === st.seq) foot.firstChild.textContent = `Lỗi: ${errMsg(err)}`;
     } finally {
       if (seq === st.seq) st.loading = false;
     }
   }
-  function reload() {
+  async function reload() {
     // the highlighted letter follows a typed prefix
     const on = st.prefix ? (/^[a-z]/.test(st.prefix) ? st.prefix[0] : '') : st.letter;
     $$('button', letters).forEach((b) => b.classList.toggle('on', b.textContent === on));
-    load(false);
+    // the type filters first (known at once after the first time): a filter the new module's list cannot match is not sent
+    const n = ++st.reloads;
+    // while the filters are asked: rows of the previous letter / module still in flight are stale, and no paging (load(true))
+    st.seq++;
+    st.loading = true;
+    await syncTypes();
+    if (n === st.reloads) load(false);
   }
   list.addEventListener('scroll', () => {
     if (list.scrollTop + list.clientHeight > list.scrollHeight - 200 && st.offset < st.total) load(true);
   });
-  // module change: only an instance that was opened before reloads now, the others load when first shown
-  const api = { reload, reset: () => { if (api.loaded) reload(); }, loaded: false };
+  // module change: only an instance that was opened before reloads now, the others load when first shown. The module's list
+  // changed (forgetListTypes): its filters are asked again, the rows shown stay unless a selected filter went away
+  const api = { reload, reset: () => { if (api.loaded) reload(); }, loaded: false,
+    typesChanged: (abbr) => {
+      if (!api.loaded || abbr !== S.module) return;
+      syncTypes().then((dropped) => { if (dropped || st.total === 0) reload(); }); // nothing shown yet (no list before): no scroll lost
+    } };
   azInstances.push(api);
   return api;
 }

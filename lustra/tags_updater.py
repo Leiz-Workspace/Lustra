@@ -77,7 +77,13 @@ ENGINE_MIN_INTERVAL = 1.0
 '''extension sources: at least this many seconds between requests (the generator's downloaders use the same floor)'''
 CRAWL_DELAY_MAX = 60.0
 TRIES = 5
-'''network errors: tries of one request'''
+'''network errors and gateway errors (GATEWAY_ERRORS): tries of one request'''
+GATEWAY_ERRORS = (502, 504)
+'''answers of a proxy / gateway in front of the site that failed this once (an extension site answered one 502 in the middle of its
+tag list on 2026-11-21 and the same page on the next try, docs/dev_log.md 7bf): tried again like a network error, not a reason to
+stop the list'''
+GATEWAY_WAIT = 5.0
+'''seconds before the next try after a gateway error, times the gateway errors of that request so far (5, 10, 15, 20 s)'''
 RATE_LIMIT_WAITS = (5.0, 15.0, 30.0, 60.0, 120.0, 180.0)
 '''seconds waited after each HTTP 429 / 503 of one request without Retry-After (6 min 50 s in all), then the list stops'''
 PARTIAL_DIR = '.partial'
@@ -448,13 +454,13 @@ class PoliteClient:
         return self.robots
 
     def get(self, url: str, *, accept: str = '', max_bytes: int = MAX_PAGE_BYTES, ok: tuple[int, ...] = (200,)) -> _Answer:
-        """GET after robots.txt and pacing; 429 / 503 wait for Retry-After, network errors are retried (TRIES in all)"""
+        """GET after robots.txt and pacing; 429 / 503 wait for Retry-After, network errors and 502 / 504 are retried (TRIES in all)"""
         rules = self._robots_rules()
         if self.source.robots and not rules.allows(url):
             path = url_parse.urlsplit(url).path
             raise TagSourceError(f'robots.txt of {_host(url)} does not allow {path} ({rules.status}): the tag list is not updated',
                                  'robots')
-        errors = waits = 0
+        errors = waits = gateway = 0
         while True:
             self._pace()
             try:
@@ -478,6 +484,16 @@ class PoliteClient:
                 self.waited += wait
                 self._tell(f'{_host(url)} asks to wait (HTTP {r.status:d}): waiting {wait:.0f} s, then one request every '
                            f'{self.interval:.2f} s')
+                self._sleep(wait)
+                continue
+            if r.status in GATEWAY_ERRORS and r.status not in ok:
+                errors += 1  # one budget of TRIES with the network errors
+                gateway += 1
+                if errors >= TRIES:
+                    raise RuntimeError(f'{_host(url)} answered HTTP {r.status:d} for {redact(url_parse.urlsplit(url).path)} '
+                                       f'({errors:d} failed tries, {gateway:d} of them HTTP 502 / 504): try again later')
+                wait = GATEWAY_WAIT * gateway
+                self._tell(f'{_host(url)} answered HTTP {r.status:d}: trying again in {wait:.0f} s')
                 self._sleep(wait)
                 continue
             if r.status not in ok:
