@@ -117,6 +117,33 @@ class BuildCoreTests(TestCase):
             data = dict((dest, src) for src, dest in bc._stage_data(pathlib.Path(tmp), 'none'))
             self.assertNotIn('2tags', data)
 
+    def test_files_the_release_rule_calls_not_shipped_are_not_in_the_build(self) -> None:
+        # release.yml skips a release when every file changed since the last one matches NOT_SHIPPED (staging otherwise asks for a
+        # version bump): a 2tags/ list or a tool it names must never reach the frozen core or its bundled catalog, and the lists
+        # the build does take must not match (a change to them is a change of the app)
+        import re
+        text = (ROOT / '.github' / 'workflows' / 'release.yml').read_text(encoding='utf-8')
+        rule = re.compile(re.search(r"NOT_SHIPPED: '([^']+)'", text).group(1))
+        bc = _load_build_core()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            staged = {p.name for p in bc._stage_catalog(pathlib.Path(tmp) / 'extensions').glob('*/*_tags.json')}
+        self.assertIn("ap.add_argument('--tags', default='aliases'", (ROOT / 'tools' / 'build_core.py').read_text(encoding='utf-8'))
+        lists = sorted(p.name for p in (ROOT / '2tags').glob('*_tags.json'))
+        self.assertTrue(lists)
+        for name in lists:
+            with self.subTest(name):
+                self.assertEqual(name not in staged, bool(rule.match(f'2tags/{name}')),
+                                 'a list the build bundles must not match NOT_SHIPPED, the others must')
+        self.assertFalse(rule.match(f'2tags/{bc.ALIASES_FILE}'))
+        for tool in ('build_catalog', 'sign_catalog', 'check_selftest', 'type_tag_list'):
+            self.assertTrue(rule.match(f'tools/{tool}.py'), tool)
+        # the tag list typing tool is a maintainer tool: neither the build nor the core uses it
+        users = [p for p in [ROOT / 'tools' / 'build_core.py', *(ROOT / 'lustra').rglob('*.py')]
+                 if 'tests' not in p.parts and 'type_tag_list' in p.read_text(encoding='utf-8', errors='replace')]
+        self.assertEqual([], users)
+        for path in ('tools/build_core.py', 'lustra/tagsdb.py', 'extensions/paheal/tags.py', 'app/main.js'):
+            self.assertFalse(rule.match(path), path)
+
     def test_catalog_extensions_that_need_their_shipped_list_carry_it(self) -> None:
         # Rule34Hentai, Rule34.us read no list from their site (no tagUpdate, not reviewed, no engine), and Paheal's own update reads
         # only the tags with 100+ posts and merges them into its list (tagUpdate.merge): the bundled catalog holds their 2tags/ list
