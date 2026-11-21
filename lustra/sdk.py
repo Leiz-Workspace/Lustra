@@ -12,6 +12,12 @@ Lustra runs it only when the user asks (Tags A-Z), never on a schedule.
 list in use. The job must give names in the list's form (lowercase where the site searches without case, '_' for spaces), because
 the core matches names exactly.
 
+Search kinds (manifest "search", Lustra 2.0.11+, SDK 1.2): a kind with a token is one tag of the query ('artist:some_artist').
+split_kind(tags) in _query_tags / _search_url gives (KindMatch(id, token, value) | None, the other tags); self.current_kind is the
+query's kind, set before any search address is built; a DownloaderJsonApi pages a kind's listing with _items_per_page() (the
+kind's pageSize) and _max_pages(). A route built from user input is checked with self.robots_allows(url) /
+self.require_robots_allowed(url) against the site's robots.txt saved next to the manifest (RFC 9309).
+
 Versioning (SDK_VERSION, 'MAJOR.MINOR'): a MINOR release only adds names; a MAJOR release may remove or change one, after the
 name was marked deprecated for at least one MINOR release. An extension that needs names added in a later release declares
 "minSdkVersion": "MAJOR.MINOR" in its manifest.json: Lustra refuses to load it with a clear message when its SDK is older
@@ -59,6 +65,7 @@ from .rex import (
     re_tags_exclude_rx,
     re_tags_to_process_rx,
 )
+from .search_kinds import KindMatch, split_kind
 from .tags_updater import TagJob
 from .utils import as_date, format_score
 
@@ -82,6 +89,7 @@ __all__ = (
     'HTMLContent',
     'ItemInfo',
     'JsonPost',
+    'KindMatch',
     'MediaKind',
     'ModuleCaps',
     'TagJob',
@@ -96,14 +104,17 @@ __all__ = (
     're_tags_exclude_rx',
     're_tags_to_process_rx',
     'sdk_satisfies',
+    'split_kind',
     'thread_exit',
     'trace',
 )
 
-SDK_VERSION = '1.1'
+SDK_VERSION = '1.2'
 '''1.0 (2026-11-17): downloader bases (Downloader, DownloaderGelbooru, DownloaderDb, DownloaderJsonApi + JsonPost), item / media
 types and constants, generic item regexes, network helpers allowed to extensions, trace, as_date, format_score.
-1.1 (2026-11-19): TagJob, for the extension's own tag list update (manifest 'tagUpdate')'''
+1.1 (2026-11-19): TagJob, for the extension's own tag list update (manifest 'tagUpdate').
+1.2 (2026-11-21): search kinds: split_kind + KindMatch, Downloader.current_kind, DownloaderJsonApi._items_per_page / _max_pages,
+Downloader.robots_allows / require_robots_allowed (the extension's saved robots.txt)'''
 re_sdk_version = re.compile(r'^(\d{1,3})\.(\d{1,3})(?:\.\d{1,3})?$')
 
 

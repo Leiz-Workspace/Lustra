@@ -23,6 +23,7 @@ from .defines import (
 from .logger import trace
 from .module import ProcModule
 from .network import thread_exit
+from .search_kinds import is_listing_tag, is_module_meta
 from .vcs import __LUSTRA_DEBUG__
 
 __all__ = ('extract_neg_and_groups', 'register_module_limits', 'split_tags_into_tasks')
@@ -74,12 +75,13 @@ KNOWN_META_NAMES = frozenset((
     'unaliased', 'exif', 'ai', 'embedded', 'commentary', 'note', 'notes', 'comments', 'description', 'type', 'delreason', 'deletedby',
 ))
 '''metatag names: a tag like 'honkai:_star_rail' or 'saber_(fate)' is a plain tag, 'id:>5' or '-user:bob' is a metatag'''
-re_meta_name = re.compile(r'^([a-z_]+)(?::|=|[<>])')
+re_meta_name = re.compile(r'^([a-z_][a-z\d_]*)(?::|=|[<>])')
 
 
 def _is_meta(tag: str) -> bool:
+    """A metatag of the current module: a core known name, or a kind token / metatag name its manifest declares ('search')"""
     m = re_meta_name.match(tag.lstrip('-'))
-    return bool(m and m.group(1) in KNOWN_META_NAMES)
+    return bool(m and m.group(1) in KNOWN_META_NAMES) or is_module_meta(tag)
 
 
 def _is_plain_positive(tag: str) -> bool:
@@ -102,8 +104,28 @@ def register_module_limits(proc_id: int, max_string_len: int, max_tags: int, max
 
 
 def _is_counted_tag(tag: str) -> bool:
+    """Takes one of the module's tag slots: not a free metatag (freeMetaPrefixes), not the token of a listing kind"""
     free = FREE_META_PREFIXES.get(ProcModule.value(), ())
-    return not (free and tag.lstrip('-').startswith(free))
+    return not (free and tag.lstrip('-').startswith(free)) and not is_listing_tag(tag)
+
+
+def _move_all_local(tags_list: list[str], required_out: list[str]) -> list[str]:
+    """A listing kind ('artist:x' -> the site's /models/x/ listing) cannot be combined with tags on the site: every plain positive
+    tag goes to the local 'required tags' filter, every plain negative one is returned (for the local negative group).
+    Metatags, wildcards and the listing token stay in the site query"""
+    negatives: list[str] = []
+    for tag in list(tags_list):
+        if _is_plain_positive(tag):
+            tags_list.remove(tag)
+            required_out.append(url_parse.unquote(tag))
+        elif tag.startswith('-') and not tag.startswith('-(') and not _is_meta(tag):
+            tags_list.remove(tag)
+            negatives.append(url_parse.unquote(tag[1:]))
+    if required_out or negatives:
+        listing = next((t for t in tags_list if is_listing_tag(t)), '')
+        trace(f'Info: {listing} is a site listing: {len(required_out) + len(negatives):d} tag(s) will be checked locally: '
+              f'\'{" ".join([*required_out, *(f"-{t}" for t in negatives)])}\'')
+    return negatives
 
 
 def _count_tags(tags: Iterable[str]) -> int:
@@ -223,6 +245,12 @@ def extract_neg_and_groups(tags_str: str, split_always: bool, required_out: list
             parsed.append(plist)
             del tags_list[tgi]
 
+    if required_out is not None and any(is_listing_tag(t) for t in tags_list):
+        if listing_negatives := _move_all_local(tags_list, required_out):
+            plist = form_plist(f'-(*,{"|".join(listing_negatives)})')
+            assert plist is not None
+            parsed.append(plist)
+
     total_len = len(tags_list) - 1  # concat chars count
     for t in tags_list:  # + length of each tag
         total_len += max(len(ogt) for ogt in t.split('+~+')) if split_always and t.startswith('(+') else len(t)
@@ -243,8 +271,9 @@ def extract_neg_and_groups(tags_str: str, split_always: bool, required_out: list
 
     if required_out is not None and max_tags_all and LOCAL_POSITIVE_OVERFLOW.get(ProcModule.value(), False):
         # positive tags first: negative tags are cheaper to filter locally but only if there is room for at least one of them
+        moved_before = len(required_out)  # a listing kind's tags are not in tags_list any more (not in total_len)
         _pick_local_required_tags(tags_list, max_tags_all, required_out)
-        for rtag in required_out:
+        for rtag in required_out[moved_before:]:
             total_len -= len(rtag) + 1
         max_ntags = max(0, max_tags_all - (_count_tags(tags_list) - _count_tags(neg_tags_list_all)))
 

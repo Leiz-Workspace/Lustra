@@ -186,6 +186,13 @@ input.tiny { width: 72px; }
 }
 .menu button:hover, .menu button.on { background: var(--panel-2); }
 .menu .menu-foot { border-top: 1px solid var(--border); margin-top: 6px; padding: 8px; color: var(--muted); font-size: 12px; }
+/* "Tìm theo": how the next value is read (a tag, an artist, an uploader...), hidden on modules without kinds */
+.kind-picker { display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 4px 0 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--panel-2); }
+.kind-picker[hidden] { display: none; }
+.kind-picker span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.kind-picker select { height: 30px; border: 0; background: transparent; color: var(--text); font: inherit; font-weight: 600; padding: 0 4px;
+  box-shadow: none !important; cursor: pointer; field-sizing: content; max-width: 230px; } /* as wide as the kind picked */
 .tag-input {
   flex: 1 1 420px; min-width: 260px; position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 40px; padding: 4px 8px;
   border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: color-mix(in srgb, var(--panel-solid) 80%, transparent);
@@ -204,6 +211,7 @@ input.tiny { width: 72px; }
 .chip.exclude { background: color-mix(in srgb, var(--danger) 15%, transparent); border-color: color-mix(in srgb, var(--danger) 50%, transparent); }
 .chip.exclude .t::before { content: "−"; margin-right: 2px; color: var(--danger); font-weight: 700; }
 .chip.meta { background: color-mix(in srgb, var(--meta) 15%, transparent); border-color: color-mix(in srgb, var(--meta) 50%, transparent); }
+.chip.kind .k { font: 600 11.5px var(--font); color: var(--muted); margin-right: 1px; white-space: nowrap; }
 .chip.or { background: color-mix(in srgb, var(--or) 15%, transparent); border-color: color-mix(in srgb, var(--or) 55%, transparent); }
 .chip.neg { background: color-mix(in srgb, var(--neg) 15%, transparent); border-color: color-mix(in srgb, var(--neg) 55%, transparent); }
 .chip.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -362,6 +370,8 @@ body.safe .card:hover img { filter: none; }
 }
 .pill.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .pill.on.ex { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); text-decoration: line-through; }
+/* a type filter the module's tag list has no tag of (A-Z): shown, not clickable */
+.pill.off { opacity: .45; border-style: dashed; cursor: not-allowed; }
 .az-list { flex: 1; overflow: auto; padding: 0 6px 6px; border-top: 1px solid var(--border); }
 .az-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm); }
 .az-row:hover { background: var(--panel-2); }
@@ -561,6 +571,7 @@ body.safe .card:hover img { filter: none; }
 .multi-warn { margin: 6px 0 0; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.5; color: var(--text);
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .multi-warn b { color: var(--warn); }
+.multi-warn b.kind-conflict { color: var(--danger); }
 .key-needed { margin: 0 0 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .tags-schedule { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .tags-schedule p { flex-basis: 100%; margin: 2px 0 0; }

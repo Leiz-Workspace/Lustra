@@ -11,9 +11,10 @@ from collections.abc import Sequence
 
 from .module import ProcModule
 from .rex import re_favorited_by_tag, re_pool_tag, re_space_mult
+from .search_kinds import kind_of, kind_value_ok
 from .utils import startsendswith, unique_ordered
 
-__all__ = ('convert_taglist', 'parse_tags', 'register_module_syntax', 'reset_last_tags')
+__all__ = ('TagsError', 'convert_taglist', 'is_module_sort_tag', 'parse_error', 'parse_tags', 'register_module_syntax', 'reset_last_tags')
 
 DEFAULT_TAGS = ('sfw',)
 
@@ -219,6 +220,12 @@ def re_sort() -> re.Pattern:
     return re_by_type(RE_SORTS)
 
 
+def is_module_sort_tag(tag: str) -> bool:
+    """The tag matches the current module's registered sort syntax (False for a module without one)"""
+    rex = RE_SORTS.get(ProcModule.value())
+    return bool(rex is not None and rex.pattern not in ('^$', '') and rex.fullmatch(tag))
+
+
 def re_fav() -> re.Pattern:
     return re_by_type(RE_FAVS)
 
@@ -260,9 +267,14 @@ def normalize_tag(tag: str) -> str:
     return tag.replace(' ', '+')
 
 
+class TagsError(AssertionError):
+    """Invalid query (an AssertionError, as the original assert was): the message says why when the parser knows"""
+
+
 def convert_taglist(taglist: Sequence[str]) -> list[str]:
     parse_suc, parsed = parse_tags(' '.join(taglist))
-    assert parse_suc, f'Invalid tags: {taglist!s}'
+    if not parse_suc:
+        raise TagsError(f'Invalid tags: {taglist!s}{f" ({why})" if (why := parse_error()) else ""}')
     return [normalize_tag(tag) for tag in parsed]
 
 
@@ -270,8 +282,15 @@ def ret_tags(suc: bool, tag_list: Sequence[str]) -> tuple[bool, Sequence[str]]:
     return suc, tag_list
 
 
-def fail() -> tuple[bool, Sequence[str]]:
+def fail(why: str | None = None) -> tuple[bool, Sequence[str]]:
+    if why is not None:
+        parse_tags.last_error = why
     return ret_tags(False, DEFAULT_TAGS)
+
+
+def parse_error() -> str:
+    """Why the last parse_tags() failed, when known ('' otherwise)"""
+    return getattr(parse_tags, 'last_error', '')
 
 
 def parse_tags(tags: str) -> tuple[bool, Sequence[str]]:
@@ -282,13 +301,16 @@ def parse_tags(tags: str) -> tuple[bool, Sequence[str]]:
         tags = re_space_mult.sub(' ', tags)
     tags = tags.strip()
 
-    if parse_tags.last_tags == tags:
+    # the result depends on the module too (its syntax, its search kinds): the cache is per module
+    if parse_tags.last_tags == tags and getattr(parse_tags, 'last_module', None) == ProcModule.value():
         if parse_tags.last_fulltags:
             return ret_tags(True, parse_tags.last_fulltags)
         return fail()
 
     parse_tags.last_tags = tags
+    parse_tags.last_module = ProcModule.value()
     parse_tags.last_fulltags = None
+    parse_tags.last_error = ''
 
     if not tags:
         return fail()
@@ -296,12 +318,42 @@ def parse_tags(tags: str) -> tuple[bool, Sequence[str]]:
     fulltags: list[str] = []
     sort_tags_count = 0
     custom_tags_count = 0
+    listing_tags: list[str] = []
+    '''tags of a listing kind (the token selects another site listing, manifest 'search')'''
+    or_groups = 0
     tag: str
     for tag in unique_ordered(tags.split(' ')):
         tag_escaped = startsendswith(tag, '%')
+        if not tag_escaped and len(tag) > 3 and tag.startswith('-%') and tag.endswith('%') and kind_of(tag[2:-1]) is not None:
+            # '-%user:a:b%' is no escape: the core would send it as one literal tag (and miss a listing kind's rules)
+            return fail(f'\'{tag}\': write the \'-\' inside the escape: \'%-{tag[2:-1]}%\'')
+        kind = kind_of(tag[1:-1] if tag_escaped else tag)
+        if kind is not None and kind.listing:
+            if tag.lstrip('%').startswith('-'):
+                return fail(f'\'{kind.token}\' selects a site listing: it cannot be negated')
+            listing_tags.append(tag)
         if tag_escaped:
             pass
+        elif kind is not None and not kind.use:
+            # a kind of the module (manifest 'search'): its value regex instead of the core's tag characters ('user:Some.Name')
+            if kind_value_ok(tag) is None:
+                return fail(f'\'{tag}\': not a valid value for \'{kind.token}\'')
+            fulltags.append(tag)
+            continue
         elif tag.startswith('(') and re_orgr_full().fullmatch(tag):
+            # members are tags too: a listing (or a kind in the site's order) cannot be one of the alternatives
+            for part in tag[1:-1].split('~'):
+                part_escaped = startsendswith(part, '%')
+                if (pk := kind_of(part[1:-1] if part_escaped else part)) is None:
+                    continue
+                member = part.strip('%').lstrip('-')
+                if pk.listing:
+                    return fail(f'{member} is a site listing: \'or\' groups cannot be used with it')
+                if pk.order == 'site':
+                    return fail(f'{member} lists posts in the site\'s order: \'or\' groups cannot be used with it')
+                if not pk.use and not part_escaped and kind_value_ok(part) is None:
+                    return fail(f'\'{part}\': not a valid value for \'{pk.token}\'')
+            or_groups += 1
             try:
                 tag = split_or_group(tag)
             except Exception:
@@ -329,6 +381,13 @@ def parse_tags(tags: str) -> tuple[bool, Sequence[str]]:
 
     if len(fulltags) <= sort_tags_count > 0 or custom_tags_count > 1:
         return fail()
+    if listing_tags:
+        if len(listing_tags) > 1:
+            return fail(f'one site listing per search: {" ".join(listing_tags)}')
+        if or_groups:
+            return fail(f'{listing_tags[0]} is a site listing: \'or\' groups cannot be used with it')
+        if custom_tags_count:
+            return fail(f'{listing_tags[0]} is a site listing: favorites / pools cannot be used with it')
 
     parse_tags.last_fulltags = tuple(fulltags)
 

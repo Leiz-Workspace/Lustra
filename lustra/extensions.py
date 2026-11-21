@@ -30,7 +30,7 @@ from .defines import IDVAL_EQ_SEPARATORS, MODULES_BUILTIN, PLATFORM_DARWIN, PLAT
 from .denylist import denied, denied_in_extension, denied_message
 from .gender import register_rules_file
 from .logger import trace
-from .modspec import MANIFEST_FILE_NAME, ExtensionManifest, ManifestError, re_ext_id
+from .modspec import MANIFEST_FILE_NAME, ExtensionManifest, ManifestError, re_ext_id, with_newer_core_hint
 from .module import ProcModule
 from .safety import register_extra_tags
 
@@ -129,7 +129,7 @@ class Extensions:
                     raise ManifestError(f'extension id \'{m.id}\' does not match its folder name \'{sub.name}\'')
                 result.append(m)
             except Exception as err:
-                Extensions.errors[sub.as_posix()] = str(err)
+                Extensions.errors[sub.as_posix()] = with_newer_core_hint(err)
                 trace(f'Warning (W2): extension at \'{sub}\' is invalid: {err}')
         return result
 
@@ -189,7 +189,8 @@ class Extensions:
     def _register(m: ExtensionManifest) -> None:
         from .downloaders import DOWNLOADERS_BY_PROC_MODULE
         from .file_parser import register_module_prefix
-        from .tags_parser import register_module_syntax
+        from .search_kinds import register_module_search
+        from .tags_parser import RE_FAVS, RE_POOLS, register_module_syntax
         from .task import register_module_limits
 
         with Extensions._lock:
@@ -204,6 +205,10 @@ class Extensions:
             proc_id = ProcModule.register(m.abbr)
             s = m.syntax
             register_module_syntax(proc_id, s.metaCount, s.sort, s.fav, s.pool)
+            # search kinds: for every module, the ones known to the core too (their syntax stays the core's)
+            register_module_search(proc_id, m.search, RE_FAVS.get(proc_id), RE_POOLS.get(proc_id))
+            for note in m.search.notes:
+                trace(f'Info: extension \'{m.id}\': {note}')
             register_module_limits(proc_id, s.maxTagsStringLen, s.maxTags, s.maxTagsSeparate, s.maxWildcards,
                                    s.freeMetaPrefixes, s.localPositiveOverflow)
             register_module_prefix(proc_id, f'{m.abbr}_')
@@ -342,7 +347,12 @@ class Extensions:
         src = pathlib.Path(src)
         if src.is_symlink() or not src.is_dir():
             raise ExtensionError('extension source must be a folder')
-        m = ExtensionManifest.load(src / MANIFEST_FILE_NAME, SOURCE_USER)
+        try:
+            m = ExtensionManifest.load(src / MANIFEST_FILE_NAME, SOURCE_USER)
+        except ManifestError as err:  # every install (folder, zip, catalog, url) comes through here
+            if (hinted := with_newer_core_hint(err)) != str(err):
+                raise ManifestError(hinted) from err
+            raise
         if expect_id and m.id != expect_id:
             raise ExtensionError(f'the archive contains extension \'{m.id}\', not \'{expect_id}\' announced by the catalog')
         if Extensions.is_builtin_abbr(m.abbr) or m.id in {e.id for e in Extensions._scan(Extensions.builtin_dir(), SOURCE_BUILTIN)}:

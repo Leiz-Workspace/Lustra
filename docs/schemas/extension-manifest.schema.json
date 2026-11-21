@@ -100,6 +100,114 @@
       },
       "description": "the extension's own tag list update (needs minSdkVersion '1.1'). Lustra runs it only when the user asks (Tags A-Z button, 'lustra-core tags --modules <abbr>'), never on the app's schedule, when the app opens or after the install; its requests go through the core (lustra/tags_updater.py, TagJob). The extension ships its list as 'tagList'"
     },
+    "search": {
+      "type": "object",
+      "description": "search kinds (\"Tìm theo\" in the app), the site's own metatag names and whether 'id:' searches work. Lustra 2.0.11 and later; older cores refuse a manifest with this key ('unknown field(s): search') and keep the installed version. Unknown keys inside it and kinds with an unknown id, input, use or order are skipped (a later core may know them). Type kinds (artist, character, copyright) need no declaration: the app offers them when the module's tag list has tags of that type (tags.kinds)",
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "enum": [
+                  "artist",
+                  "character",
+                  "copyright",
+                  "model",
+                  "category",
+                  "uploader",
+                  "favorites",
+                  "pool",
+                  "collection",
+                  "keyword"
+                ],
+                "description": "what the kind searches by; the app labels it (Nghệ sĩ, Nhân vật, Series, Người mẫu, Chuyên mục, Người đăng, Yêu thích của người dùng, Pool, Bộ sưu tập, Từ khoá). At most one kind per id"
+              },
+              "token": {
+                "type": "string",
+                "pattern": "^[a-z][a-z_]{0,23}[:=]$",
+                "description": "the kind is the tag '<token><value>' of the query (ex. 'artist:some_artist'). Without token (and without use) the kind is a plain tag of tagType (input tag, not a listing). At most one kind per token"
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "python regex of the value: the core accepts '-?<token>(?:<value>)' instead of its own tag characters (ex. '[^\\\\s:]+' for user names with capitals or dots). Default '\\\\S+' ('\\\\d+' for input id). Back references, look-arounds and a repeat inside a repeat are refused"
+              },
+              "input": {
+                "enum": [
+                  "tag",
+                  "text",
+                  "id"
+                ],
+                "description": "tag (default): autocomplete; text: free words, the app turns spaces into '_'; id: digits"
+              },
+              "tagType": {
+                "enum": [
+                  "general",
+                  "artist",
+                  "character",
+                  "copyright",
+                  "metadata",
+                  "species",
+                  "lore"
+                ],
+                "description": "tag list type the app's autocomplete is filtered by (tags.autocomplete types)"
+              },
+              "listing": {
+                "type": "boolean",
+                "description": "the token selects another site listing (ex. /models/<x>/): it does not count towards maxTags, every plain tag of the query is checked locally (required tags, negative group), results come in the site's order (no id cursor, date limits refused), no 'or' group in the query nor the kind inside one, and one listing kind per query"
+              },
+              "pageSize": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000,
+                "description": "posts per page of that listing (0: the module's), used by DownloaderJsonApi._items_per_page (SDK 1.2)"
+              },
+              "example": {
+                "type": "string",
+                "description": "sample value shown by the app after the token (80 characters at most): the value alone ('some_user', not 'user:some_user'; a leading token is dropped)"
+              },
+              "label": {
+                "type": "string",
+                "description": "label instead of the app's own for the id (40 characters at most)"
+              },
+              "use": {
+                "enum": [
+                  "fav",
+                  "pool"
+                ],
+                "description": "the module's favorites / pool syntax (syntax.fav / syntax.pool): the token is 'favorited_by' / 'pool' + idSep, the existing favorites / pool pipeline runs; cannot be a listing"
+              },
+              "order": {
+                "enum": [
+                  "id",
+                  "site"
+                ],
+                "description": "id (default): newest first; site: the site's own order (ex. a pool in pool order), handled like a sort tag (no id cursor, no date limits)"
+              }
+            }
+          }
+        },
+        "metaNames": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,31}$"
+          },
+          "description": "the site's metatag names the core does not know (ex. 'vote' for 'vote:3:name'): shown as metatags, never moved to the local filters"
+        },
+        "idSearch": {
+          "type": "boolean",
+          "description": "false: 'id:' searches do not work on this module (the app's auto update adds no 'id:>N', selected posts and search by file name are not offered). Default true"
+        }
+      }
+    },
     "description": {
       "type": "string"
     },

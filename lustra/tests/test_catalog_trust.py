@@ -463,13 +463,13 @@ class BuildCatalogTests(TestCase):
         with contextlib.redirect_stderr(err):
             index = self.tool.build(exts, self.root / 'a', self.tool.OFFICIAL_BASE_URL, None, tags)
         entry = index['extensions'][0]
-        self.assertEqual(('paheal', '1.0.3'), (entry['id'], entry['version']))
+        self.assertEqual(('paheal', '1.0.4'), (entry['id'], entry['version']))
         self.assertEqual({'id', 'name', 'abbr', 'version', 'url', 'sha256', 'site', 'description'}, set(entry))  # no manifest field
         with zipfile.ZipFile(self.root / 'a' / f"paheal-{manifest['version']}.zip") as zf:
             self.assertEqual((tags / 'rp_tags.json').read_bytes(), zf.read('rp_tags.json'))
             self.assertIn('tags.py', zf.namelist())
         # cores before 2.0.10 refuse the manifest: the build says so (publish once 2.0.10 is out, docs/operations.md 3d)
-        self.assertIn('paheal 1.0.3: tagUpdate.merge (Lustra 2.0.10): older cores refuse to install it', err.getvalue())
+        self.assertIn('paheal 1.0.4: tagUpdate.merge (Lustra 2.0.10): older cores refuse to install it', err.getvalue())
         lists = self.root / 'lists'  # a list its own update wrote alone (the tags with 100+ posts): refused
         lists.mkdir()
         (lists / 'rp_tags.json').write_text('{\n"blue_sky": "130 posts (unknown)"\n}\n', encoding='utf-8')

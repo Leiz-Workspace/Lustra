@@ -38,10 +38,11 @@ from .extensions import ENV_CATALOG_AUTOLOAD, SOURCE_USER, Extensions, data_dir 
 from .gender import decide, infer_from_tags, rules_for_module  # noqa: E402
 from .help import APP_ADDRESS  # noqa: E402
 from .logger import Logger  # noqa: E402
-from .modspec import re_abbr  # noqa: E402
+from .modspec import re_abbr, re_kind_token  # noqa: E402
 from .module import ProcModule  # noqa: E402
 from .rex import re_api_credentials  # noqa: E402
 from .safety import blocked_tag  # noqa: E402
+from .search_kinds import id_search_supported, is_module_meta, kind_of, kind_tokens  # noqa: E402
 from .tags import TAG_NAMES_BY_TYPE, TagTypes  # noqa: E402
 from .tagsdb import TAG_ALIASES, TagsDB, is_wtag, load_tag_aliases, wildcard_pattern  # noqa: E402
 from .task import KNOWN_META_NAMES, re_meta_name  # noqa: E402
@@ -135,9 +136,24 @@ def _plain_tag(raw: Any) -> str:
     return '_'.join(str(raw).strip().lower().split()).lstrip('-')
 
 
-def _is_metatag(tag: str) -> bool:
+def _is_metatag(tag: str, module: str | None = None) -> bool:
+    """A core known metatag name, or (module given) a kind token / metatag name of the module's manifest ('search')"""
     m = re_meta_name.match(tag)
-    return bool(m and m.group(1) in KNOWN_META_NAMES)
+    return bool(m and m.group(1) in KNOWN_META_NAMES) or (module is not None and is_module_meta(tag, module))
+
+
+KIND_TYPES = ('artist', 'character', 'copyright')
+'''tag types offered as search kinds ("Tim theo") when the module's list has tags of that type (tags.kinds)'''
+
+
+def _types_param(p: dict) -> list[TagTypes]:
+    """'types': list of type names ('artist'...) -> tag types; unknown names are dropped (a list of only unknown names: no type)"""
+    raw = p.get('types') or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise RpcError(-32602, 'invalid \'types\'')
+    return [TAG_TYPES_BY_NAME[str(t).lower()] for t in raw if str(t).lower() in TAG_TYPES_BY_NAME]
 
 
 # ----- helpers -----
@@ -233,15 +249,59 @@ def m_ext_remote_catalog(p: dict) -> list[dict]:
 
 
 def m_tags_autocomplete(p: dict) -> list[dict]:
-    """Thread-safe on its own (TagsDB lock): never waits for _core_lock, so it stays responsive while a preview / count runs"""
+    """Thread-safe on its own (TagsDB lock): never waits for _core_lock, so it stays responsive while a preview / count runs.
+    types (optional): only tags of these types ('artist'...), picked among the first AUTOCOMPLETE_SCAN_MAX prefix matches.
+    token (optional, a search kind's token 'artist:'): list rows named '<token><prefix>' first (an extension's job may give
+    'category:x' rows), else rows named '<prefix>'; 'insert' always carries the token"""
     module, prefix = p.get('module', 'rx'), str(p.get('prefix', '')).lower()
     neg = prefix.startswith('-')
     base = prefix.lstrip('-')
     if not module or len(base) < 1:
         return []
     limit = int(p.get('limit', 12))
-    matches = TagsDB.top_matches(module, base, limit, scan_max=AUTOCOMPLETE_SCAN_MAX)
-    return [{**_tag_row(k, info), 'insert': f'{"-" if neg else ""}{k}'} for k, info in matches]
+    types = _types_param(p)
+    if p.get('types') and not types:
+        return []  # only types the core does not know: no tag has them
+    token = str(p.get('token') or '')
+    if token and not re_kind_token.fullmatch(token):
+        raise RpcError(-32602, 'invalid \'token\'')
+    if token and base.startswith(token):
+        base = base[len(token):]
+        if not base:
+            return []
+    sign = '-' if neg else ''
+    if token and (matches := TagsDB.top_matches(module, f'{token}{base}', limit, scan_max=AUTOCOMPLETE_SCAN_MAX, tag_types=types)):
+        return [{**_tag_row(k, info), 'insert': f'{sign}{k}'} for k, info in matches]
+    matches = TagsDB.top_matches(module, base, limit, scan_max=AUTOCOMPLETE_SCAN_MAX, tag_types=types)
+    return [{**_tag_row(k, info), 'insert': f'{sign}{token}{k}'} for k, info in matches]
+
+
+def m_tags_kinds(p: dict) -> dict:
+    """{module} -> {module, hasList, types: {artist: n, character: n, copyright: n}}: tags of each KIND_TYPES type in the module's
+    list in use (counted once per loaded list), only the types it has. The app offers a type kind ("Nghe si"...) for each.
+    Rows named '<token><value>' of the module's kinds ('category:x' typed copyright) are not counted: a type kind's value is a
+    plain tag, the declared kind offers those. Same locking as tags.autocomplete. The kinds a manifest declares come with ext.list"""
+    module = str(p.get('module', ''))
+    if not re_abbr.fullmatch(module):
+        raise RpcError(-32602, f'invalid module \'{module}\'')
+    counts = TagsDB.type_counts(module, kind_tokens(module))
+    types = {name: counts[TAG_TYPES_BY_NAME[name]] for name in KIND_TYPES if counts.get(TAG_TYPES_BY_NAME[name], 0) > 0}
+    return {'module': module, 'hasList': bool(counts or TagsDB.type_counts(module)), 'types': types}
+
+
+def m_tags_types(p: dict) -> dict:
+    """{module} -> {module, hasList, types: {general: n, artist: n, ..., unknown: n}}: rows of every tag type in the module's list in
+    use (counted once per loaded list), only the types it has, by their tags.browse names ('tag' rows are general, rows without a type
+    are 'unknown'). Every row counts, '<token><value>' ones included: the A-Z browser lists them. The app enables its type filters
+    (tags.browse 'types') by these. Same locking as tags.autocomplete"""
+    module = str(p.get('module', ''))
+    if not re_abbr.fullmatch(module):
+        raise RpcError(-32602, f'invalid module \'{module}\'')
+    types: dict[str, int] = {}
+    for tag_type, n in TagsDB.type_counts(module).items():
+        name = str(TAG_NAMES_BY_TYPE.get(tag_type, 'unknown'))
+        types[name] = types.get(name, 0) + n
+    return {'module': module, 'hasList': bool(types), 'types': types}
 
 
 def m_tags_browse(p: dict) -> dict:
@@ -255,14 +315,14 @@ def m_tags_browse(p: dict) -> dict:
 
 
 def m_tags_validate(p: dict) -> dict:
-    from .tags_parser import parse_tags, reset_last_tags
+    from .tags_parser import parse_error, parse_tags, reset_last_tags
     abbr = p.get('module', 'rx')
     pid = _module_id(abbr)
     with _core_lock:
         ProcModule.set(pid)
         reset_last_tags()
         ok, tags = parse_tags(str(p.get('tags', '')))
-        return {'valid': bool(ok), 'tags': list(tags)}
+        return {'valid': bool(ok), 'tags': list(tags), 'error': '' if ok else parse_error()}
 
 
 def m_tags_resolve(p: dict) -> dict:
@@ -281,7 +341,7 @@ def m_tags_resolve(p: dict) -> dict:
         items.append(row)
         if not tag:
             continue
-        if _is_metatag(tag):
+        if _is_metatag(tag, module):
             row.update(type='meta', known=True)
             continue
         info = TagsDB.find_tag(module, tag)
@@ -300,7 +360,11 @@ def m_tags_fuzzy(p: dict) -> list[dict]:
     distance 0), ranked by distance then posts. Same locking as tags.autocomplete; the index is built on the first call per list"""
     module = p.get('module', 'rx')
     limit = max(1, min(FUZZY_LIMIT_MAX, int(p.get('limit') or 8)))
-    return [{**_tag_row(name, info), 'distance': dist} for name, info, dist in TagsDB.fuzzy_matches(module, _plain_tag(p.get('text', '')), limit)]
+    types = _types_param(p)
+    if p.get('types') and not types:
+        return []
+    return [{**_tag_row(name, info), 'distance': dist}
+            for name, info, dist in TagsDB.fuzzy_matches(module, _plain_tag(p.get('text', '')), limit, types)]
 
 
 def m_tags_status(_: dict) -> list[dict]:
@@ -680,27 +744,34 @@ def m_search_preview(p: dict) -> dict:
         # no post of the page had a readable date in the listing (rule34hentai lists tags, not dates): nothing could be checked
         if dates == 'local' and (not filt.with_tags or (result and not filt.dated)):
             dates = 'unchecked'
+        # the listing gives no post tags (the module fetches each post for them): required tags / negative groups were not checked
+        unchecked = not filt.with_tags and bool(dwn.required_tags or dwn.neg_and_groups)
         return {'page': page, 'pageSize': page_size, 'hasMore': has_more, 'items': result, 'tasks': list(dwn.tags_str_arr),
                 'requiredTags': list(dwn.required_tags), 'site': dwn._get_sitename(), 'genderStats': filt.gender_stats,
                 'blockedCount': filt.blocked, 'hiddenNoTags': filt.hidden_no_tags, 'genderEnabled': filt.gender_on,
-                'genderModel': filt.model_info, 'dateFilter': dates}
+                'genderModel': filt.model_info, 'dateFilter': dates, 'localFiltersUnchecked': unchecked}
     module = p.get('module', 'rx')
     res = _with_downloader(module, p.get('tags', ''), list(p.get('args', [])), fn)
     _learn_from_preview(module, res.get('items', []))
     return res
 
 
-def _query_tag_matchers(query: str) -> tuple[set[str], list[re.Pattern]]:
-    """Tags of a query, negated ones and members of '(a~b)' / '-(a,b)' groups included: (plain names, wildcard patterns)"""
+def _query_tag_matchers(query: str, module: str | None = None) -> tuple[set[str], list[re.Pattern]]:
+    """Tags of a query, negated ones and members of '(a~b)' / '-(a,b)' groups included: (plain names, wildcard patterns).
+    A tag of a search kind of the module ('artist:some_artist') also gives its value: posts of that listing carry it as a plain tag"""
     names: set[str] = set()
     for word in query.lower().split():
         word = word.lstrip('-')
         if len(word) > 2 and word[0] == word[-1] == '%':  # escaped tag
-            names.add(word[1:-1])
+            word = word[1:-1]
+            names.add(word)
         elif word.startswith('(') and word.endswith(')') and ('~' in word or ',' in word):
             names.update(t.lstrip('-') for t in re.split(r'[~,]', word[1:-1]))
+            continue
         else:
             names.add(word)
+        if module is not None and (kind := kind_of(word, module)) is not None:
+            names.add(word[len(kind.token):])
     names.discard('')
     return names, [wildcard_pattern(n) for n in names if is_wtag(n)]
 
@@ -720,7 +791,7 @@ def m_search_related(p: dict) -> dict:
         page_size, maxlim = _results_page_size(dwn)
         items_raw, _ = _fetch_results_page(dwn, 0, page_size, maxlim)
         filt = _ResultsFilter(dwn)
-        names, patterns = _query_tag_matchers(query)
+        names, patterns = _query_tag_matchers(query, module)
         counts: dict[str, int] = {}
         sample = 0
         for h in items_raw:
@@ -729,7 +800,7 @@ def m_search_related(p: dict) -> dict:
                 continue
             sample += 1
             for tag in {t.lower() for t in item.get('tags', ()) if t}:
-                if tag not in names and not _is_metatag(tag) and not any(pt.fullmatch(tag) for pt in patterns):
+                if tag not in names and not _is_metatag(tag, module) and not any(pt.fullmatch(tag) for pt in patterns):
                     counts[tag] = counts.get(tag, 0) + 1
         return counts, sample
 
@@ -773,7 +844,9 @@ def m_files_identify(p: dict) -> dict:
     names = [str(x) for x in names if str(x).strip()][:FILES_IDENTIFY_MAX]
     hosts = _site_hosts()
     items = [identify_file_name(n, module, hosts) for n in names]
-    return {'items': items, 'queries': build_file_queries(items), 'max': FILES_IDENTIFY_MAX}
+    # idSearch False (manifest 'search'): the module cannot run these 'id:' / 'md5:' searches, the app does not offer them
+    queries = [{**q, 'idSearch': id_search_supported(q['module'])} for q in build_file_queries(items)]
+    return {'items': items, 'queries': queries, 'max': FILES_IDENTIFY_MAX}
 
 
 def m_files_nonempty(p: dict) -> dict:
@@ -877,6 +950,8 @@ METHODS: dict[str, Callable[[dict], Any]] = {
     'tags.validate': m_tags_validate,
     'tags.resolve': m_tags_resolve,
     'tags.fuzzy': m_tags_fuzzy,
+    'tags.kinds': m_tags_kinds,
+    'tags.types': m_tags_types,
     'tags.status': m_tags_status,
     'tags.sources': m_tags_sources,
     'tags.learn': m_tags_learn,

@@ -76,6 +76,7 @@ Lustra normally allows most symbols for tags search, there are some specifics th
     - source:
     - updated:
     - order: `order:X[_asc|_desc]`. `X` = `<sort type>`, ex. `score`, `id` (default `id_desc`)
+    - `order:id` là cũ nhất trước (như trên Danbooru, yande.re, Sakugabooru): từ Lustra 2.0.11 (e621 1.0.2) nó là sắp xếp riêng, không dùng cùng khoảng ngày hay nhóm OR được. Thứ tự mặc định là `order:id_desc`
   - EN tags with range also support following range syntax:
     - `<type>:X..` (ex. `score:5000..` is equal to `score:>=5000`)
     - `<type>:..X` (ex. `score:..-500` <=> `score:<=-500`)
@@ -131,6 +132,42 @@ Lustra normally allows most symbols for tags search, there are some specifics th
   - surround tag with percent sign `%` to disable tag validation if Lustra falsely marks your tags as invalid:
     - `1+2=paradise` (invalid) `->` `%1+2=paradise%` (valid)
 
+## Tìm theo: kiểu tìm (Lustra 2.0.11)
+> Phần này viết bằng tiếng Việt. Đặc tả: [specs.md](specs.md) F-03b và mục 6 (khoá `search` của manifest).
+
+Truy vấn vẫn là một chuỗi tag. Ô **Tìm theo** của app (cạnh ô nhập tag) chỉ giúp điền chuỗi đó: chọn kiểu, gõ giá trị, Enter. Dòng lệnh gõ thẳng tag tương ứng.
+
+**Nghệ sĩ, Nhân vật, Series**: có ở mọi module khi danh sách tag đang dùng có tag loại `artist`, `character`, `copyright`. Giá trị là một tag thường (`some_artist`); app chỉ gợi ý tag loại đó và đổi dấu cách thành `_`. Danh sách không ghi loại (học từ post, Paheal, Rule34Hentai) thì không có các kiểu này; danh sách `2tags/` đi kèm của Rule34 và Xbooru ghi nghệ sĩ là `general` cho tới khi cập nhật.
+
+**Kiểu có token**: tag `<token><giá trị>`. Giá trị được kiểm bằng regex của kiểu (manifest `search.kinds[].value`), không bằng ký tự tag của lõi, nên được chữ hoa và dấu chấm khi regex cho phép. Kiểu của hai module có sẵn:
+
+| Module | Kiểu trong app | Cú pháp | Giá trị |
+|---|---|---|---|
+| `rx` | Người đăng | `user:<tên>` | tên như trên site, ví dụ `user:Some.Name` (mọi ký tự trừ dấu cách và `:`) |
+| `rx` | Yêu thích của người dùng | `favorited_by:<id>` | id người dùng (số trong link trang yêu thích), xem [Favorites](#favorites) |
+| `rx` | Pool | `pool:<id>` | id pool, xem [Pools](#pools) |
+| `db` | Người đăng | `user:<tên>` | như `rx` |
+| `db` | Yêu thích của người dùng | `favorited_by:<tên>` | tên người dùng (Lustra gửi `fav:<tên>`) |
+| `db` | Pool | `pool:<id hoặc tên>` | |
+
+`db` còn khai báo `favgroup:` và `ordfavgroup:` là metatag của site (`search.metaNames`): chip hiện là metatag, và Lustra không bao giờ chuyển chúng sang lọc cục bộ khi truy vấn vượt 2 tag của Danbooru. Token và metatag riêng của module cũng không bao giờ bị chọn làm tag "hiếm nhất" gửi lên site.
+
+Extension khai báo kiểu riêng trong manifest (khoá `search`, cần Lustra 2.0.11): ô Tìm theo hiện đúng các kiểu đó khi chọn module. Một kiểu **listing** chọn trang danh sách riêng của site (ví dụ trang người mẫu, chuyên mục, kết quả tìm theo từ khoá):
+- token không tính vào giới hạn tag của site;
+- mọi tag thường khác trong truy vấn (cả tag loại trừ) được lọc cục bộ trên tag của post;
+- kết quả theo thứ tự của site, nên không lọc theo ngày được (app tắt ô ngày, dòng lệnh báo lỗi khi có `-mindate` / `-maxdate`);
+- mỗi truy vấn một listing, không loại trừ được (`-artist:x` không hợp lệ), không dùng cùng nhóm OR hay `favorited_by:` / `pool:`, và không đặt được trong nhóm OR (`(artist:a~artist:b)`, `(pool:1~solo)` bị từ chối: mỗi nhánh của nhóm là một lượt tìm riêng, không còn là danh sách đó).
+Kiểu có `"order": "site"` (ví dụ pool trả post theo thứ tự trong pool) cũng không lọc theo ngày được và không đặt được trong nhóm OR.
+
+**Bọc `%…%` để bỏ kiểm tra**: lõi kiểm tag thường và metatag bằng ký tự tag của nó (chữ thường). Module chưa khai báo kiểu cho một metatag (extension chưa có khoá `search`, ví dụ `user:` trên một site mà tên người dùng có chữ hoa) thì bọc cả tag: `%user:Some.Name%`. Lõi bỏ hai dấu `%`, gửi nguyên văn, không kiểm. Loại trừ thì đặt `-` bên trong: `%-user:Some.Name%`. Với tag của một kiểu, `-%…%` (dấu `-` ở ngoài) bị từ chối: đó không phải dạng bọc, lõi sẽ gửi cả chuỗi như một tag và bỏ qua luật của kiểu. Khi chọn một kiểu trong app, app tự bọc nếu giá trị có ký tự ngoài `[a-z0-9_-]` mà regex của kiểu không cho; nút ± của chip dựng lại tag theo đúng dạng đó.
+
+**Giá trị trong app**:
+- kiểu `id` nhận đúng một id (chỉ chữ số); gõ hai id cách nhau thì app báo "chỉ nhập một id";
+- Yêu thích và Pool (`favorited_by:`, `pool:`) đi theo luật tag của lõi chứ không theo regex của kiểu: app viết thường tên (các site này tìm tên không phân biệt hoa thường) và bọc `%…%` tên có ký tự ngoài `[a-z0-9_.-]`;
+- Series (và các kiểu theo loại tag khác) không đếm các tag có token của một kiểu khai báo: `category:x` loại `copyright` của site video thuộc kiểu Chuyên mục, không phải Series.
+
+**Tải nhiều site**: truy vấn có tag của một kiểu chỉ chạy được trên các site khai báo kiểu cùng id và cùng token; app từ chối và nói site nào thiếu. Kiểu Nghệ sĩ / Nhân vật / Series là tag thường nên không bị chặn (tên tag vẫn có thể khác giữa các site). Mọi site nhận cùng khoảng ngày: khi một site được thêm lấy kiểu đó theo thứ tự của site (ví dụ `pool:` của Realbooru là danh sách riêng, của Rule34 thì không), ô ngày bị tắt.
+
 ## Tag autocompletion
 Lustra provides a list of known tags for each module, which can also be used to attempt to complete whatever word typed in **Tags** field
 - Enable this feature by selecting **Tools -> Enable autocompletion**. You will be asked for a folder location - the folder containing tag list files. Once selected the following message will be logged (or similar):
@@ -178,6 +215,11 @@ Downloading user's favorites using native tags search functionality is only avai
 - XB / BB refuse `favorited_by`: favorites are html pages, and the terms of these sites allow automated access through the API only
 - While searching favorites you can use normal filtering as well. Date filter, additional required / excluded tags, etc.
 - Downloading favorites isn't particulary fast, Lustra will need to fetch info for every item in the list in order to enable filtering
+- Theo extension (Lustra 2.0.11, catalog đi kèm app):
+  - `yr` (yande.re), `sk` (Sakugabooru) từ 1.0.1: `favorited_by:<tên người dùng>` (chữ thường), Lustra gửi tới site dạng `vote:3:<tên>` (cách site tìm bài người đó yêu thích); gõ thẳng `vote:3:<tên>` vẫn được. `order:vote` xếp theo lúc yêu thích.
+  - `gb` (Gelbooru) từ 1.0.1: `favorited_by:<id người dùng>` (số), gửi qua API dạng `fav:<id>`, mới nhất trước; cần khoá API của bạn.
+  - `rb` (Realbooru) từ 1.1.0: `favorited_by:<id người dùng>` là danh sách riêng của site: Lustra đọc trang yêu thích, theo thứ tự site trả về; các tag khác trong truy vấn được lọc cục bộ, không lọc ngày, không dùng nhóm OR.
+  - `sf` (Safebooru), `tb` (TBIB), `hh` (Hypnohub): không có (trang HTML, điều khoản của các site này chỉ cho dùng API).
 
 ## Pools
 Downloading post pool using native tags search functionality is not possible and only RX and EN implement pool functionality (XB and BB refuse `pool`: pools are html pages, and their terms allow the API only).  
@@ -187,6 +229,12 @@ To download a pool use special `pool` tag:
 - Downloading RX pool pages requires `cf_clearance` cookie (see above) as it isn't a part of dapi
 - Pool posts can be filtered as well. Date filter, additional required / excluded tags, etc.
 - Same as favorites, downloading using custom tags isn't particulary fast (RX), Lustra will need to fetch info for every item in the list in order to enable filtering
+- Theo extension (Lustra 2.0.11, catalog đi kèm app):
+  - `db` (Danbooru): `pool:<id hoặc tên>` (tên viết thường, `_` thay dấu cách), site tìm thẳng.
+  - `yr`, `sk`: `pool:<id>` site tìm thẳng, kết quả theo thứ tự trong pool.
+  - `gb` (Gelbooru) từ 1.0.1: `pool:<id>` qua API, mới nhất trước; cần khoá API của bạn.
+  - `rb` (Realbooru) từ 1.1.0: `pool:<id>` là danh sách riêng của site: một request đọc cả trang pool, theo thứ tự trong pool; các tag khác lọc cục bộ, không lọc ngày, không dùng nhóm OR.
+  - `sf`, `tb`, `hh`: không có (như yêu thích).
 
 ##### Sets
 EN module also allows creating post sets. Essentially they are no different from pools:
