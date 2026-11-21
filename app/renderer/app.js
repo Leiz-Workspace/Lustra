@@ -187,7 +187,21 @@ const S = {
 };
 const META_PREFIXES = ['id', 'score', 'rating', 'user', 'md5', 'width', 'height', 'parent', 'source', 'updated', 'sort', 'order', 'date',
   'status', 'fav', 'favorited_by', 'favoritedby', 'pool', 'set', 'poster', 'filetype', 'limit', 'age', 'mpixels', 'ratio', 'favcount', 'tagcount'];
-const reMeta = new RegExp(`^(?:${META_PREFIXES.join('|')})(?:[:=]|[<>]=?)`);
+// metatags of a module: the names above, the tokens of its search kinds and the metatag names of its manifest ('search')
+const metaReCache = new Map();
+function metaRe(abbr = S.module) {
+  const s = moduleInfo(abbr)?.search || {};
+  const names = [...new Set([...META_PREFIXES, ...declaredKinds(abbr).filter((k) => k.token).map((k) => k.token.slice(0, -1)),
+    ...(Array.isArray(s.metaNames) ? s.metaNames.map(String) : [])])];
+  const key = names.join('|');
+  let re = metaReCache.get(key);
+  if (!re) {
+    re = new RegExp(`^(?:${names.map(escapeRe).join('|')})(?:[:=]|[<>]=?)`);
+    if (metaReCache.size > 32) metaReCache.clear();
+    metaReCache.set(key, re);
+  }
+  return re;
+}
 const POST_URL = {
   rx: (id) => `https://rule34.xxx/index.php?page=post&s=view&id=${id}`,
   db: (id) => `https://danbooru.donmai.us/posts/${id}`,
@@ -289,6 +303,8 @@ async function loadModules() {
     toast(`Có bản mới cho ${updates.map((m) => `${m.name} (v${m.catalogVersion})`).join(', ')}: xem trang Extensions`, 'ok');
   }
   renderModuleButton();
+  rekindChips(); // the module's kind tokens / metatag names are known now
+  if (S.chips.length) renderChips(); // kind chips read "Nghệ sĩ: x" once the kinds are known
   if (S.settings) { renderApiKeys(); renderTagLimits(); }
 }
 async function loadTagLists() {
@@ -309,6 +325,9 @@ function renderModuleButton() {
   renderKeyNeeded();
   renderGenderFilter();
   renderMultiSites();
+  renderKindPicker();
+  renderIdSearch();
+  renderDateFields();
 }
 
 // ---------------- gender filter (tier 0: tags) ----------------
@@ -401,7 +420,9 @@ function warmupTags(abbr) {
 }
 function setModule(abbr) {
   S.module = abbr;
+  S.kind = storedKinds()[abbr] || 'tag'; // the last "Tìm theo" choice on this module
   warmupTags(abbr);
+  rekindChips(); // what is a metatag depends on the module (its kind tokens, its metatag names)
   $('#module-menu').hidden = true;
   renderModuleButton();
   L.settings.set({ search: { module: abbr } });
@@ -416,6 +437,225 @@ $('#module-btn').addEventListener('click', (e) => {
   menu.hidden = !menu.hidden;
 });
 document.addEventListener('click', (e) => { if (!e.target.closest('#module-picker')) $('#module-menu').hidden = true; });
+
+// ---------------- search kinds ("Tìm theo") ----------------
+// The query stays one string: a kind is a way to fill it. Type kinds (Nghệ sĩ, Nhân vật, Series) are plain tags of that type,
+// offered when the module's tag list in use has some (tags.kinds). Declared kinds come from the manifest ('search', ext.list
+// rows): one with a token is one tag '<token><value>' of the query ('user:Some.Name'), one without is a plain tag of its tagType
+const SEARCH_KIND_VI = { artist: 'Nghệ sĩ', character: 'Nhân vật', copyright: 'Series', model: 'Người mẫu', category: 'Chuyên mục',
+  uploader: 'Người đăng', favorites: 'Yêu thích của người dùng', pool: 'Pool', collection: 'Bộ sưu tập', keyword: 'Từ khoá' };
+const SEARCH_KIND_IDS = Object.keys(SEARCH_KIND_VI);
+const TYPE_KIND_IDS = ['artist', 'character', 'copyright'];
+const TEXT_PLACEHOLDER = { uploader: 'Nhập tên người đăng', favorites: 'Nhập tên người dùng' };
+const TAG_PLACEHOLDER = 'Nhập tag… (Tab/Enter để thêm, gõ - để loại trừ)';
+const typeKinds = new Map(); // module -> tags.kinds types ({ artist: n, ... }): the types its tag list in use has
+const typeKindsAsked = new Set();
+S.kind = 'tag'; // id of the kind picked for S.module ('tag': plain tags)
+const kindLabel = (k) => String(k.label || SEARCH_KIND_VI[k.id] || k.id);
+// kinds the module's manifest declares (ids this app labels: a newer core may know more)
+function declaredKinds(abbr = S.module) {
+  const kinds = moduleInfo(abbr)?.search?.kinds;
+  return Array.isArray(kinds) ? kinds.filter((k) => k && SEARCH_KIND_VI[k.id]) : [];
+}
+// every kind offered on a module, in a fixed order; a declared kind replaces the type kind of the same id
+function moduleKinds(abbr = S.module) {
+  const declared = declaredKinds(abbr);
+  const types = typeKinds.get(abbr) || {};
+  const derived = TYPE_KIND_IDS.filter((t) => Number(types[t]) > 0 && !declared.some((k) => k.id === t))
+    .map((t) => ({ id: t, token: '', value: '', input: 'tag', tagType: t, listing: false, order: 'id', example: '', label: '', use: '', count: Number(types[t]) }));
+  return [...derived, ...declared].sort((a, b) => SEARCH_KIND_IDS.indexOf(a.id) - SEARCH_KIND_IDS.indexOf(b.id));
+}
+const currentKind = () => (S.kind === 'tag' ? null : moduleKinds().find((k) => k.id === S.kind) || null);
+// the kind of a query tag on a module: its token starts the tag (a leading '-' and the %…% escape set aside)
+function tagKind(tag, abbr = S.module) {
+  let t = String(tag || '');
+  if (t.length > 2 && t.startsWith('%') && t.endsWith('%')) t = t.slice(1, -1);
+  const negated = t.startsWith('-');
+  t = t.replace(/^-/, '');
+  const k = declaredKinds(abbr).find((x) => x.token && t.startsWith(x.token));
+  return k ? { kind: k, value: t.slice(k.token.length), negated } : null;
+}
+// every tag of a query, group members included ('-' kept on excluded ones)
+function queryTags(q) {
+  return splitQuery(q).tokens.flatMap((tok) => {
+    const c = parseToken(tok);
+    if (!c) return [];
+    if (c.kind === 'or') return c.items;
+    if (c.kind === 'neg') return c.items.map((t) => `-${t.replace(/^-/, '')}`);
+    return [`${c.exclude ? '-' : ''}${c.text}`];
+  });
+}
+const queryKinds = (q = queryString(), abbr = S.module) => queryTags(q).map((t) => tagKind(t, abbr)).filter(Boolean);
+// the kind that makes the results come in the site's order (a listing, or order 'site'): no date limits, no id cursor
+function siteOrderKind(q = queryString(), abbr = S.module) {
+  return queryKinds(q, abbr).find((m) => !m.negated && (m.kind.listing || m.kind.order === 'site'))?.kind || null;
+}
+const KIND_STORE = 'lustra.searchKind'; // { module: kind id }: the last "Tìm theo" choice per module, this computer only
+function storedKinds() {
+  try {
+    const v = JSON.parse(localStorage.getItem(KIND_STORE) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+function rememberKind(abbr, id) {
+  try {
+    const all = storedKinds();
+    if (id === 'tag') delete all[abbr]; else all[abbr] = id;
+    localStorage.setItem(KIND_STORE, JSON.stringify(all));
+  } catch { /* no storage (private window, blocked): the choice is not kept */ }
+}
+async function loadTypeKinds(abbr = S.module) {
+  if (!L || typeKindsAsked.has(abbr) || unsupported.has('tags.kinds')) return;
+  typeKindsAsked.add(abbr);
+  let r = null;
+  try {
+    r = await rpcOptional('tags.kinds', { module: abbr });
+  } catch {
+    typeKindsAsked.delete(abbr); // sidecar not ready: asked again with the next render
+    return;
+  }
+  typeKinds.set(abbr, r?.types && typeof r.types === 'object' ? r.types : {});
+  if (abbr === S.module) renderKindPicker();
+}
+// the module's list changed (an update, tags learned): its types are asked again, the picker keeps the old ones meanwhile
+function refreshTypeKinds(abbr) {
+  typeKindsAsked.delete(abbr);
+  if (abbr === S.module) loadTypeKinds(abbr);
+}
+function kindTitle(k) {
+  if (!k) return 'Tag bất kỳ: gợi ý mọi loại tag';
+  const mod = S.module.toUpperCase();
+  if (!k.token) {
+    return `${kindLabel(k)}: tag loại ${k.tagType} trong danh sách tag của ${mod}${k.count ? ` (${nf.format(k.count)} tag)` : ''}, `
+      + 'gợi ý chỉ có loại này. Giá trị là một tag thường.';
+  }
+  const parts = [`${kindLabel(k)}: thêm ${k.token}<giá trị> vào truy vấn`];
+  if (k.listing) parts.push('danh sách riêng của site: tag khác trong truy vấn được lọc cục bộ, theo thứ tự của site, không lọc theo ngày, không dùng nhóm OR');
+  else if (k.order === 'site') parts.push('kết quả theo thứ tự của site, không lọc theo ngày');
+  if (k.example) parts.push(`ví dụ: ${k.token}${k.example}`);
+  return parts.join(' · ');
+}
+function kindPlaceholder(k) {
+  if (!k) return TAG_PLACEHOLDER;
+  const ex = k.example ? ` · ví dụ: ${k.example}` : '';
+  if (k.input === 'id') return `Nhập id…${ex}`;
+  if (k.input === 'text') return `${TEXT_PLACEHOLDER[k.id] || 'Nhập từ khoá'}${ex}`;
+  const what = kindLabel(k).toLowerCase();
+  return `Nhập tên ${what}…${k.tagType ? ` (chỉ gợi ý ${what})` : ''}${ex}`;
+}
+function renderKindPicker() {
+  if (!S.modules.length) return;
+  loadTypeKinds(S.module);
+  const kinds = moduleKinds();
+  const k = currentKind();
+  const sel = $('#kind-select');
+  setHidden($('#kind-picker'), !kinds.length);
+  const opts = [['tag', 'Tag'], ...kinds.map((x) => [x.id, kindLabel(x)])];
+  const key = JSON.stringify(opts);
+  if (sel.dataset.key !== key) { // rebuilt only when the module's kinds changed
+    sel.replaceChildren(...opts.map(([v, t]) => h('option', { value: v, title: kindTitle(kinds.find((x) => x.id === v)) }, t)));
+    sel.dataset.key = key;
+  }
+  sel.value = k ? k.id : 'tag';
+  sel.title = kindTitle(k);
+  tagInput.placeholder = kindPlaceholder(k);
+  $('#tag-input').classList.toggle('kinded', !!k);
+}
+function setKind(id, remember = true) {
+  S.kind = id || 'tag';
+  if (remember) rememberKind(S.module, S.kind);
+  renderKindPicker();
+}
+$('#kind-select').addEventListener('change', (e) => {
+  setKind(e.target.value);
+  hideAc();
+  if (tagInput.value.trim()) requestAc();
+  tagInput.focus();
+});
+// typed text -> the query tag of a kind. One value: spaces become '_' (an id is one number: no space), names of tags in lower case.
+// A value with characters the core's tag check refuses goes in the %…% escape, unless the kind's value regex allows it. Favorites /
+// pool kinds ('use') go through the core's tag check whatever their regex: lower case (the sites' user and pool names are), and
+// the escape for anything else than [a-z0-9_.-]
+function kindValueAllowed(k, v) {
+  if (!k.value) return false;
+  try { return new RegExp(`^(?:${k.value})$`).test(v); } catch { return false; } // a Python only construct: escaped
+}
+function kindTag(k, raw, exclude = false) {
+  let v = String(raw || '').trim();
+  let neg = exclude;
+  if (v.startsWith('-')) { neg = true; v = v.slice(1).trim(); }
+  if (k.token && v.toLowerCase().startsWith(k.token)) v = v.slice(k.token.length);
+  if (k.input === 'id' && /\s/.test(v)) return { error: `${kindLabel(k)}: chỉ nhập một id` };
+  if (k.input !== 'id') v = v.split(/\s+/).filter(Boolean).join('_');
+  if (k.input === 'tag' || k.use) v = v.toLowerCase();
+  if (!v) return { error: `${kindLabel(k)}: chưa nhập giá trị` };
+  if (k.input === 'id' && !/^\d+$/.test(v)) return { error: `${kindLabel(k)}: chỉ nhập số (id)` };
+  if (neg && k.listing) return { error: `${kindLabel(k)} chọn một danh sách riêng của site: không loại trừ được` };
+  if (!k.token) return { tag: `${neg ? '-' : ''}${v}` }; // a plain tag of the kind's type
+  const plain = k.use ? /^[a-z0-9_.-]+$/.test(v) && (!k.value || kindValueAllowed(k, v)) : /^[a-z0-9_-]+$/.test(v) || kindValueAllowed(k, v);
+  return { tag: plain ? `${neg ? '-' : ''}${k.token}${v}` : `%${neg ? '-' : ''}${k.token}${v}%` };
+}
+// ± of a chip: a tag of a kind is built again from its value (an escaped one keeps its '-' inside the %…%), a listing is never
+// excluded; other tags flip their '-'. '' when done, else why not
+function toggleChipExclude(c) {
+  if (c.kind !== 'tag' && c.kind !== 'meta') return '';
+  const km = tagKind(c.text);
+  if (!km) { c.exclude = !c.exclude; return ''; }
+  const r = kindTag(km.kind, km.value, !(c.exclude || km.negated));
+  if (r.error) return r.error;
+  const p = parseToken(r.tag);
+  if (p) Object.assign(c, { kind: p.kind, text: p.text, exclude: p.exclude });
+  return '';
+}
+// a kind that appears once per query (a listing, favorites, pool): the picker goes back to Tag for the next tags
+function afterKindAdded(k) {
+  if (k && (k.listing || k.use)) setKind('tag', false);
+}
+// chips of tags / metatags typed before the module list (or another module) was known: meta or not per the module in use
+function rekindChips() {
+  let changed = false;
+  for (const c of S.chips) {
+    if (c.kind !== 'tag' && c.kind !== 'meta') continue;
+    const kind = metaRe().test(c.text) ? 'meta' : 'tag';
+    if (kind !== c.kind) { c.kind = kind; changed = true; }
+  }
+  return changed;
+}
+
+// ---------------- id searches (manifest search.idSearch: false when 'id:' searches do not work on the module) ----------------
+const ID_SEARCH_OFF = 'Site này không tìm được theo id post: không tải riêng các post đã chọn được. Dùng Tải xuống để tải cả truy vấn.';
+const FILES_TITLE = $('#btn-files').title;
+const idSearchOk = (abbr) => moduleInfo(abbr)?.search?.idSearch !== false;
+function renderIdSearch() {
+  const ok = idSearchOk(S.module);
+  const b = $('#btn-files');
+  b.disabled = !ok;
+  b.title = ok ? FILES_TITLE : 'Site này không tìm được theo id post hay md5 nên không tìm theo tên file được. Dán link post của site khác vẫn mở hộp tìm.';
+  updateSelButton();
+}
+
+// ---------------- date limits: none for a kind in the site's order (a listing, a pool in pool order...) ----------------
+// on the module or on a site picked in "Tải thêm từ site khác" (every site gets the same dates; one in the site's order would
+// refuse them): { kind, abbr } or null
+function dateBlockingKind(q = queryString()) {
+  for (const abbr of [S.module, ...multi]) {
+    const kind = siteOrderKind(q, abbr);
+    if (kind) return { kind, abbr };
+  }
+  return null;
+}
+function renderDateFields() {
+  const b = dateBlockingKind();
+  const k = b?.kind;
+  const where = b && b.abbr !== S.module ? ` trên ${moduleInfo(b.abbr)?.name || b.abbr} (Tải thêm từ site khác)` : '';
+  for (const id of ['#f-datemin', '#f-datemax']) {
+    const el = $(id);
+    el.disabled = !!k;
+    el.closest('.field').title = k ? `${kindLabel(k)} (${k.token})${where} lấy post theo thứ tự của site: không lọc theo ngày được. `
+      + 'Khoảng ngày đã nhập được giữ lại và dùng lại khi bỏ kiểu tìm này khỏi truy vấn.' : '';
+  }
+}
+const dateValue = (id) => ($(id).disabled ? '' : $(id).value);
 
 // ---------------- tag chips ----------------
 // Query text -> tokens. Whitespace splits tokens, except inside an OR group "( a ~ b )" or an exclusion group "-( a , b )".
@@ -453,7 +693,7 @@ function parseToken(tok) {
   let exclude = false;
   let text = tok;
   if (text.length > 1 && text.startsWith('-')) { exclude = true; text = text.slice(1); }
-  return { kind: reMeta.test(text) ? 'meta' : 'tag', text, exclude };
+  return { kind: metaRe().test(text) ? 'meta' : 'tag', text, exclude };
 }
 function chipToString(c) {
   if (c.kind === 'or') return `(${c.items.join('~')})`;
@@ -493,18 +733,26 @@ const chipViews = new Map(); // chip id -> { root, info, title }: tag hints are 
 function renderChips() {
   chipViews.clear();
   $('#chips').replaceChildren(...S.chips.map((c) => {
-    const label = c.kind === 'or' ? c.items.join(' ∨ ') : c.kind === 'neg' ? `−(${c.items.join(' ∧ ')})` : c.text;
-    const cls = ['chip', c.kind === 'meta' ? 'meta' : '', c.kind === 'or' ? 'or' : '', c.kind === 'neg' ? 'neg' : '',
-      c.exclude ? 'exclude' : '', S.selected.has(c.id) ? 'sel' : ''].join(' ');
-    const title = `${CHIP_TITLE[c.kind]} — bấm để chọn, bấm đúp để sửa`;
+    // a tag of one of the module's search kinds reads "Nghệ sĩ: some_artist"
+    const km = c.kind === 'tag' || c.kind === 'meta' ? tagKind(c.text) : null;
+    const label = c.kind === 'or' ? c.items.join(' ∨ ') : c.kind === 'neg' ? `−(${c.items.join(' ∧ ')})` : km ? km.value : c.text;
+    const cls = ['chip', c.kind === 'meta' || km ? 'meta' : '', km ? 'kind' : '', c.kind === 'or' ? 'or' : '', c.kind === 'neg' ? 'neg' : '',
+      c.exclude || km?.negated ? 'exclude' : '', S.selected.has(c.id) ? 'sel' : ''].join(' ');
+    const title = km ? `Tìm theo ${kindTitle(km.kind)}\n${chipToString(c)} — bấm để chọn, bấm đúp để sửa`
+      : `${CHIP_TITLE[c.kind]} — bấm để chọn, bấm đúp để sửa`;
     const info = h('span', { class: 'ci' });
     const root = h('span', {
       class: cls, title,
       onclick: (e) => { if (e.target.closest('button')) return; toggleChipSel(c.id); },
       ondblclick: (e) => { if (!e.target.closest('button')) editChip(c); },
     },
+    km ? h('span', { class: 'k' }, `${kindLabel(km.kind)}:`) : null,
     h('span', { class: 't' }, label), info,
-    (c.kind === 'tag' || c.kind === 'meta') ? h('button', { class: 'pm', title: 'Đảo bao gồm/loại trừ', onclick: () => { c.exclude = !c.exclude; renderChips(); onQueryChanged(); } }, '±') : null,
+    (c.kind === 'tag' || c.kind === 'meta') && !(km?.kind.listing && !km.negated && !c.exclude) ? h('button', { class: 'pm', title: 'Đảo bao gồm/loại trừ', onclick: () => {
+      const why = toggleChipExclude(c);
+      if (why) { toast(why, 'err'); return; }
+      renderChips(); onQueryChanged();
+    } }, '±') : null,
     h('button', { class: 'x', title: 'Xoá', onclick: () => removeChip(c.id) }, '×'));
     chipViews.set(c.id, { root, info, title });
     decorateChip(c);
@@ -522,7 +770,11 @@ function toggleChipSel(id) {
 function editChip(c) {
   removeChip(c.id);
   const input = $('#tag-text');
-  input.value = chipToString(c);
+  // a tag of a search kind is edited as the kind's value, with the picker on that kind (Enter gives the same tag back)
+  const km = c.kind === 'tag' || c.kind === 'meta' ? tagKind(c.text) : null;
+  if (km) setKind(km.kind.id, false);
+  else if (currentKind()?.token || (c.kind !== 'tag' && currentKind())) setKind('tag', false); // a plain tag stays in a type kind
+  input.value = km ? `${c.exclude || km.negated ? '-' : ''}${km.value}` : chipToString(c);
   input.focus();
 }
 
@@ -535,7 +787,8 @@ const rkey = (module, tag) => `${module}\n${tag}`;
 function chipTags(c) {
   // tag names and wildcard patterns; metatags and %escaped% tags (no validation on purpose) have nothing to look up
   const raw = c.kind === 'tag' ? [c.text] : (c.kind === 'or' || c.kind === 'neg') ? c.items : [];
-  return raw.map((t) => t.replace(/^-/, '').trim().toLowerCase()).filter((t) => t && !reMeta.test(t) && !/^%.*%$/.test(t));
+  const re = metaRe();
+  return raw.map((t) => t.replace(/^-/, '').trim().toLowerCase()).filter((t) => t && !re.test(t) && !/^%.*%$/.test(t));
 }
 function scheduleResolve() {
   if (unsupported.has('tags.resolve') || !L) return;
@@ -705,7 +958,8 @@ $('#chip-actions').addEventListener('click', async (e) => {
   if (act === 'clear') { S.selected.clear(); renderChips(); return; }
   if (act === 'remove') { setChips(S.chips.filter((c) => !S.selected.has(c.id))); return; }
   if (act === 'toggle') {
-    sel.forEach((c) => { if (c.kind === 'tag' || c.kind === 'meta') c.exclude = !c.exclude; });
+    const why = sel.map(toggleChipExclude).filter(Boolean);
+    if (why.length) toast([...new Set(why)].join('\n'), 'err');
     renderChips();
     onQueryChanged();
     return;
@@ -734,30 +988,56 @@ $('#tag-input').addEventListener('click', () => tagInput.focus());
 tagInput.addEventListener('focus', () => $('#tag-input').classList.add('focus'));
 tagInput.addEventListener('blur', () => { $('#tag-input').classList.remove('focus'); setTimeout(hideAc, 150); });
 
-const acBase = (raw) => raw.replace(/^-/, '');
+// With a kind picked ("Tìm theo") the typed text is one value: no split on spaces (they become '_'), the kind's token typed
+// by hand is set aside, suggestions are of the kind's tag type and carry its token
+function acBase(raw) {
+  let b = raw.replace(/^-/, '');
+  const k = currentKind();
+  if (k) {
+    if (k.token && b.toLowerCase().startsWith(k.token)) b = b.slice(k.token.length);
+    b = b.trim().split(/\s+/).join('_');
+  }
+  return b;
+}
+// a suggestion's name as shown and compared with the typed text: without the kind's token ('category:x' rows of a list)
+function acName(it) {
+  const k = currentKind();
+  return k?.token && it.tag.startsWith(k.token) ? it.tag.slice(k.token.length) : it.tag;
+}
+function acInsert(tag, neg) {
+  const k = currentKind();
+  return `${neg ? '-' : ''}${k?.token && !tag.startsWith(k.token) ? k.token : ''}${tag}`;
+}
 function acEligible(raw) {
+  if (!S.settings?.search?.autocomplete) return false;
+  const k = currentKind();
   const base = acBase(raw);
+  // ids and free words have nothing to suggest
+  if (k) return k.input === 'tag' && base.length >= 2 && !/^\(|[~,]/.test(base);
   // a group being typed ("(a~b", "-(a,b") is not a single tag; tags with parentheses ("star_(s") are
-  return !!S.settings?.search?.autocomplete && base.length >= 2 && !reMeta.test(base) && !/^\(|[~,]/.test(base);
+  return base.length >= 2 && !metaRe().test(base) && !/^\(|[~,]/.test(base);
 }
 const requestAc = debounce(async () => {
   const raw = tagInput.value.trim();
   if (!acEligible(raw)) { hideAc(); return; }
   const base = acBase(raw);
+  const neg = raw.startsWith('-');
   const seq = ++S.ac.seq;
   const module = S.module;
+  const k = currentKind();
+  const types = k?.tagType ? [k.tagType] : undefined;
   try {
-    let items = await L.rpc('tags.autocomplete', { module, prefix: raw, limit: 12 });
+    let items = await L.rpc('tags.autocomplete', { module, prefix: `${neg ? '-' : ''}${base}`, limit: 12, types, token: k?.token || undefined });
     if (seq !== S.ac.seq) return; // a newer keystroke (or a pick / hide) happened meanwhile
     let fuzzy = false;
     if (!items.length && base.length >= 3) {
-      const neg = raw.startsWith('-');
-      const near = await rpcOptional('tags.fuzzy', { module, text: base.toLowerCase(), limit: 8 }).catch(() => null);
+      const near = await rpcOptional('tags.fuzzy', { module, text: base.toLowerCase(), limit: 8, types }).catch(() => null);
       if (seq !== S.ac.seq) return;
-      items = (near || []).map((it) => ({ ...it, insert: `${neg ? '-' : ''}${it.tag}` }));
+      items = near || [];
       fuzzy = items.length > 0;
     }
-    if (tagInput.value.trim() !== raw) return;
+    if (tagInput.value.trim() !== raw || (currentKind()?.id || '') !== (k?.id || '')) return; // typed on, or another kind picked
+    items = items.map((it) => ({ ...it, insert: acInsert(it.tag, neg) }));
     Object.assign(S.ac, { items, fuzzy, index: items.length ? 0 : -1, moved: false });
     renderAc(base);
   } catch {
@@ -772,7 +1052,7 @@ function pruneAc() {
   if ($('#ac').hidden || S.ac.fuzzy || !acEligible(raw)) { hideAc(); return; }
   const base = acBase(raw).toLowerCase();
   const neg = raw.startsWith('-');
-  const keep = S.ac.items.filter((it) => it.tag.toLowerCase().startsWith(base)).map((it) => ({ ...it, insert: `${neg ? '-' : ''}${it.tag}` }));
+  const keep = S.ac.items.filter((it) => acName(it).toLowerCase().startsWith(base)).map((it) => ({ ...it, insert: acInsert(it.tag, neg) }));
   if (!keep.length) { hideAc(); return; }
   Object.assign(S.ac, { items: keep, index: 0, moved: false });
   renderAc(acBase(raw));
@@ -780,19 +1060,23 @@ function pruneAc() {
 
 function renderAc(base) {
   const box = $('#ac');
+  const k = currentKind();
   if (!S.ac.items.length) {
-    box.replaceChildren(h('div', { class: 'ac-hint' }, `Không có gợi ý cho “${base}” trong danh sách tag của ${S.module.toUpperCase()}. Danh sách có thể cũ: cập nhật trong mục Tags A–Z.`));
+    const what = k ? `${kindLabel(k).toLowerCase()} nào bắt đầu bằng “${base}”` : `gợi ý cho “${base}”`;
+    box.replaceChildren(h('div', { class: 'ac-hint' }, `Không có ${what} trong danh sách tag của ${S.module.toUpperCase()}. `
+      + `Danh sách có thể cũ: cập nhật trong mục Tags A–Z.${k ? ' Enter vẫn thêm đúng chữ đã gõ.' : ''}`));
     box.hidden = false;
     return;
   }
   const lo = base.toLowerCase();
   const { moved, index, fuzzy } = S.ac;
   box.replaceChildren(
-    ...(fuzzy ? [h('div', { class: 'ac-head' }, `Không có tag bắt đầu bằng “${base}”. Có phải bạn muốn: …`)] : []),
+    ...(fuzzy ? [h('div', { class: 'ac-head' }, `Không có ${k ? kindLabel(k).toLowerCase() : 'tag'} bắt đầu bằng “${base}”. Có phải bạn muốn: …`)] : []),
     ...S.ac.items.map((it, i) => {
-      const nm = !fuzzy && it.tag.toLowerCase().startsWith(lo)
-        ? h('span', { class: 'nm' }, h('b', {}, it.tag.slice(0, lo.length)), it.tag.slice(lo.length))
-        : h('span', { class: 'nm' }, it.tag);
+      const name = acName(it);
+      const nm = !fuzzy && name.toLowerCase().startsWith(lo)
+        ? h('span', { class: 'nm' }, h('b', {}, name.slice(0, lo.length)), name.slice(lo.length))
+        : h('span', { class: 'nm' }, name);
       const state = i === index ? (moved ? 'on' : 'cand') : '';
       return h('div', { class: `ac-item ${fuzzy ? 'fuzzy' : ''} ${state}`, onmousedown: (e) => { e.preventDefault(); pickAc(i, e.shiftKey); } },
         h('span', { class: `type-dot t-${it.type}`, title: it.type }), nm,
@@ -814,23 +1098,34 @@ function hideAc() {
 function pickAc(i, exclude = false) {
   const it = S.ac.items[i];
   if (!it) return;
+  const k = currentKind();
   const ins = it.insert || it.tag;
+  if (k?.listing && (exclude || ins.startsWith('-'))) { toast(`${kindLabel(k)} chọn một danh sách riêng của site: không loại trừ được`, 'err'); return; }
   addChip(exclude && !ins.startsWith('-') ? `-${ins}` : ins);
   tagInput.value = '';
   hideAc();
+  afterKindAdded(k);
 }
 function commitTyped(exclude = false) {
   const typed = tagInput.value.trim();
   if (!typed) return false;
-  // Shift+Enter on a single typed tag adds it as an exclusion, like it does for a suggestion
-  addTokens(exclude && !/\s/.test(typed) && !typed.startsWith('-') && !typed.startsWith('(') ? `-${typed}` : typed);
+  const k = currentKind();
+  if (k) { // one value of the kind picked in "Tìm theo"
+    const r = kindTag(k, typed, exclude);
+    if (r.error) { toast(r.error, 'err'); return true; }
+    addChip(r.tag);
+    afterKindAdded(k);
+  } else {
+    // Shift+Enter on a single typed tag adds it as an exclusion, like it does for a suggestion
+    addTokens(exclude && !/\s/.test(typed) && !typed.startsWith('-') && !typed.startsWith('(') ? `-${typed}` : typed);
+  }
   tagInput.value = '';
   hideAc();
   return true;
 }
 tagInput.addEventListener('input', () => {
   const v = tagInput.value;
-  if (/\s$/.test(v) && !splitQuery(v).open) { addTokens(v); tagInput.value = ''; hideAc(); return; }
+  if (!currentKind() && /\s$/.test(v) && !splitQuery(v).open) { addTokens(v); tagInput.value = ''; hideAc(); return; }
   pruneAc();
   requestAc();
 });
@@ -857,7 +1152,7 @@ tagInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && acOpen) {
     // Enter adds exactly what was typed ("cat" stays "cat", never "cat_ears"), unless a suggestion was picked with the
     // arrow keys or the typed text is itself one of the suggestions
-    const exact = S.ac.items.findIndex((it) => it.tag.toLowerCase() === base().toLowerCase());
+    const exact = S.ac.items.findIndex((it) => acName(it).toLowerCase() === base().toLowerCase());
     const i = S.ac.moved && S.ac.index >= 0 ? S.ac.index : exact;
     if (i >= 0) { e.preventDefault(); pickAc(i, e.shiftKey); return; }
   }
@@ -878,7 +1173,7 @@ tagInput.addEventListener('paste', (e) => {
     openFilesSearch(text.trim());
     return;
   }
-  if (!/\s/.test(text.trim())) return;
+  if (currentKind() || !/\s/.test(text.trim())) return; // a kind's value may hold spaces (added on Enter)
   e.preventDefault();
   const v = tagInput.value;
   addTokens(v.slice(0, tagInput.selectionStart ?? v.length) + text + v.slice(tagInput.selectionEnd ?? v.length));
@@ -899,13 +1194,31 @@ const validate = debounce(async () => {
     if (!r.valid) {
       $('#tag-input').classList.add('invalid');
       st.className = 'err';
-      st.textContent = 'Cú pháp tag không hợp lệ (bọc tag trong %…% để bỏ qua kiểm tra)';
+      // the core says why when it knows (search kinds: a listing negated, two listings, an OR group with a listing...)
+      st.textContent = r.error ? `Truy vấn không hợp lệ: ${parseErrorVi(r.error)}`
+        : 'Cú pháp tag không hợp lệ (bọc tag trong %…% để bỏ qua kiểm tra)';
     }
   } catch { /* sidecar not ready */ }
 }, 250);
+// tags.validate 'error' (core, English) -> Vietnamese; anything else is shown as the core wrote it
+const PARSE_ERRORS_VI = [
+  [/^'(.+)' selects a site listing: it cannot be negated$/, (m) => `${m[1]} chọn một danh sách riêng của site, không loại trừ được`],
+  [/^one site listing per search: (.+)$/, (m) => `mỗi lần tìm chỉ dùng được một danh sách riêng của site (${m[1]})`],
+  [/^(.+) is a site listing: 'or' groups cannot be used with it$/, (m) => `${m[1]} là danh sách riêng của site, không dùng nhóm OR cùng nó được`],
+  [/^(.+) is a site listing: favorites \/ pools cannot be used with it$/, (m) => `${m[1]} là danh sách riêng của site, không dùng chung với yêu thích / pool được`],
+  [/^'(.+)': not a valid value for '(.+)'$/, (m) => `“${m[1]}” không phải giá trị hợp lệ cho ${m[2]} (bọc trong %…% để bỏ qua kiểm tra)`],
+  [/^(.+) lists posts in the site's order: 'or' groups cannot be used with it$/, (m) => `${m[1]} lấy post theo thứ tự của site, không dùng nhóm OR cùng nó được`],
+  [/^'(.+)': write the '-' inside the escape: '(.+)'$/, (m) => `“${m[1]}”: dấu - phải nằm trong %…% (${m[2]})`],
+];
+function parseErrorVi(text) {
+  for (const [re, fn] of PARSE_ERRORS_VI) { const m = re.exec(String(text)); if (m) return fn(m); }
+  return String(text);
+}
 function onQueryChanged() {
   S.countSeq++; // a count still running belongs to the previous query
   validate();
+  renderDateFields(); // a kind in the site's order turns the date limits off
+  if (multi.size) renderMultiSites(); // a kind another picked site does not have
   markRelatedStale();
   if (!queryString()) clearPreview(); // no tag left: the posts of the previous query must not stay on screen
   else markPreviewStale();
@@ -941,7 +1254,8 @@ $('#f-safety').addEventListener('change', markPreviewStale);
 function clearPreview() {
   const P = S.preview;
   P.seq++; // an answer still on its way belongs to the cleared query
-  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', key: '', failed: false, required: [], tasks: [], hasMore: true });
+  Object.assign(P, { page: 0, items: [], tags: '', site: '', module: '', key: '', failed: false, required: [], tasks: [], hasMore: true,
+    localUnchecked: false });
   P.selected.clear();
   gridCards.clear();
   $('#grid').replaceChildren();
@@ -960,7 +1274,7 @@ function clearPreview() {
 function currentQuery() {
   return {
     module: S.module, tags: queryString(),
-    dateMin: $('#f-datemin').value, dateMax: $('#f-datemax').value,
+    dateMin: dateValue('#f-datemin'), dateMax: dateValue('#f-datemax'), // none for a kind in the site's order
     gender: genderState(),
     safetyBlacklist: $('#f-safety').checked, // -safety_blacklist: its own filter, never implied by the gender filter
   };
@@ -968,7 +1282,7 @@ function currentQuery() {
 // closed filters panel: one line summary of what differs from "everything" (media, dates, limit, gender...)
 function filtersSummary() {
   const o = downloadOptions();
-  const q = { dateMin: $('#f-datemin').value, dateMax: $('#f-datemax').value };
+  const q = { dateMin: dateValue('#f-datemin'), dateMax: dateValue('#f-datemax') };
   const media = [o.images && 'ảnh', o.videos && 'video', !$('#f-audio-wrap').hidden && o.audio && 'âm thanh'].filter(Boolean);
   const g = genderState();
   const fmt = (d) => d.split('-').reverse().join('/');
@@ -1052,7 +1366,8 @@ async function runPreview(page = 0) {
     if (seq !== S.preview.seq) return;
     Object.assign(S.preview, { page, items: r.items, site: r.site, module: q.module, tags: q.tags, key: previewKey(q), failed: false, required: r.requiredTags || [], tasks: r.tasks || [],
       genderStats: r.genderStats || {}, blockedCount: r.blockedCount || 0, hiddenNoTags: r.hiddenNoTags || 0, genderEnabled: !!r.genderEnabled, genderModel: r.genderModel || {},
-      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean', dateFilter: r.dateFilter || '' });
+      pageSize: r.pageSize || 0, hasMore: r.hasMore !== false, merged: typeof r.hasMore === 'boolean', dateFilter: r.dateFilter || '',
+      localUnchecked: r.localFiltersUnchecked === true });
     S.preview.selected.clear();
     renderGrid();
   } catch (err) {
@@ -1126,6 +1441,8 @@ function renderGrid() {
   }
   if (hidden) parts.push('post bị lọc đang ẩn');
   if (P.required?.length) parts.push(`tag kiểm tra cục bộ: ${P.required.join(', ')}`);
+  // the site's listing gives no post tags (the module reads them from each post's page while downloading)
+  if (P.localUnchecked) parts.push('chưa lọc cục bộ trong Preview: danh sách của site không có tag của post, Tải xuống vẫn lọc');
   if (P.tasks?.length > 1) {
     parts.push(P.merged ? `gộp ${P.tasks.length} truy vấn con (đã khử trùng, id giảm dần)` : `truy vấn tách thành ${P.tasks.length} task, preview hiển thị task đầu`);
   }
@@ -1208,7 +1525,9 @@ function syncSelection() {
 function updateSelButton() {
   const n = S.preview.selected.size;
   const b = $('#dl-selected');
-  b.disabled = n === 0;
+  const ok = idSearchOk(S.preview.module || S.module); // it downloads an 'id:' query
+  b.disabled = n === 0 || !ok;
+  b.title = ok ? '' : ID_SEARCH_OFF;
   b.textContent = `Tải đã chọn (${n})`;
 }
 $('#sel-all').addEventListener('click', () => { visibleItems().filter((i) => !i.excluded).forEach((i) => S.preview.selected.add(i.id)); syncSelection(); });
@@ -1223,6 +1542,7 @@ function downloadSelected() {
   const ids = [...S.preview.selected];
   if (!ids.length) return;
   const module = S.preview.module;
+  if (!idSearchOk(module)) { toast(ID_SEARCH_OFF, 'err'); return; }
   // danbooru understands id:1,2,3 natively (free metatag); other modules use an OR group of ids (one request per id)
   let tags;
   if (module === 'db') tags = `id:${ids.join(',')}`;
@@ -1240,7 +1560,8 @@ $('#dl-selected').addEventListener('click', downloadSelected);
 // is what changed. A failed page turn still asks: the grid on screen is a page of this query
 function downloadClicked() {
   const n = S.preview.selected.size;
-  if (!n || !previewOfThisQuery()) { startDownload(); return; }
+  // picked posts of a module that cannot search by id: only the whole query can be downloaded
+  if (!n || !previewOfThisQuery() || !idSearchOk(S.preview.module)) { startDownload(); return; }
   const done = (pick) => { closeModal(); if (pick === 'selected') downloadSelected(); else if (pick === 'query') startDownload(); };
   openModal(h('div', { class: 'qchange dl-ask' },
     h('h2', { text: 'Tải những gì?' }),
@@ -1551,6 +1872,10 @@ async function startDownload(override = null) {
   const q = override ? { ...currentQuery(), ...override } : currentQuery();
   if (!q.tags) { toast('Chưa có tag nào', 'err'); return; }
   if (!requireKey(q.module)) return;
+  // "download selected" builds an id: query of this site: never sent to the other sites
+  const sites = !override && multi.size && multiAvailable() ? [...multi] : null;
+  const conflict = sites ? multiKindConflict(q.tags, q.module, sites) : '';
+  if (conflict) { toast(conflict, 'err'); return; }
   if (!override?.tags) recordHistory(q); // "download selected" builds an id: query, not something the user typed
   const path = $('#f-path').value.trim() || S.settings.download.path;
   try {
@@ -1559,8 +1884,6 @@ async function startDownload(override = null) {
       if (r.nonEmpty && !S.settings.download.subfolderPerQuery
         && !window.confirm(`Thư mục “${path}” không trống, kết quả có thể lẫn với lượt tải khác. Vẫn tiếp tục?`)) return;
     }
-    // "download selected" builds an id: query of this site: never sent to the other sites
-    const sites = !override && multi.size && multiAvailable() ? [...multi] : null;
     const options = { ...downloadOptions(), ...(override?.options || {}) };
     const job = await addJob((allowDuplicate) => (sites
       ? L.jobs.startMulti({ ...q, path, options, allowDuplicate }, sites)
@@ -1917,19 +2240,25 @@ function deleteSaved(e) {
 }
 // saved query downloaded again on a schedule by main (only newer posts, files already downloaded are skipped)
 const AUTO_VI = { 6: '6 giờ', 12: '12 giờ', 24: 'mỗi ngày', 72: '3 ngày', 168: 'mỗi tuần' };
+// main adds 'id:>N' to a scheduled run only where the module searches by id and the query is not a site listing (main.js autoIdFilter)
+const autoIdFilterOk = (e) => idSearchOk(e.module) && !queryKinds(e.tags, e.module).some((m) => m.kind.listing && !m.negated);
+const AUTO_NO_ID = 'Truy vấn này không lọc được theo id post (site không tìm theo id, hoặc là danh sách riêng của site): '
+  + 'mỗi lần chạy xét lại cả kết quả, file đã tải được bỏ qua.';
 function autoTitle(e) {
   const a = e.auto;
   if (!a?.every) return 'Tự tải lại định kỳ: tắt';
   const last = a.lastRun ? `lần cuối ${ago(a.lastRun)}` : 'chưa chạy';
   const st = { done: `: ${a.lastCount} file mới`, failed: `: lỗi ${a.lastError || ''}`, cancelled: ': đã huỷ', running: ': đang chạy', baseline: ' (mốc bắt đầu)' }[a.lastStatus] || '';
-  return `Tự tải lại ${AUTO_VI[a.every]} · ${last}${st}${a.maxId ? ` · chỉ lấy post có id > ${a.maxId}` : ''}`;
+  const ids = !autoIdFilterOk(e) ? ' · không lọc theo id: bỏ qua file đã tải' : a.maxId ? ` · chỉ lấy post có id > ${a.maxId}` : '';
+  return `Tự tải lại ${AUTO_VI[a.every]} · ${last}${st}${ids}`;
 }
 async function editSavedAuto(e) {
   if (!L.saved) return;
   const sel = h('select', {}, h('option', { value: '0' }, 'Tắt'), ...Object.entries(AUTO_VI).map(([v, t]) => h('option', { value: v }, t)));
   sel.value = String(e.auto?.every || 24);
-  const fromNow = h('input', { type: 'radio', name: 'auto-from', checked: true });
-  const fromAll = h('input', { type: 'radio', name: 'auto-from' });
+  const byId = autoIdFilterOk(e); // "only newer posts" needs 'id:>N'
+  const fromNow = h('input', { type: 'radio', name: 'auto-from', checked: byId, disabled: !byId });
+  const fromAll = h('input', { type: 'radio', name: 'auto-from', checked: !byId });
   const save = async () => {
     const every = Number(sel.value);
     closeModal();
@@ -1945,9 +2274,10 @@ async function editSavedAuto(e) {
     h('p', { class: 'muted' }, `${e.module}: ${e.tags}`),
     h('label', { class: 'field' }, h('span', {}, 'Chu kỳ'), sel),
     e.auto?.every ? h('p', { class: 'muted' }, autoTitle(e)) : h('div', { class: 'radio-list' }, h('span', { class: 'muted' }, 'Lần đầu'),
-      h('label', {}, fromNow, 'Chỉ post mới từ bây giờ'),
+      h('label', { title: byId ? '' : AUTO_NO_ID }, fromNow, 'Chỉ post mới từ bây giờ'),
       h('label', {}, fromAll, 'Tải cả kết quả hiện có (bỏ qua file đã tải)')),
-    h('p', { class: 'muted' }, 'Lustra chạy truy vấn khi đang mở, theo thư mục và tuỳ chọn tải mặc định trong Cài đặt; mỗi lần chỉ lấy post mới hơn lần trước.'),
+    h('p', { class: 'muted' }, byId ? 'Lustra chạy truy vấn khi đang mở, theo thư mục và tuỳ chọn tải mặc định trong Cài đặt; mỗi lần chỉ lấy post mới hơn lần trước.'
+      : `Lustra chạy truy vấn khi đang mở, theo thư mục và tuỳ chọn tải mặc định trong Cài đặt. ${AUTO_NO_ID}`),
     h('div', { class: 'modal-actions' }, h('button', { class: 'btn ghost', onclick: closeModal }, 'Huỷ'), h('button', { class: 'btn primary', onclick: save }, 'Lưu'))));
 }
 let histTab = 'history';
@@ -2051,9 +2381,12 @@ function openFilesSearch(initial = '') {
     actions.replaceChildren(...qs.map((q, i) => {
       const mi = moduleInfo(q.module);
       const name = mi?.name || q.module.toUpperCase();
+      // idSearch false (manifest 'search'): 'id:' / 'md5:' searches do not work on that site
+      const ok = q.idSearch !== false && idSearchOk(q.module);
       return h('button', {
-        class: `btn ${i === 0 ? 'primary' : ''}`,
-        title: q.tags,
+        class: `btn ${i === 0 && ok ? 'primary' : ''}`,
+        title: ok ? q.tags : `${name} không tìm được theo id post hay md5: không tìm các mục này trên site đó được`,
+        disabled: !ok,
         onclick: () => {
           if (!mi?.installed) { toast(`Module ${name} chưa được cài (Extensions)`, 'err'); return; }
           closeModal();
@@ -2120,7 +2453,8 @@ async function loadRelated() {
   }
 }
 function renderRelated() {
-  const inQuery = new Set(S.chips.flatMap((c) => (c.kind === 'or' || c.kind === 'neg' ? c.items : [c.text])).map((t) => t.replace(/^-/, '').toLowerCase()));
+  const inQuery = new Set(S.chips.flatMap((c) => (c.kind === 'or' || c.kind === 'neg' ? c.items : [c.text]))
+    .flatMap((t) => [t, tagKind(t)?.value || '']).map((t) => t.replace(/^-/, '').toLowerCase()).filter(Boolean)); // 'artist:x' has x
   const { sample } = related;
   const showMeta = $('#related-meta').checked;
   const items = showMeta ? related.items : related.items.filter((it) => it.type !== 'metadata');
@@ -2370,8 +2704,23 @@ function renderMultiSites() {
       + 'tag đã đổi tên…): thử truy vấn trên từng site bằng Preview trước. Các site chạy lần lượt; luôn bỏ qua file đã tải và đặt tiền '
       + 'tố module cho tên file, nên post trùng md5 với file site trước đã tải sẽ không tải lại (chỉ với site có báo md5).');
   }
+  const conflict = multi.size ? multiKindConflict() : '';
+  if (conflict) warn.append(h('b', { class: 'kind-conflict' }, ` ${conflict}`));
   setHidden(warn, !multi.size);
+  renderDateFields(); // a picked site may take this query's kind in its own order: no dates then
   setText($('#btn-download'), multi.size ? `Tải xuống (${multi.size + 1} site)` : 'Tải xuống');
+}
+// A tag of a search kind ('artist:x', 'user:Some.Name') means something only on the sites that declare the same kind (same id,
+// same token): any other picked site would search it as a plain tag. Type kinds are plain tags: they pass
+function multiKindConflict(q = queryString(), abbr = S.module, others = [...multi]) {
+  for (const m of queryKinds(q, abbr)) {
+    const missing = others.filter((o) => o !== abbr && !declaredKinds(o).some((k) => k.id === m.kind.id && k.token === m.kind.token));
+    if (missing.length) {
+      return `Kiểu tìm “${kindLabel(m.kind)}” (${m.kind.token}) không có ở ${missing.map((o) => moduleInfo(o)?.name || o).join(', ')}: `
+        + 'bỏ site đó khỏi “Tải thêm từ site khác”, hoặc bỏ tag này khỏi truy vấn.';
+    }
+  }
+  return '';
 }
 const jobGroups = new Map(); // group id -> view: one box per multi-site group, its jobs inside in site order
 const groupJobs = (id) => [...S.jobs.values()].filter((j) => j.group?.id === id).sort((a, b) => a.group.index - b.group.index);
@@ -2507,7 +2856,7 @@ async function refreshTagStatus() {
             else if (res.newPosts) toast(`Tag ${m}: học thêm từ ${nf.format(res.newPosts)} post đã tải${onTop}`);
             else if (res.indexed === false) toast(`Chưa có post nào của ${name || m} trong index: tải vài post (hoặc xem Preview) để Lustra học tag`);
             else toast(`Tag ${m}: không có post đã tải mới`);
-            if (res.written) reresolveTags(m); // a chip shown as unknown may be known now
+            if (res.written) { reresolveTags(m); refreshTypeKinds(m); } // a chip shown as unknown may be known now
             refreshTagStatus();
             loadTagLists();
           } catch (err) { toast(errMsg(err), 'err'); }
@@ -3560,12 +3909,13 @@ function listen() {
       // a module without a tag list learned it from previewed / downloaded posts (core, lustra/tags_learned.py), or learned tags
       // its bundled list lacks: a tag shown as unknown before may be known now. Sent only when the list changed
       reresolveTags(params.module);
+      refreshTypeKinds(params.module);
       loadTagLists();
       if (azPage.loaded) refreshTagStatus();
     } else if (method === 'tags.updateDone') {
       tagUpdates.delete(params.module);
       toast(`Tag ${params.module}: ${params.message}`, params.written ? 'ok' : 'err');
-      if (params.written) reresolveTags(params.module);
+      if (params.written) { reresolveTags(params.module); refreshTypeKinds(params.module); }
       refreshTagStatus();
       loadTagLists();
     }
@@ -3584,6 +3934,7 @@ async function boot() {
   S.settings = r.settings;
   S.secrets = r.secrets;
   S.module = r.settings.search.module || 'rx';
+  S.kind = storedKinds()[S.module] || 'tag';
   applyAppearance(r.appearance);
   renderSettings();
   renderAiSettings();
