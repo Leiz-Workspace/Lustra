@@ -21,8 +21,9 @@ engine with a tag listing: lustra/tags_updater.py source_for_manifest; rn, rs), 
 tags and merges them into its list (tagUpdate.merge; rp). For a merge source a list from --lists or its folder that is under half
 of the 2tags/ one is refused (a list its own update wrote alone). Any other extension whose list is not there is built without it:
 the app reads the list with the extension's own update when the user asks (Tags A-Z, "Cập nhật"). A zip over the installer's limits
-is refused. A manifest with a tagUpdate key older cores refuse (lustra/modspec.py TAG_UPDATE_KEYS_SINCE) is said on stderr: users of
-those cores are offered an update they cannot install (docs/operations.md, 3d).
+is refused. A manifest older cores refuse (a minSdkVersion newer than their SDK, a top-level or tagUpdate key they do not know:
+lustra/modspec.py SDK_VERSIONS_SINCE, MANIFEST_KEYS_SINCE, TAG_UPDATE_KEYS_SINCE) is said on stderr: users of those cores are offered
+an update they cannot install (docs/operations.md, 3d).
 """
 #########################################
 #
@@ -131,12 +132,23 @@ def tag_list_source(ext_dir: pathlib.Path, manifest: dict, lists: pathlib.Path |
     return path
 
 
+def _version_key(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in v.split('.') if x.isdigit())
+
+
 def newer_core_keys(manifest: dict) -> list[str]:
-    """'tagUpdate.<key> (Lustra <version>)' for each tagUpdate key cores before that release refuse (the whole manifest)"""
-    from lustra.modspec import TAG_UPDATE_KEYS_SINCE
+    """What cores before a release refuse (the whole manifest): 'minSdkVersion <v> (Lustra <version>)' for an SDK newer than the
+    one of the oldest supported cores (SDK_VERSIONS_SINCE), '<key> (Lustra <version>)' for each top-level key (MANIFEST_KEYS_SINCE,
+    ex. 'search') and 'tagUpdate.<key> (Lustra <version>)' for each tagUpdate key (TAG_UPDATE_KEYS_SINCE)"""
+    from lustra.modspec import MANIFEST_KEYS_SINCE, SDK_VERSIONS_SINCE, TAG_UPDATE_KEYS_SINCE
+    out = []
+    sdk = manifest.get('minSdkVersion')
+    if isinstance(sdk, str) and (since := [rel for v, rel in SDK_VERSIONS_SINCE.items() if _version_key(sdk)[:2] >= _version_key(v)]):
+        out.append(f'minSdkVersion {sdk} (Lustra {max(since, key=_version_key)})')
+    out += [f'{k} (Lustra {MANIFEST_KEYS_SINCE[k]})' for k in manifest if k in MANIFEST_KEYS_SINCE]
     tu = manifest.get('tagUpdate')
     keys = tu if isinstance(tu, dict) else {}
-    return [f'tagUpdate.{k} (Lustra {TAG_UPDATE_KEYS_SINCE[k]})' for k in keys if k in TAG_UPDATE_KEYS_SINCE]
+    return out + [f'tagUpdate.{k} (Lustra {TAG_UPDATE_KEYS_SINCE[k]})' for k in keys if k in TAG_UPDATE_KEYS_SINCE]
 
 
 def build(extensions_dir: pathlib.Path, out: pathlib.Path, base_url: str, lists: pathlib.Path | None = None,

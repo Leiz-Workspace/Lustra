@@ -2,7 +2,7 @@
   "id": "tbib",
   "name": "TBIB",
   "abbr": "tb",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,
@@ -14,7 +14,7 @@
   "tagList": "tb_tags.json",
   "entry": "downloader.py:DownloaderTb",
   "minSdkVersion": "1.1",
-  "description": "The Big ImageBoard, Gelbooru 0.2 DAPI (XML). API only: no favorites / pools.",
+  "description": "The Big ImageBoard, Gelbooru 0.2 DAPI (XML). API only: no favorites / pools. 'or' groups run as one search each.",
   "syntax": {
     "concat": "+",
     "idSep": ":",

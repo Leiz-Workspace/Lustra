@@ -2,7 +2,7 @@
   "id": "gelbooru",
   "name": "Gelbooru",
   "abbr": "gb",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,
@@ -14,15 +14,15 @@
   "tagList": "gb_tags.json",
   "entry": "downloader.py:DownloaderGb",
   "minSdkVersion": "1.1",
-  "description": "Gelbooru 0.2 DAPI (XML). Needs your own API key + user id (account options). API only: no favorites / pools.",
+  "description": "Gelbooru 0.2 DAPI (XML). Needs your own API key + user id (account options). Favorites (favorited_by:<user id>) and pools (pool:<id>) through the API; 'or' groups run as one search each.",
   "syntax": {
     "concat": "+",
     "idSep": ":",
     "maxTagsStringLen": 3300,
     "metaCount": ":(?:(?:[<>]=?|=)?[a-z\\d\\-_]+?|[a-z\\d_]+:[a-z\\d_]+?)",
     "sort": "sort(?::[^:]+?){1,2}",
-    "fav": "",
-    "pool": ""
+    "fav": "favorited_by:\\d+?",
+    "pool": "pool:\\d+?"
   },
   "$generator": {
     "tool": "lustra.extgen",

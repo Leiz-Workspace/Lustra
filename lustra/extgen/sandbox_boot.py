@@ -50,6 +50,7 @@ from lustra.lustra_cmd import run_exit_code  # noqa: E402
 from lustra.modspec import ExtensionManifest  # noqa: E402
 from lustra.module import ProcModule  # noqa: E402
 from lustra.network import ThreadedHtmlWorker  # noqa: E402
+from lustra.search_kinds import module_search  # noqa: E402
 
 Extensions.ensure_loaded()  # builtin modules, before the hook (trusted code)
 default_list()  # the domain denylist file is read once here (Extensions._register checks the draft's site)
@@ -170,6 +171,34 @@ def _site_base(host: str) -> str:
     return '.'.join(host.split('.')[-2:])
 
 
+def _kind_routes(m: ExtensionManifest, proc_id: int) -> list[dict]:
+    """The search address(es) of each kind with a token (manifest 'search'), built for a sample value as a run builds them: nothing
+    is fetched. The parent checks them against the site's recorded robots.txt (a kind is declared after the robots / terms check)"""
+    ms = module_search(proc_id)
+    out: list[dict] = []
+    for kind in m.search.kinds:
+        if not kind.token:
+            continue
+        row: dict = {'id': kind.id, 'token': kind.token, 'query': '', 'urls': [], 'error': ''}
+        out.append(row)
+        rex = ms.patterns.get(kind.token) if ms is not None else None
+        example = kind.example[len(kind.token):] if kind.example.startswith(kind.token) else kind.example
+        tries = (example, '12345' if kind.input == 'id' else 'sample_value', 'sample', '12345', 'a')
+        sample = next((v for v in tries if v and ' ' not in v and rex is not None and rex.fullmatch(kind.token + v)), '')
+        if not sample:
+            row['error'] = 'no sample value matches the kind\'s value: give the kind an example'
+            continue
+        row['query'] = kind.token + sample
+        try:
+            ProcModule.set(proc_id)
+            kdwn = _make_downloader(proc_id)
+            kdwn._parse_args(prepare_arglist(['-module', m.abbr, '--', row['query']]), False)
+            row['urls'] = [kdwn._form_tags_search_address(kdwn._consume_custom_module_tags(t)) for t in kdwn.tags_str_arr or ['']]
+        except BaseException as err:  # refused by the downloader (thread_exit) or the parser: never requested
+            row['error'] = f'{type(err).__name__}: {err}'[:400]
+    return out
+
+
 def main() -> dict:
     checks: list[dict] = []
     report: dict = {'checks': checks, 'requests': REQUESTS, 'downloads': DOWNLOADS}
@@ -197,6 +226,8 @@ def main() -> dict:
     except Exception:
         interval = -1.0
     _check(checks, 'rate', interval >= 0.5, f'minimal request interval {interval} s (>= 0.5 s)')
+    if any(k.token for k in m.search.kinds):
+        report['kindRoutes'] = _kind_routes(m, proc_id)
 
     # count (search.count of the app)
     try:

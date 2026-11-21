@@ -25,7 +25,7 @@ import requests
 
 from lustra.denylist import ascii_host, denied, denied_message
 from lustra.network import LUSTRA_USER_AGENT, is_cloudflare_challenge, parse_retry_after
-from lustra.robots import RobotsRules
+from lustra.robots import ROBOTS_MAX_BYTES, RobotsRules
 
 __all__ = ('FetchPolicyError', 'FetchResult', 'SafeFetcher', 'host_of', 'normalize_site')
 
@@ -122,6 +122,8 @@ def _is_public(addr: str) -> bool:
 class _HostState:
     robots: RobotsRules | None = None
     robots_status: str = ''
+    robots_text: str | None = None
+    '''the robots.txt read (a comment for a 4xx answer: no restrictions), None when unreachable: saved into drafts by record'''
     crawl_delay: float = 0.0
     last: float = 0.0
 
@@ -191,12 +193,16 @@ class SafeFetcher:
         # urllib.robotparser kept only the first 'User-agent: *' group: with Cloudflare's managed 'Allow: /' block first, a later
         # 'Disallow: /api' of the site (manebooru.art, furbooru.org) was ignored
         try:
+            # paced like any other request of the host: the first page after it waits min_interval (it went out at once before)
+            self._pace(robots_url, st)
             r = self._raw_get(robots_url, count=True)
             if 200 <= r.status < 300:
-                rp = RobotsRules.parse(r.text(), ROBOTS_AGENT)
+                st.robots_text = r.text()[:ROBOTS_MAX_BYTES]
+                rp = RobotsRules.parse(st.robots_text, ROBOTS_AGENT)
                 st.robots_status = 'found'
             elif 400 <= r.status < 500:
                 st.robots_status = f'none ({r.status})'
+                st.robots_text = f'# {robots_url} answered HTTP {r.status}: no robots.txt, no restrictions (RFC 9309 2.3.1.3)\n'
                 rp = RobotsRules.allow_all(st.robots_status)  # RFC 9309: unavailable (4xx) -> no restrictions
             else:
                 st.robots_status = f'unreachable ({r.status})'
@@ -209,6 +215,12 @@ class SafeFetcher:
         st.robots = rp
         st.crawl_delay = min(float(rp.crawl_delay), 30.0) if rp.crawl_delay else 0.0
         return st
+
+    def robots_txt(self, url: str) -> str | None:
+        """The robots.txt this fetcher read for the host of url (None: not read yet, or unreachable). Never makes a request"""
+        p = url_parse.urlparse(url)
+        st = self._hosts.get(f'{p.scheme}://{p.netloc.lower()}')
+        return st.robots_text if st is not None else None
 
     def robots_info(self, url: str) -> dict:
         st = self._robots(url)

@@ -79,7 +79,8 @@ Anything else (escaped keys, braces, junk) goes through it'''
 class _TagList:
     """Immutable compact tag list. Name i is blob[offs[i]:offs[i + 1]] (utf-8, sorted, unique), posts[i] / types[i] (TagTypes value) go with it.
     Readers keep a reference and need no lock: unloading only drops the list from TagsDB"""
-    __slots__ = ('_fuzzy', '_fuzzy_lock', '_lock', '_views', '_views_items', 'added', 'blob', 'floor', 'offs', 'posts', 'types')
+    __slots__ = ('_fuzzy', '_fuzzy_lock', '_lock', '_type_counts', '_views', '_views_items', 'added', 'blob', 'floor', 'offs', 'posts',
+                 'types')
 
     def __init__(self, blob: bytes, offs: array, posts: array, types: bytes, added: frozenset[str] = frozenset()) -> None:
         self.blob, self.offs, self.posts, self.types = blob, offs, posts, types
@@ -93,6 +94,8 @@ class _TagList:
         self._fuzzy: _FuzzyIndex | None = None
         '''typo search index, built on first use and dropped with the list'''
         self._fuzzy_lock = threading.Lock()
+        self._type_counts: dict[int, int] | None = None
+        '''names per type code, counted on first use (the list is immutable)'''
 
     def __len__(self) -> int:
         return len(self.offs) - 1
@@ -168,20 +171,32 @@ class _TagList:
                     self._views_items -= len(self._views.popitem(last=False)[1])
         return result
 
-    def top(self, prefix: str, limit: int | None, scan_max: int) -> list[int]:
-        """Names starting with prefix, most popular first (stable), limited to the first scan_max matches alphabetically if scan_max > 0"""
+    def type_counts(self) -> dict[int, int]:
+        """Names per type code (only the codes the list has)"""
+        if (counts := self._type_counts) is None:
+            counts = {code: n for code in set(self.types) if (n := self.types.count(code))}
+            self._type_counts = counts
+        return counts
+
+    def top(self, prefix: str, limit: int | None, scan_max: int, codes: frozenset[int] = frozenset()) -> list[int]:
+        """Names starting with prefix, most popular first (stable), limited to the first scan_max matches alphabetically if scan_max > 0.
+        codes: only names of these types, picked inside that range (no cached view: autocomplete must not evict browse results)"""
         r = self.prefix_range(prefix)
         if scan_max > 0:
             r = r[:scan_max]
+        if codes:
+            table = bytes(1 if c in codes else 0 for c in range(256))
+            r = list(itertools.compress(r, self.types[r.start:r.stop].translate(table)))
         key = self.posts.__getitem__
         if limit is not None and limit >= 0:
             return heapq.nlargest(limit, r, key=key)  # == sorted(r, key=key, reverse=True)[:limit]
         return sorted(r, key=key, reverse=True)[:limit]
 
-    def fuzzy(self, text: str, limit: int) -> list[tuple[int, int]]:
+    def fuzzy(self, text: str, limit: int, codes: frozenset[int] = frozenset()) -> list[tuple[int, int]]:
         """(distance, index) of names within 1 edit (texts shorter than FUZZY_TWO_EDITS_LENGTH) or 2 edits of text, closest first,
         then most popular, then alphabetical. Edits: insert / delete / replace a char, swap two adjacent chars; underscores are ignored
-        ('catears' == 'cat_ears'). Texts shorter than FUZZY_MIN_LENGTH or longer than FUZZY_MAX_LENGTH give nothing"""
+        ('catears' == 'cat_ears'). Texts shorter than FUZZY_MIN_LENGTH or longer than FUZZY_MAX_LENGTH give nothing.
+        codes: only names of these types"""
         folded = _fold(text)
         if not FUZZY_MIN_LENGTH <= len(folded) <= FUZZY_MAX_LENGTH or limit <= 0 or not len(self):
             return []
@@ -195,6 +210,8 @@ class _TagList:
         stripped = text.replace('_', '')
         result = []
         for dist, i in found:
+            if codes and self.types[i] not in codes:
+                continue
             raw = self.blob[self.offs[i]:self.offs[i + 1]]
             if not (exact_text and _folds_exactly_raw(raw)):  # hashed non-ascii chars may collide: check the real distance
                 dist = _osa_distance(stripped, raw.decode(UTF8, _ENC_ERRORS).replace('_', ''))
@@ -1004,11 +1021,24 @@ class TagsDB:
             TagsDB._gens[module] = TagsDB._gens.get(module, 0) + 1
 
     @staticmethod
-    def top_matches(module: str, prefix: str, limit: int | None = None, *, scan_max=0) -> list[tuple[str, TagInfo]]:
+    def top_matches(module: str, prefix: str, limit: int | None = None, *, scan_max=0, tag_types: Iterable[TagTypes] = (),
+                    ) -> list[tuple[str, TagInfo]]:
         """Tags starting with prefix, most popular first (equal counts: alphabetical). limit None: all.
-        scan_max > 0: only the first scan_max matches (alphabetically) are ranked"""
+        scan_max > 0: only the first scan_max matches (alphabetically) are ranked. tag_types: only tags of these types (among them)"""
         lst = TagsDB._load(module)
-        return [lst.row(i) for i in lst.top(prefix, limit, scan_max)]
+        return [lst.row(i) for i in lst.top(prefix, limit, scan_max, frozenset(int(t) for t in tag_types))]
+
+    @staticmethod
+    def type_counts(module: str, exclude_prefixes: Iterable[str] = ()) -> dict[TagTypes, int]:
+        """Tags of each type in the module's list (counted once per loaded list), only the types it has. exclude_prefixes: names
+        starting with one of them are not counted (the rows of each prefix's range, read each time)"""
+        lst = TagsDB._load(module)
+        counts = dict(lst.type_counts())
+        for prefix in {p for p in exclude_prefixes if p}:
+            r = lst.prefix_range(prefix)
+            for code in lst.types[r.start:r.stop]:
+                counts[code] -= 1
+        return {_TYPE_BY_CODE[code]: n for code, n in counts.items() if n > 0}
 
     @staticmethod
     def _get_tag_matches(module: str, tag: str) -> list[tuple[str, TagInfo]]:
@@ -1045,11 +1075,11 @@ class TagsDB:
         return lst.info(i) if (i := lst.find(tag)) >= 0 else None
 
     @staticmethod
-    def fuzzy_matches(module: str, text: str, limit: int) -> list[tuple[str, TagInfo, int]]:
+    def fuzzy_matches(module: str, text: str, limit: int, tag_types: Iterable[TagTypes] = ()) -> list[tuple[str, TagInfo, int]]:
         """Typo tolerant suggestions (name, info, distance), closest first, then most popular. See _TagList.fuzzy.
-        The search index is built on first use (~0.4 s for 766k tags) and dropped with the list"""
+        The search index is built on first use (~0.4 s for 766k tags) and dropped with the list. tag_types: only tags of these types"""
         lst = TagsDB._load(module)
-        return [(lst.name(i), lst.info(i), dist) for dist, i in lst.fuzzy(text, limit)]
+        return [(lst.name(i), lst.info(i), dist) for dist, i in lst.fuzzy(text, limit, frozenset(int(t) for t in tag_types))]
 
     @staticmethod
     def has_wildcard_match(module: str, wtag: str) -> bool:

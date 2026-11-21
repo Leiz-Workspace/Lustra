@@ -80,13 +80,20 @@
     backgroundUrl: settings.appearance.background.mode === 'image' && settings.appearance.background.image ? settings.appearance.background.image : iconUrl(settings.appearance.icon),
     icons: ICONS.map((i) => ({ ...i, url: iconUrl(i.id) })), themes: ['ember', 'graphite', 'paper', 'oled'], liveTaskbarIcon: false,
   });
+  // a kind of manifest 'search' as ext.list gives it (lustra/modspec.py SearchKind)
+  const kind = (k) => ({ token: '', value: '', input: 'tag', tagType: '', listing: false, pageSize: 0, example: '', label: '', use: '', order: 'id', ...k });
   const modules = [
     { id: 'danbooru', name: 'Danbooru', abbr: 'db', version: '1.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['gender_tags', 'parent_child', 'preview'],
       site: 'https://danbooru.donmai.us/', description: 'Danbooru JSON API. Anonymous search is limited to 2 tags: extra tags are checked locally.', auth: { apiKey: true, apiKeyFormat: 'API_KEY,LOGIN' },
-      syntax: { maxTags: 2 } },
+      syntax: { maxTags: 2 }, search: { idSearch: true, metaNames: ['favgroup', 'ordfavgroup'], kinds: [
+        kind({ id: 'uploader', token: 'user:', value: '[^\\s:]+', input: 'text' }), kind({ id: 'favorites', token: 'favorited_by:', value: '[^:]+?', input: 'text', use: 'fav' }),
+        kind({ id: 'pool', token: 'pool:', value: '[^:]+?', input: 'text', use: 'pool', example: '12345' })] } },
     { id: 'rule34', name: 'Rule34', abbr: 'rx', version: '2.0.0', source: 'builtin', default: true, installed: true, media: ['image', 'video'], capabilities: ['api_key', 'api_key_required', 'gender_tags', 'parent_child', 'preview'],
-      site: 'https://rule34.xxx/', description: 'Gelbooru-based DAPI (XML). API key + user id recommended.', auth: { apiKey: true, apiKeyFormat: 'KEY,USER_ID', rateLimit: { requests: 60, seconds: 60 } }, syntax: { maxTags: 0 } },
-    { id: 'e621', name: 'e621', abbr: 'en', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://e621.net/', description: 'e621 JSON API (2 requests/second).', auth: {}, syntax: { maxTags: 40 } },
+      site: 'https://rule34.xxx/', description: 'Gelbooru-based DAPI (XML). API key + user id recommended.', auth: { apiKey: true, apiKeyFormat: 'KEY,USER_ID', rateLimit: { requests: 60, seconds: 60 } }, syntax: { maxTags: 0 },
+      search: { idSearch: true, metaNames: [], kinds: [kind({ id: 'uploader', token: 'user:', value: '[^\\s:]+', input: 'text' }),
+        kind({ id: 'favorites', token: 'favorited_by:', value: '\\d+?', input: 'id', use: 'fav', example: '12345' }),
+        kind({ id: 'pool', token: 'pool:', value: '\\d+?', input: 'id', use: 'pool', example: '12345' })] } },
+    { id: 'e621', name: 'e621', abbr: 'en', version: '1.0.0', source: 'catalog', default: false, installed: false, media: ['image', 'video'], site: 'https://e621.net/', description: 'e621 JSON API (2 requests/second).', auth: {}, syntax: { maxTags: 40 }, search: { idSearch: true, metaNames: [], kinds: [] } },
     // its own update reads only the tags with 100+ posts and the core merges them into its list (tagUpdate.merge, tags.sources merge)
     { id: 'paheal', name: 'Rule34 Paheal', abbr: 'rp', version: '1.0.3', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://rule34.paheal.net/',
       description: 'Shimmie danbooru-compatible API. Max 3 tags.', auth: {}, syntax: { maxTags: 3 }, tagList: 'rp_tags.json',
@@ -103,8 +110,14 @@
     { id: 'htmlsite', name: 'Htmlsite', abbr: 'hs', version: '1.0.0', source: 'user', default: false, installed: true, media: ['image'], site: 'https://htmlsite.example/',
       description: 'Htmlsite: custom HTML', auth: {}, syntax: { maxTags: 0 }, generator: { tool: 'lustra.aigen', engine: 'custom', createdAt: '2026-11-18T09:00:00Z' } },
     // ships its list but has no tag source (tags.status bundled): learned tags go on top of it
-    { id: 'videosite', name: 'Videosite', abbr: 'vb', version: '1.0.2', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://videosite.example/',
-      description: 'Videosite: custom HTML', auth: {}, syntax: { maxTags: 0 }, tagList: 'vb_tags.json' },
+    // site listings as search kinds (manifest 'search', Lustra 2.0.11): artist / category / keyword pages of the site, no id search
+    { id: 'videosite', name: 'Videosite', abbr: 'vb', version: '1.1.0', source: 'user', default: false, installed: true, media: ['image', 'video'], site: 'https://videosite.example/',
+      description: 'Videosite: custom HTML', auth: {}, syntax: { maxTags: 1 }, tagList: 'vb_tags.json', minSdkVersion: '1.2',
+      search: { idSearch: false, metaNames: [], kinds: [
+        kind({ id: 'artist', token: 'artist:', value: '[a-z0-9_-]+', tagType: 'artist', listing: true, pageSize: 24, example: 'sample_artist' }),
+        kind({ id: 'category', token: 'category:', value: '[a-z0-9_-]+', tagType: 'copyright', listing: true, pageSize: 24 }),
+        kind({ id: 'keyword', token: 'search:', value: '[^\\s/]+', input: 'text', listing: true, pageSize: 24, example: 'night_city' }),
+        kind({ id: 'uploader', token: 'user:', value: '\\d+', input: 'id', listing: true, example: '294' })] } },
     // learn-only, nothing learned yet (no row in tags.status)
     { id: 'clipsite', name: 'Clipsite', abbr: 'cv', version: '1.0.0', source: 'user', default: false, installed: true, media: ['video'], site: 'https://clipsite.example/',
       description: 'Clipsite: custom HTML, robots.txt forbids its tag API', auth: {}, syntax: { maxTags: 0 } },
@@ -119,6 +132,11 @@
     ['absurdres', 2100000, 'metadata'], ['blue_sky', 120000, 'general'], ['bird', 70000, 'general'], ['book', 150000, 'general'],
     ['building', 90000, 'general'], ['ocean', 110000, 'general'], ['outdoors', 1300000, 'general'], ['mountain', 42000, 'general'],
     ['big_hair', 30000, 'general'], ['big_hat', 9000, 'general'], ['abstract', 12000, 'general'], ['animal_ears', 900000, 'general'],
+    // made-up artists, a character and a series of the picker's type kinds (Nghệ sĩ, Nhân vật, Series)
+    ['sample_artist', 4200, 'artist'], ['sakura_painter', 2600, 'artist'], ['sky_sketcher', 900, 'artist'], ['cloud_brush', 310, 'artist'],
+    ['sample_heroine', 15000, 'character'], ['sample_saga', 52000, 'copyright'],
+    // category rows of a site listing (an extension's own tag job may list them with their token)
+    ['category:city_nights', 812, 'copyright'], ['category:cloud_stories', 240, 'copyright'],
   ];
   const ALIASES = { kitty_ears: 'cat_ears', clouds: 'cloud', sunset_sky: 'sunset', blue_skies: 'blue_sky', cloudy_sky: 'cloud' };
   const META = /^(?:id|score|rating|user|md5|width|height|parent|source|order|date|status|fav|pool|filetype|limit|age|ordfav)[:=<>]/;
@@ -225,9 +243,27 @@
       if (method === 'ext.uninstall') { const m = modules.find((x) => x.id === p.id); if (m) m.installed = false; return { ok: true }; }
       if (method === 'ext.remoteCatalog') return [];
       if (method === 'tags.autocomplete') {
-        const neg = p.prefix.startsWith('-'); const base = p.prefix.replace(/^-/, '').toLowerCase();
-        return TAGS.filter((t) => t[0].startsWith(base)).sort((a, b) => b[1] - a[1]).slice(0, p.limit || 12)
-          .map(([tag, posts, type]) => ({ tag, posts, type, insert: `${neg ? '-' : ''}${tag}` }));
+        // types: only tags of those types; token: rows named '<token><prefix>' first, else plain rows, 'insert' carries the token
+        const neg = p.prefix.startsWith('-'); const token = p.token || '';
+        let base = p.prefix.replace(/^-/, '').toLowerCase();
+        if (token && base.startsWith(token)) base = base.slice(token.length);
+        const match = (pre) => TAGS.filter((t) => t[0].startsWith(pre) && (!p.types?.length || p.types.includes(t[2])))
+          .sort((a, b) => b[1] - a[1]).slice(0, p.limit || 12);
+        const rows = (token && match(`${token}${base}`).length) ? match(`${token}${base}`) : match(base);
+        return rows.map(([tag, posts, type]) => ({ tag, posts, type, insert: `${neg ? '-' : ''}${token && !tag.startsWith(token) ? token : ''}${tag}` }));
+      }
+      if (method === 'tags.kinds') {
+        // the type kinds the module's list has (db and rx share the mock list; learned / bundled lists of the others have no types);
+        // rows named '<token><value>' of the module's kinds ('category:x') are not counted, like the core
+        const types = {};
+        const tokens = (modules.find((m) => m.abbr === p.module)?.search?.kinds || []).map((k) => k.token).filter(Boolean);
+        if (['db', 'rx', 'vb'].includes(p.module)) {
+          for (const t of ['artist', 'character', 'copyright']) {
+            const n = TAGS.filter((x) => x[2] === t && !tokens.some((tok) => x[0].startsWith(tok))).length;
+            if (n) types[t] = n;
+          }
+        }
+        return { module: p.module, hasList: true, types };
       }
       if (method === 'files.identify') {
         const items = (p.names || []).map((raw) => {
@@ -241,13 +277,14 @@
         });
         const by = {};
         items.filter((it) => it.kind).forEach((it) => { (by[it.module] ||= []).push(`${it.kind}:${it.value}`); });
-        const queries = Object.entries(by).map(([module, terms]) => ({ module, tags: terms.length > 1 ? `(${terms.join('~')})` : terms[0], count: terms.length, dropped: 0 }));
+        const queries = Object.entries(by).map(([module, terms]) => ({ module, tags: terms.length > 1 ? `(${terms.join('~')})` : terms[0], count: terms.length, dropped: 0,
+          idSearch: modules.find((m) => m.abbr === module)?.search?.idSearch !== false }));
         return { items, queries, max: 500 };
       }
       if (method === 'tags.fuzzy') {
         const text = String(p.text || '').toLowerCase();
         const flat = text.replace(/_/g, '');
-        return TAGS.map(([tag, posts, type]) => ({ tag, posts, type, distance: Math.min(lev(text, tag), tag.replace(/_/g, '') === flat ? 1 : 9) }))
+        return TAGS.filter((t) => !p.types?.length || p.types.includes(t[2])).map(([tag, posts, type]) => ({ tag, posts, type, distance: Math.min(lev(text, tag), tag.replace(/_/g, '') === flat ? 1 : 9) }))
           .filter((r) => r.distance <= 2).sort((a, b) => a.distance - b.distance || b.posts - a.posts).slice(0, p.limit || 8);
       }
       if (method === 'tags.resolve') {
@@ -269,7 +306,21 @@
         rows = p.sort === 'posts' ? rows.sort((a, b) => b[1] - a[1]) : rows.sort((a, b) => a[0].localeCompare(b[0]));
         return { total: rows.length, items: rows.slice(p.offset, p.offset + p.limit).map(([tag, posts, type]) => ({ tag, posts, type })) };
       }
-      if (method === 'tags.validate') return { valid: !/[\s]{2,}|\(\)/.test(p.tags), tags: p.tags.split(' ') };
+      if (method === 'tags.validate') {
+        // the listing rules of search kinds (lustra/tags_parser.py): one listing, not negated, no OR group with it
+        const listing = modules.find((m) => m.abbr === p.module)?.search?.kinds?.filter((k) => k.listing) || [];
+        const words = p.tags.split(' ');
+        const isListing = (w) => listing.some((k) => w.replace(/^%?-?/, '').startsWith(k.token));
+        const found = words.filter(isListing);
+        const inGroup = words.filter((w) => /^\(.+~.+\)$/.test(w)).flatMap((w) => w.slice(1, -1).split('~')).find(isListing);
+        let error = '';
+        if (inGroup) error = `${inGroup.replace(/^%?-?/, '').replace(/%$/, '')} is a site listing: 'or' groups cannot be used with it`;
+        else if (found.some((w) => /^%?-/.test(w))) error = `'${found[0].replace(/^%?-/, '').split(':')[0]}:' selects a site listing: it cannot be negated`;
+        else if (found.length > 1) error = `one site listing per search: ${found.join(' ')}`;
+        else if (found.length && words.some((w) => /^\(.+~.+\)$/.test(w))) error = `${found[0]} is a site listing: 'or' groups cannot be used with it`;
+        const valid = !error && !/[\s]{2,}|\(\)/.test(p.tags);
+        return { valid, tags: words, error };
+      }
       if (method === 'tags.sources') {
         return [
           { module: 'rx', name: 'Rule34', engine: 'gelbooru_dapi', site: 'https://api.rule34.xxx/', key: 'required', keyFormat: 'KEY,USER_ID', robots: false, curated: true, tailUpdates: true, description: 'DAPI tag index, pages by number (pid)' },
@@ -358,8 +409,10 @@
           return { id: String(id), preview, sample: preview, isVideo: i % 9 === 4, mediaKind: i % 9 === 4 ? 'video' : i % 13 === 7 ? 'audio' : 'image', downloaded: i % 5 === 1 ? 'id' : undefined, ext: i % 9 === 4 ? 'mp4' : i % 13 === 7 ? 'mp3' : 'jpg', score: String((id % 97)),
             width: '1920', height: '1080', date: '16-11-2026', rating: 'g', tags, gender, excludedBy, excluded: excludedBy.length > 0 };
         });
+        // vb lists no post tags (search.preview localFiltersUnchecked): the tags checked locally are not checked in Preview
+        const unchecked = q.module === 'vb' && q.tags.split(' ').length > 1;
         return { page, pageSize, hasMore: page < pages - 1, items, tasks, requiredTags: required, site: 'https://example.invalid/',
-          genderStats, blockedCount: sel.length ? 2 : 0, genderEnabled: sel.length > 0 };
+          genderStats, blockedCount: sel.length ? 2 : 0, genderEnabled: sel.length > 0, localFiltersUnchecked: unchecked };
       },
       related: async (q) => {
         await delay(500 + latency('search.related', q));
@@ -570,7 +623,7 @@
     },
     appearance: { setBackgroundImage: async () => appearance() },
     app: {
-      info: async () => ({ version: '2.0.10', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
+      info: async () => ({ version: '2.0.11', electron: 'mock', platform: 'browser', userData: '~/.config/Lustra', python: '.venv/bin/python', repo: '.', sidecar: { name: 'Lustra', version: '2.0 r1', python: '3.13' } }),
       relaunch: async () => location.reload(), installLauncher: async () => ({ ok: false, message: 'mock' }), openPath: async () => '', openExternal: async () => false,
     },
     thumbUrl: (url) => url,

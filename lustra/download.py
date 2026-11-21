@@ -52,6 +52,7 @@ from .logger import trace
 from .module import ProcModule
 from .network import DownloadInterruptException, ThreadedHtmlWorker, thread_exit
 from .rex import re_favorited_by_tag, re_infolist_filename, re_pool_tag
+from .search_kinds import find_kind, is_listing_tag, is_site_order_tag
 from .tagger import append_filtered_tags
 from .tags_parser import convert_taglist
 from .tagsdb import load_tag_aliases
@@ -849,11 +850,12 @@ class Downloader(DownloaderBase):
             trace('\nNothing to download: queue is empty')
 
     def _extract_custom_argument_tags(self) -> None:
-        fav_user_tags = list(filter(None, [re_favorited_by_tag.fullmatch(t) for t in self.tags_str_arr]))
+        # a listing kind with a 'favorited_by:' / 'pool:' token is the module's own listing route, not the favorites / pool pipeline
+        fav_user_tags = list(filter(None, [re_favorited_by_tag.fullmatch(t) for t in self.tags_str_arr if not is_listing_tag(t)]))
         self._extract_favorite_user(fav_user_tags)
         if self.favorites_search_user and self._is_fav_search_conversion_required():
             [self.tags_str_arr.remove(f.string) for f in fav_user_tags]
-        pool_tags = list(filter(None, [re_pool_tag.fullmatch(t) for t in self.tags_str_arr]))
+        pool_tags = list(filter(None, [re_pool_tag.fullmatch(t) for t in self.tags_str_arr if not is_listing_tag(t)]))
         self._extract_pool_id(pool_tags)
         if self.pool_search_str and self._is_pool_search_conversion_required():
             [self.tags_str_arr.remove(f.string) for f in pool_tags]
@@ -1039,8 +1041,9 @@ class Downloader(DownloaderBase):
         for t in self.tags_str_arr:
             if len(t) > 2 and f'{t[0]}{t[-1]}' == '()' and f'{t[:2]}{t[-2:]}' != '(++)':
                 thread_exit(f'Error: invalid tag \'{t}\'! Looks like \'or\' group but not fully contatenated by \'+\'')
-        # conflict: non-default sorting
-        self.default_sort = not any(self._is_custom_sort_tag(tag) for tag in self.tags_str_arr)
+        # conflict: non-default sorting. A kind whose results come in the site's order (a listing, or order 'site') is one too
+        self.site_order_kind = next((tag for tag in self.tags_str_arr if is_site_order_tag(tag)), '')
+        self.default_sort = not self.site_order_kind and not any(self._is_custom_sort_tag(tag) for tag in self.tags_str_arr)
         self.tags_str_arr[:] = split_tags_into_tasks(self.tags_str_arr, cc, sc, split_always)
         self.orig_tasks_count = self._tasks_count()
 
@@ -1216,6 +1219,7 @@ class Downloader(DownloaderBase):
         self.skip_known = getattr(args, 'skip_known', False) or self.skip_known
         self.safety_blacklist = getattr(args, 'safety_blacklist', False) or self.safety_blacklist
         self.tags_str_arr[:] = [] if self.get_max_id else convert_taglist(args.tags)
+        self.current_kind = find_kind(self.tags_str_arr)  # before any search address is built (SDK 1.2)
         self._extract_negative_and_groups()
         self._extract_custom_argument_tags()
         if enable_preprocessing:
@@ -1231,6 +1235,8 @@ class Downloader(DownloaderBase):
             if self._tasks_count() > 1:
                 thread_exit('Error: cannot use non-default sorting with multi-task query!')
             if self._has_date_limits():
+                if self.site_order_kind:
+                    thread_exit(f'Error: \'{self.site_order_kind}\' lists posts in the site\'s order: date limits cannot be used with it')
                 thread_exit('Error: cannot use both sort tag and date filter at the same time!')
         # non-fatal
         ret = False
