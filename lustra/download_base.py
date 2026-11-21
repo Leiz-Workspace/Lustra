@@ -13,6 +13,7 @@ import re
 import sqlite3
 from abc import abstractmethod
 from collections.abc import Callable, MutableSet
+from threading import Lock
 from typing import Any, TypeVar, final
 
 from bs4 import BeautifulSoup
@@ -34,12 +35,48 @@ from .dlindex import DownloadIndex, norm_md5
 from .gender import GenderConf, GenderResult, decide, infer_from_tags, rules_for_module
 from .logger import trace
 from .network import PART_SUFFIX, ThreadedHtmlWorker, thread_exit
+from .robots import ROBOTS_MAX_BYTES, RobotsRules
 from .safety import blocked_tag
+from .search_kinds import KindMatch
+from .tags_parser import is_module_sort_tag
 from .utils import as_date
 
 re_preview_url_attr = re.compile(r'\bpreview_url="([^"]+)"')
 re_sample_url_attr = re.compile(r'\bsample_url="([^"]+)"')
 re_img_src = re.compile(r'<img[^>]+?src="([^"]+)"')
+
+re_id_order = re.compile(r'^(?:order[:=]id_desc|sort:id(?::desc)?)$')
+'''sort tags that keep the newest first (default) order: never a custom sort. 'order:id' is oldest first where the sort syntax is
+'order:...': a custom sort'''
+
+ROBOTS_FILE_NAME = 'robots.txt'
+'''the site's robots.txt as the extension's author saved it, next to its manifest (SDK 1.2 robots_allows)'''
+ROBOTS_AGENT = 'Lustra'
+_saved_robots_cache: dict[str, tuple[tuple[int, int], RobotsRules]] = {}
+_saved_robots_lock = Lock()
+
+
+def saved_robots_rules(abbr: str) -> RobotsRules | None:
+    """Rules of the robots.txt saved in the folder of the module's extension (RFC 9309, lustra/robots.py), None without one"""
+    from .extensions import Extensions  # local: extensions imports the downloaders
+    m = Extensions.get_by_abbr(abbr)
+    path = m.path / ROBOTS_FILE_NAME if m is not None and m.path is not None else None
+    try:
+        st = path.stat() if path is not None and path.is_file() else None
+    except OSError:
+        st = None
+    if path is None or st is None:
+        return None
+    key, stamp = path.as_posix(), (st.st_mtime_ns, st.st_size)
+    with _saved_robots_lock:
+        if (cached := _saved_robots_cache.get(key)) is not None and cached[0] == stamp:
+            return cached[1]
+    with open(path, 'rb') as f:
+        text = f.read(ROBOTS_MAX_BYTES).decode('utf-8', errors='replace')
+    rules = RobotsRules.parse(text, ROBOTS_AGENT)
+    with _saved_robots_lock:
+        _saved_robots_cache[key] = (stamp, rules)
+    return rules
 
 GENDER_MISMATCH_DIR = '_gender_mismatch'
 '''-gender_verify_media: subfolder of the destination for downloaded files that do not match the gender filter'''
@@ -146,6 +183,11 @@ class DownloaderBase(ThreadedHtmlWorker):
         self.known_parents: set[str] = set()
         self.filtered_out_ids_cache: set[str] = set()
         self.default_sort: bool = True
+        self.current_kind: KindMatch | None = None
+        '''the search kind of the query (manifest 'search', lustra/search_kinds.py): its listing kind if there is one, else the first
+        tag of a kind; set while the arguments are parsed, before any search address is built (SDK 1.2)'''
+        self.site_order_kind: str = ''
+        '''the tag of a kind whose results come in the site's order (a listing, or order 'site'): like a sort tag'''
         self.favorites_search_user: str = ''
         self.pool_search_str: str = ''
         self.current_task_subfolder: str = ''
@@ -328,7 +370,27 @@ class DownloaderBase(ThreadedHtmlWorker):
         return False
 
     def _is_custom_sort_tag(self, tag_str: str) -> bool:
-        return tag_str.startswith('sort:') and tag_str not in ('sort:id', 'sort:id:desc')
+        """A sort tag other than newest first: 'sort:...', or a tag matching the module's sort syntax (manifest syntax.sort,
+        core tables for the modules known to the core) except the newest first id order ('order:id_desc', 'sort:id'...)"""
+        if tag_str.startswith('sort:') and tag_str not in ('sort:id', 'sort:id:desc'):
+            return True
+        return is_module_sort_tag(tag_str) and not re_id_order.fullmatch(tag_str)
+
+    def robots_allows(self, url: str) -> bool:
+        """SDK 1.2, for routes an extension builds from user input (a kind's listing): whether the site's robots.txt saved in the
+        extension folder ('robots.txt' next to manifest.json) allows url, as RFC 9309 reads it for agent 'Lustra'.
+        False when the extension has no saved robots.txt (the check it asks for cannot be made)"""
+        rules = saved_robots_rules(self._get_module_abbr())
+        return rules is not None and rules.allows(url)
+
+    def require_robots_allowed(self, url: str) -> None:
+        """robots_allows, or the run stops with a clear message (nothing is requested)"""
+        if self.robots_allows(url):
+            return
+        abbr = self._get_module_abbr().upper()
+        if saved_robots_rules(self._get_module_abbr()) is None:
+            thread_exit(f'Error: [{abbr}] the extension has no saved {ROBOTS_FILE_NAME} to check {url} against: not requested', -480)
+        thread_exit(f'Error: [{abbr}] the site\'s robots.txt does not allow {url}: Lustra does not request it', -481)
 
     def _get_api_key(self) -> str:
         return ''

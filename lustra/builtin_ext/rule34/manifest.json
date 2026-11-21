@@ -3,7 +3,7 @@
   "id": "rule34",
   "name": "Rule34",
   "abbr": "rx",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "apiVersion": 1,
   "kind": "downloader",
   "default": true,
@@ -36,5 +36,27 @@
     "sort": "sort(?::[^:]+?){1,2}",
     "fav": "favorited_by:\\d+?",
     "pool": "pool:\\d+?"
+  },
+  "search": {
+    "kinds": [
+      {
+        "id": "uploader",
+        "token": "user:",
+        "value": "[^\\s:]+",
+        "input": "text"
+      },
+      {
+        "id": "favorites",
+        "use": "fav",
+        "input": "id",
+        "example": "12345"
+      },
+      {
+        "id": "pool",
+        "use": "pool",
+        "input": "id",
+        "example": "12345"
+      }
+    ]
   }
 }

@@ -26,8 +26,10 @@ from bs4 import BeautifulSoup
 from .defines import FILE_NAME_FULL_MAX_LEN, FMT_DATE, KNOWN_EXTENSIONS_VID, DownloadModes, ItemInfo, MediaKind, media_kind_by_ext
 from .download import Downloader
 from .logger import trace
+from .module import ProcModule
 from .network import LUSTRA_USER_AGENT, thread_exit
 from .rex import re_item_info_part_xml, re_orig_file_link, re_tags_exclude_rx, re_tags_to_process_rx
+from .search_kinds import module_search
 
 __all__ = ('DownloaderJsonApi', 'JsonPost')
 
@@ -111,6 +113,20 @@ class DownloaderJsonApi(Downloader):
         first); cursor None: the first page. '' (default): the API cannot, results deeper than MAX_PAGES are refused"""
         return ''
 
+    def _items_per_page(self) -> int:
+        """SDK 1.2: posts per search page of the query being run. The page size its kind declares (manifest search.kinds[].pageSize,
+        self.current_kind), else ITEMS_PER_PAGE. Used for page addresses, the search depth and the count"""
+        if (kind := self.current_kind) is not None:
+            ms = module_search(ProcModule.PROC_MODULES_BY_NAME.get(self._get_module_abbr()))
+            spec = ms.by_token.get(kind.token) if ms is not None else None
+            if spec is not None and spec.pageSize > 0:
+                return spec.pageSize
+        return self.ITEMS_PER_PAGE
+
+    def _max_pages(self) -> int:
+        """SDK 1.2: deepest page the site serves for the query being run (0: no limit), MAX_PAGES by default"""
+        return self.MAX_PAGES
+
     # ----- module description
 
     def _get_module_specific_default_headers(self) -> dict[str, str]:
@@ -150,10 +166,10 @@ class DownloaderJsonApi(Downloader):
         return f'{self.ABBR}_'
 
     def _get_items_per_page(self) -> int:
-        return self.ITEMS_PER_PAGE
+        return self._items_per_page()
 
     def _get_max_search_depth(self) -> int:
-        return self.MAX_PAGES * self.ITEMS_PER_PAGE
+        return self._max_pages() * self._items_per_page()
 
     def _form_item_string_manually(self, *ignored) -> Never:
         raise NotImplementedError
@@ -186,10 +202,10 @@ class DownloaderJsonApi(Downloader):
 
     def _form_tags_search_address(self, tags: str, maxlim: int | None = None) -> str:
         self._task_tags = tags
-        return self._search_url(tags, 0, maxlim or self.ITEMS_PER_PAGE)
+        return self._search_url(tags, 0, maxlim or self._items_per_page())
 
     def _form_page_num_address(self, n: int) -> str:
-        return self._search_url(self._task_tags, n, self.ITEMS_PER_PAGE)
+        return self._search_url(self._task_tags, n, self._items_per_page())
 
     # id cursor (streaming pipeline, default sorting): used when the results are deeper than MAX_PAGES
 
@@ -197,7 +213,7 @@ class DownloaderJsonApi(Downloader):
         return bool(self._cursor_url('x', 1, False, 1))
 
     def _form_cursor_page_address(self, cursor: int | None, ascending: bool) -> str:
-        return self._cursor_url(self.cursor_base_tags, cursor, ascending, self.ITEMS_PER_PAGE)
+        return self._cursor_url(self.cursor_base_tags, cursor, ascending, self._items_per_page())
 
     def _prefer_id_cursor(self, count: int | None) -> bool:
         depth = self._get_max_search_depth()
@@ -250,12 +266,12 @@ class DownloaderJsonApi(Downloader):
             thread_exit(f'ERROR: [{self.ABBR.upper()}] {self._page_error(raw.raw)}', code=-447)
         if isinstance(count := self._count(data), int):
             return count
-        per_page = self.ITEMS_PER_PAGE
+        per_page = self._items_per_page()
         if len(posts) < per_page:
             return len(posts)
         # no count: binary search for the last non-empty page (~log2(MAX_PAGES) requests)
         trace(f'Info: [{self.ABBR.upper()}] post count is unavailable, looking for the last page...')
-        max_pages = self.MAX_PAGES if self.MAX_PAGES > 0 else 1000
+        max_pages = self._max_pages() if self._max_pages() > 0 else 1000
         lo, hi = 0, max_pages - 1
         if self._page_len(hi, tries) >= per_page:
             return max_pages * per_page
