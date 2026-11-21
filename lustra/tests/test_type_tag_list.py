@@ -3,8 +3,10 @@
 Lustra: tests of tools/type_tag_list.py (types the untyped rows of a tag list from typed lists by exact name), offline.
 - only rows without a type (or 'unknown') get one, the first reference that types a name with an assigned type wins, --types,
   --min-ref-posts, --max-count-ratio, --conflicts, escaped names, CRLF / no final newline, every other line byte for byte, the core parser loads the output
+- --retype: rows of a given type get the newer type of a same-site reference, everything else as without it
 - --evaluate: precision / recall counts per type, the >= 20 posts cut, wrong predictions
 - the CLI (in process and as a script)
+- the committed 2tags/rx_tags.json and xb_tags.json type artists (retyped 2026-11-21), their characters stay
 Run: python -m unittest lustra.tests.test_type_tag_list
 """
 #########################################
@@ -245,6 +247,43 @@ class TypingTests(_Tmp):
         self.assertEqual(text.replace('posts",', 'posts (artist)",'), self.out.read_text(encoding='utf-8'))
         self.assertEqual((2, 2), (res.rows, res.other))
 
+    def test_retype_rows_of_a_type_from_a_same_site_reference(self) -> None:
+        # a list that typed its artists 'general' and the same site's newer list: --retype general gives the general rows ('tag' is
+        # general too) the newer type when it is one of --types and another one; other typed rows, an unrecognized type, a general
+        # row the reference does not know or calls general, and a row stopped by --max-count-ratio stay; untyped rows are typed as
+        # without --retype. Changed lines differ only by their type
+        text = ('{\n"art": "50 posts (general)",\n"art_tag": "6 posts (tag)",\n"chr": "7 posts (character)",\n"gen": "9 posts (general)",\n'
+                '"meta": "4 posts (general)",\n"new": "3 posts",\n"odd": "2 posts (weird)",\n"rare": "900000 posts (general)",\n'
+                '"same": "8 posts (general)",\n"solo": "1 posts (general)",\n"unk": "5 posts (unknown)"\n}\n')
+        src = self._write('same_site.json', text)
+        ref = self._write('same_site_new.json', '{\n"art": "52 posts (artist)",\n"art_tag": "6 posts (artist)",\n'
+                                                '"chr": "7 posts (artist)",\n"gen": "9 posts (general)",\n"meta": "4 posts (metadata)",\n'
+                                                '"new": "3 posts (copyright)",\n"odd": "2 posts (artist)",\n"rare": "5 posts (artist)",\n'
+                                                '"same": "8 posts (character)",\n"unk": "5 posts (character)"\n}\n')
+        types = ('artist', 'character', 'copyright', 'metadata')
+        wanted = ttl.untyped_names(src, ('general',))
+        self.assertEqual({'art': 50, 'art_tag': 6, 'gen': 9, 'meta': 4, 'new': 3, 'rare': 900000, 'same': 8, 'solo': 1, 'unk': 5}, wanted)
+        self.assertEqual({'new': 3, 'unk': 5}, ttl.untyped_names(src))  # the default: untyped rows only
+        refs = ttl.load_references([ref], wanted, 0, types, ttl.DEFAULT_MAX_COUNT_RATIO)
+        res = ttl.type_list(src, self.out, refs.types, types, ('general',))
+        expect = text
+        for name, before, now in (('art', 'general', 'artist'), ('art_tag', 'tag', 'artist'), ('meta', 'general', 'metadata'),
+                                  ('same', 'general', 'character')):
+            expect = expect.replace(f'"{name}": "{wanted[name]:d} posts ({before})"', f'"{name}": "{wanted[name]:d} posts ({now})"')
+        expect = expect.replace('"new": "3 posts"', '"new": "3 posts (copyright)"').replace('(unknown)', '(character)')
+        self.assertEqual(expect, self.out.read_text(encoding='utf-8'))
+        self.assertEqual({('general', 'artist'): 2, ('general', 'metadata'): 1, ('general', 'character'): 1}, dict(res.retyped))
+        self.assertEqual(({'copyright': 1, 'character': 1}, 0), (dict(res.typed), res.left))
+        self.assertEqual((11, 5), (res.rows, res.typed_before))  # chr, gen, odd, rare, solo
+        lst = _parse_tag_list(self.out)
+        self.assertEqual((TagInfo(TagTypes.TAG_TYPE_ARTIST, 6), TagInfo(TagTypes.TAG_TYPE_GENERAL, 1)),
+                         (lst.info(lst.find('art_tag')), lst.info(lst.find('solo'))))
+        # without retype (the default) the general rows are kept as they are
+        res = ttl.type_list(src, self.out, refs.types, types)
+        self.assertEqual(text.replace('"new": "3 posts"', '"new": "3 posts (copyright)"').replace('(unknown)', '(character)'),
+                         self.out.read_text(encoding='utf-8'))
+        self.assertEqual(({}, 9), (dict(res.retyped), res.typed_before))
+
     def test_bom_and_escaped_values(self) -> None:
         src = self._write('bom.json', '\ufeff{\n"a": "1 posts",\n"b": "2 posts",\n"c": "3 posts"\n}\n')
         ref = self._write('esc_ref.json', '{\n"a": "5 posts (art\\u0069st)",\n"b":"5 posts (artist)",\n"c": "5 posts (character)"\n}\n')
@@ -293,8 +332,23 @@ class CliTests(_Tmp):
                           '--min-ref-posts', '6')
         self.assertIn('typed now: general 1 (total 1)', text)  # carol; meta_tag has 5 posts in the reference
 
+    def test_retype_summary(self) -> None:
+        # bob is general in the list, an artist in the first reference: retyped; carol (general there) gets the second one's artist
+        text = self._main('--list', str(self.list), '--ref', str(self.ref1), '--ref', str(self.ref2), '--out', str(self.out),
+                          '--retype', 'Tag')
+        self.assertIn('list.json: 9 rows, 1 typed already (kept), 1 retyped (general), 7 untyped', text)
+        self.assertIn('names typed per ref 4, 1', text)
+        self.assertIn('retyped: general -> artist 1 (total 1)', text)
+        self.assertEqual((7, 'artist'), self._typed()['bob'])
+        text = self._main('--list', str(self.list), '--ref', str(self.ref2), '--out', str(self.out), '--retype', 'general,character')
+        self.assertIn('retyped: none (total 0)', text)
+        self.assertNotIn('retyped', self._main('--list', str(self.list), '--ref', str(self.ref1), '--out', str(self.out)))
+        self.assertEqual((7, 'general'), self._typed()['bob'])
+
     def test_bad_arguments(self) -> None:
         for argv in (['--list', str(self.list), '--ref', str(self.ref1)],  # no --out
+                     ['--list', str(self.list), '--ref', str(self.ref1), '--out', str(self.out), '--retype', 'general,nope'],
+                     ['--evaluate', str(self.ref1), '--ref', str(self.ref2), '--retype', 'general'],
                      ['--list', str(self.list), '--ref', str(self.ref1), '--out', str(self.out), '--types', 'artist,nope'],
                      ['--list', str(self.list), '--evaluate', str(self.ref1), '--ref', str(self.ref1)],
                      ['--list', str(self.tmp / 'missing.json'), '--ref', str(self.ref1), '--out', str(self.out)],
@@ -309,6 +363,23 @@ class CliTests(_Tmp):
         self.assertEqual(0, r.returncode, r.stderr)
         self.assertIn('ref1.json: types hidden, inferred from ref2.json', r.stdout)
         self.assertIn('overall', r.stdout)
+
+
+class CommittedListsTests(TestCase):
+    def test_rule34_and_xbooru_lists_type_artists(self) -> None:
+        # 2tags/rx_tags.json and xb_tags.json typed every artist 'general'; since 2026-11-21 their general rows that the same site's
+        # newer list calls artists are artists (--types artist --retype general), nothing else changed: 'patreon_username' (metadata
+        # on Rule34 now) stays general, and 'chi-chi' (an artist on Rule34 now, a character elsewhere) is still the character that
+        # makes the third reference of the Paheal / Rule34Hentai typing dispute that name
+        expect = {'rx_tags.json': {'palcomix': 'artist', 'chi-chi': 'character', 'patreon_username': 'general', 'big_breasts': 'general'},
+                  'xb_tags.json': {'palcomix': 'artist', 'shadman': 'artist', 'midna': 'character'}}
+        for name, names in expect.items():
+            path = ROOT / '2tags' / name
+            if not path.is_file():
+                self.skipTest(f'no 2tags/{name} (a source archive without the lists)')
+            with self.subTest(name):
+                found = {n: t for n, _, t in ttl.iter_rows(path) if n in names}
+                self.assertEqual(names, found)
 
 #
 #
