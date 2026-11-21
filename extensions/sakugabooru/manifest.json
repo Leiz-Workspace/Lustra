@@ -2,7 +2,7 @@
   "id": "sakugabooru",
   "name": "Sakugabooru",
   "abbr": "sk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "apiVersion": 1,
   "kind": "downloader",
   "default": false,
@@ -14,7 +14,7 @@
   "tagList": "sk_tags.json",
   "entry": "downloader.py:DownloaderSk",
   "minSdkVersion": "1.1",
-  "description": "Sakugabooru: Moebooru JSON API: post.json",
+  "description": "Sakugabooru: Moebooru JSON API: post.json. Favorites: favorited_by:<user name> (sent as the site's vote:3:<user name>).",
   "syntax": {
     "concat": "+",
     "idSep": ":",
@@ -23,7 +23,7 @@
     "localPositiveOverflow": true,
     "metaCount": ":(?:[<>]=?|!)?[a-z\\d\\-_.,]+?",
     "sort": "order:[a-z_]+",
-    "fav": "vote:3:[^:]+?",
+    "fav": "favorited_by:[^:]+?",
     "pool": "pool:[^:]+?"
   },
   "$generator": {

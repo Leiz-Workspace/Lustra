@@ -311,7 +311,7 @@ class DownloaderEn(Downloader):
         return TAGS_CONCAT_CHAR_EN.join(taglist)
 
     def _is_custom_sort_tag(self, tag_str: str) -> bool:
-        return tag_str.startswith('order:') and tag_str not in ('order:id', 'order:id_desc')
+        return tag_str.startswith('order:') and tag_str != 'order:id_desc'  # 'order:id' is oldest first
 
     def _send_to_download(self, raw: str, item_id: str, is_video: bool) -> None:
         address, fmt = self._get_video_address(raw) if is_video else self._get_image_address(raw)

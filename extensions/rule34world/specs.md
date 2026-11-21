@@ -62,6 +62,16 @@ Not used: `api/v2/post/search/root` (the site's search API) is POST only; unknow
   `/five_nights_at_freddy's/` list different posts, the first one the newest; the same for `&#12615;&#12615;` / `ㅇㅇ`). The
   core accepts these names and the downloader keeps `&` in the path like the site's router. Do not unescape them in `tags.py`.
 
+## No id searches (1.1.0, 2026-11-21)
+- Rule34.world has no id (or date) filter in its search urls, so an `id:` query is searched as a tag. Lustra appends `id:>N` to a
+  scheduled re-run of a saved query ("Chỉ post mới từ bây giờ"), and "Tải đã chọn" / "Theo tên file" search `id:` too: on this
+  module they gave wrong results. 1.1.0 declares `"search": {"idSearch": false}` (Lustra 2.0.11 manifest key): the app then
+  never sends an `id:` query here (no "only newer posts" schedule; "Tải đã chọn" and "Theo tên file" are disabled).
+- No `metaNames`: the site has no metatags. Search by artist / character / series ("Tìm theo" in the app) comes from the tag
+  list's types (Lustra 2.0.11), nothing to declare.
+- Lustra 2.0.7 to 2.0.10 refuse this manifest ("unknown field(s): search") and keep 1.0.0: publish 1.1.0 in the official catalog
+  only after 2.0.11 is released (operations.md, the catalog gate for `search`).
+
 ## Not supported
 - Comments, favorites, pools, parent / child, metatags, wildcards, sort orders, low-res samples (`picsmall` variant id unknown).
 - Results deeper than 300 pages (9000 posts) per search.

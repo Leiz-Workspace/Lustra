@@ -10,6 +10,13 @@
 - https://tbib.org/tos.php: "You will not use any automated process to retrieve or index any portion of the site or site contents, with the exception of public search engines." No API exemption. Personal use only.
 - R3: forbidden. **Owner override, 2026-11-19:** asked "bạn cho phép vượt R3 với site nào?", the owner chose TBIB (with Gelbooru and Realbooru). Downloads use the DAPI only (open to guests): favorites / pools (html pages) are refused, 1 request per second. The tag update reads one html page type, the tag list (below), because the DAPI tag index cannot give a usable list.
 
+## 'or' groups (1.0.1, 2026-11-21)
+- The site's cheat sheet: `~tag1 ~tag2` "Search for posts that have tag1 or tag2. (Currently does not work)". 1.0.0 sent an 'or'
+  group as `( a ~ b )` (the `DownloaderGelbooru` default); 1.0.1 splits it into one search per alternative, merged by the core.
+- Favorites / pools stay refused: html pages only, and the owner's override covers the DAPI only (`syntax.fav` / `syntax.pool`
+  are `""`, so the parser refuses `favorited_by:` / `pool:` and the app never offers them).
+- Works on Lustra 2.0.7 and later (no new manifest key, SDK 1.1 names only).
+
 ## Evidence
 - `https://tbib.org/index.php?page=dapi&s=post&q=index&limit=1` → 200 text/xml
 

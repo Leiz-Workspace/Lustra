@@ -14,8 +14,8 @@ from lustra.sdk import DownloaderGelbooru, ModuleCaps, re_tags_exclude_rx, re_ta
 
 __all__ = ('DownloaderTb',)
 
-SITENAME = "https://tbib.org/"
-MODULE_ABBR = "tb"
+SITENAME = 'https://tbib.org/'
+MODULE_ABBR = 'tb'
 FILE_NAME_PREFIX = f'{MODULE_ABBR}_'
 ITEMS_PER_PAGE = 100  # dapi 'limit' (gelbooru 0.2 sites accept 100 at least)
 MAX_SEARCH_DEPTH = 200000 + ITEMS_PER_PAGE - 1
@@ -72,6 +72,11 @@ class DownloaderTb(DownloaderGelbooru):
 
     def _extract_comments(self, item_id: str) -> None:
         return  # comments are not collected (capability not declared)
+
+    def _split_or_group_into_tasks_always(self) -> bool:
+        # the site's cheat sheet: '~tag1 ~tag2 ... (Currently does not work)': one search per alternative (results merged by the
+        # core) instead of the '( a ~ b )' DownloaderGelbooru sends
+        return True
 
     def _extract_favorite_user(self, fav_user_tags: list[re.Match | None]) -> None:
         if fav_user_tags:  # favorites are html pages, not the API
