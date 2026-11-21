@@ -27,7 +27,9 @@ Names: the link text, html-unescaped once ('Five_Nights_at_Freddy&#039;s' -> "fi
 '_'. The site keeps the case its uploaders typed ('Porkyman') but searches without case ('porkyman' finds the same 493,734 posts);
 Lustra's tag lookups, download index and lists are lowercase (the shipped rp_tags.json too), and a merge matches names exactly, so a
 name in mixed case would be a second tag. Two names that differ only by case keep the first, most used one (none on 2026-11-20).
-The site has no tag types: every tag is 'unknown' (the shipped list names no type either; a merge keeps a line without one as it is).
+The site has no tag types (none on its post pages, tag lists, danbooru API or autocomplete: docs/dev_log.md 7bf): every tag read is
+'unknown'. The shipped list has artist / character / copyright types inferred by name since 1.0.4 (tools/type_tag_list.py); a merge
+keeps the type of the list it goes into, a new tag is 'unknown'.
 """
 #########################################
 #

@@ -289,6 +289,21 @@ def m_tags_kinds(p: dict) -> dict:
     return {'module': module, 'hasList': bool(counts or TagsDB.type_counts(module)), 'types': types}
 
 
+def m_tags_types(p: dict) -> dict:
+    """{module} -> {module, hasList, types: {general: n, artist: n, ..., unknown: n}}: rows of every tag type in the module's list in
+    use (counted once per loaded list), only the types it has, by their tags.browse names ('tag' rows are general, rows without a type
+    are 'unknown'). Every row counts, '<token><value>' ones included: the A-Z browser lists them. The app enables its type filters
+    (tags.browse 'types') by these. Same locking as tags.autocomplete"""
+    module = str(p.get('module', ''))
+    if not re_abbr.fullmatch(module):
+        raise RpcError(-32602, f'invalid module \'{module}\'')
+    types: dict[str, int] = {}
+    for tag_type, n in TagsDB.type_counts(module).items():
+        name = str(TAG_NAMES_BY_TYPE.get(tag_type, 'unknown'))
+        types[name] = types.get(name, 0) + n
+    return {'module': module, 'hasList': bool(types), 'types': types}
+
+
 def m_tags_browse(p: dict) -> dict:
     """Same locking as tags.autocomplete. Popularity sorted / filtered results are cached by TagsDB, paging reuses them"""
     module = p.get('module', 'rx')
@@ -936,6 +951,7 @@ METHODS: dict[str, Callable[[dict], Any]] = {
     'tags.resolve': m_tags_resolve,
     'tags.fuzzy': m_tags_fuzzy,
     'tags.kinds': m_tags_kinds,
+    'tags.types': m_tags_types,
     'tags.status': m_tags_status,
     'tags.sources': m_tags_sources,
     'tags.learn': m_tags_learn,
