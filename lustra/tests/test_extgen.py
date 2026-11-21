@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zipfile
 from types import SimpleNamespace
 from unittest import TestCase, mock
 from urllib import parse as url_parse
@@ -1165,6 +1166,143 @@ class WorkerTests(TestCase):
         self.assertEqual((2, 'error'), (code, events[-1]['status']))
         code, events, _ = self._run({'cmd': 'nope'})
         self.assertEqual(2, code)
+
+
+class SearchKindTemplateTests(TestCase):
+    """Templates and checks for search kinds (Lustra 2.0.11): favorites typed as 'favorited_by:' and sent in each site's own
+    syntax, no favorites / pool / sort syntax for engines without a template, the moebooru tag type note, each declared kind's
+    route checked against the robots.txt recorded by the live test run"""
+
+    FAV = {'e621_json': ('fav:', '+'), 'moebooru_json': ('vote:3:', '+'), 'philomena_json': ('faved_by:', ','),
+           'szurubooru_json': ('fav:', '+')}
+
+    def test_json_templates_send_favorites_in_the_site_syntax(self) -> None:
+        import importlib.util
+
+        from lustra.extgen.templates import SYNTAX_BY_ENGINE
+        with tempfile.TemporaryDirectory() as tmp:
+            for engine, (token, sep) in self.FAV.items():
+                with self.subTest(engine=engine):
+                    self.assertTrue(re.fullmatch(SYNTAX_BY_ENGINE[engine]['fav'], 'favorited_by:some_user'),
+                                    'the core takes favorites as favorited_by: (lustra/tags_parser.py), never the site token')
+                    src = render_downloader(engine, ext_id='example', abbr='zq9', site='https://example.com/')
+                    self.assertEqual([], errors(check_source(src, allowed_hosts={'example.com'})))
+                    path = pathlib.Path(tmp) / f'{engine}.py'
+                    path.write_text(src, encoding='utf-8')
+                    spec = importlib.util.spec_from_file_location(f'lustra_test_{engine}', path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sent = module.DownloaderZq9._query_tags(SimpleNamespace(TAGS_CONCAT='+'),
+                                                            'favorited_by:some_user+-favorited_by:other+tag_a')
+                    space = ' ' if engine == 'philomena_json' else '_'
+                    self.assertEqual(sep.join((f'{token}some{space}user', f'-{token}other', f'tag{space}a')), sent)
+
+    def test_moebooru_favorites_are_parsed_and_sent(self) -> None:
+        """the old 'vote:3:' fav regex refused 'favorited_by:' and let 'vote:3:x' through as a plain tag (moved to local filters)"""
+        from multiprocessing.dummy import current_process
+
+        from lustra.cmdargs import prepare_arglist
+        from lustra.downloaders import _make_downloader
+        from lustra.extensions import Extensions
+        from lustra.module import ProcModule
+        from lustra.tags_parser import reset_last_tags
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            draft = create_draft(root / 'drafts', survey(SITE, fake_fetcher(FakeJsonSite('moebooru_json'))), ext_id='favmoe',
+                                 abbr='zm7', engine='moebooru_json')
+            with mock.patch.object(Extensions, 'user_dir', return_value=root / 'user'), \
+                    mock.patch.object(Extensions, 'catalog_dir', return_value=root / 'catalog'):
+                try:
+                    Extensions.install_from_dir(draft)
+                    pid = ProcModule.PROC_MODULES_BY_NAME['zm7']
+                    ProcModule.set(pid)
+                    reset_last_tags()
+                    dwn = _make_downloader(pid)
+                    me = current_process()
+                    me.killed = False
+                    dwn.reset_root_thread(me)
+                    dwn._parse_args(prepare_arglist(['-module', 'zm7', '--', 'favorited_by:some_user', 'tag_a']), False)
+                    self.assertEqual('some_user', dwn.favorites_search_user)
+                    url = dwn._form_tags_search_address(dwn._consume_custom_module_tags(dwn.tags_str_arr[0]))
+                    self.assertIn('vote:3:some_user', url)
+                    self.assertNotIn('favorited_by', url)
+                finally:
+                    Extensions.uninstall('favmoe')
+                    reset_last_tags()
+                    ProcModule.set(ProcModule.RX)
+
+    def test_engines_without_a_template_get_no_fav_pool_or_sort(self) -> None:
+        from lustra.extgen.templates import SHIMMIE_SYNTAX, SYNTAX_BY_ENGINE, TEMPLATE_ENGINES, make_manifest
+        from lustra.modspec import TagSyntax
+
+        def syntax(engine: str) -> dict:
+            return make_manifest(ext_id='example', abbr='zq9', name='Ex', site='https://example.com/', engine=engine,
+                                 media=['image'])['syntax']
+        custom = syntax('custom')
+        self.assertEqual(('', '', ''), (custom['fav'], custom['pool'], custom['sort']))
+        parsed = TagSyntax.from_dict(custom)
+        self.assertEqual((0, False), (parsed.maxTags, parsed.localPositiveOverflow), 'limits are the site\'s, set by its author')
+        self.assertEqual(SHIMMIE_SYNTAX, syntax('shimmie'), 'shimmie without its api: still the shimmie syntax')
+        for engine in TEMPLATE_ENGINES:
+            self.assertEqual(SYNTAX_BY_ENGINE[engine], syntax(engine), engine)
+
+    def test_moebooru_drafts_note_that_tag_type_5_is_per_site(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            moe = create_draft(root / 'a', survey(SITE, fake_fetcher(FakeJsonSite('moebooru_json'))), ext_id='moenote', abbr='zm8',
+                               engine='moebooru_json')
+            self.assertIn('Tag type 5 is not the same on every Moebooru site', (moe / 'specs.md').read_text(encoding='utf-8'))
+            gel = create_draft(root / 'b', survey(SITE, fake_fetcher()), ext_id='gelnote', abbr='zg8', engine='gelbooru_dapi')
+            self.assertNotIn('Tag type 5', (gel / 'specs.md').read_text(encoding='utf-8'))
+
+    def test_search_kinds_are_checked_against_the_recorded_robots_txt(self) -> None:
+        from lustra.extgen.sandbox import record
+        search = {'kinds': [{'id': 'uploader', 'token': 'user:', 'value': '[a-z0-9_]+', 'input': 'text', 'example': 'user:some_user'},
+                            {'id': 'pool', 'use': 'pool', 'input': 'id'}]}
+        deny = 'User-agent: *\nDisallow: /index.php?*tags=user:*\n'
+        allow = 'User-agent: *\nDisallow: /index.php?*tags=source:*\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+
+            def draft_for(robots: str, kinds: bool = True):
+                def route(u: str):
+                    return fake_gelbooru(u, robots)
+                d = create_draft(root / str(len(list(root.iterdir()))), survey(SITE, fake_fetcher(route)), ext_id='kindsdraft',
+                                 abbr='zk7', engine='gelbooru_dapi')
+                if kinds:
+                    m = json.loads((d / 'manifest.json').read_text(encoding='utf-8'))
+                    (d / 'manifest.json').write_text(json.dumps({**m, 'search': search}), encoding='utf-8')
+                return d, fake_fetcher(route)
+
+            d, fetcher = draft_for(deny)
+            res = record(d, query=['scenery'], limit=1, fetcher=fetcher)
+            self.assertFalse(res['ok'])
+            self.assertEqual(['search:uploader'], res['failed'])
+            detail = next(c['detail'] for c in res['checks'] if c['id'] == 'search:uploader')
+            self.assertIn('robots.txt does not allow the route of \'user:some_user\'', detail)
+            self.assertIn('tags=user:some_user', detail)
+            self.assertFalse((d / 'robots.txt').exists())
+            self.assertFalse((d / 'tests' / 'expected.json').exists(), 'nothing recorded')
+
+            d, fetcher = draft_for(allow)
+            self.assertIsNone(fetcher.robots_txt(SITE), 'not read yet (and no request made for it)')
+            res = record(d, query=['scenery'], limit=1, fetcher=fetcher)
+            self.assertTrue(res['ok'], res['checks'])
+            checks = {c['id']: c for c in res['checks']}
+            self.assertTrue(checks['search:uploader']['ok'] and checks['search:pool']['ok'], checks)
+            self.assertIn('page=pool&s=show&id=12345', checks['search:pool']['detail'], 'the sample value of an id kind')
+            self.assertEqual(allow, (d / 'robots.txt').read_text(encoding='utf-8'), 'saved next to the manifest (SDK 1.2)')
+            self.assertTrue(check_draft(d)['ok'])
+            with zipfile.ZipFile(pack(d, root / 'k.zip')['path']) as z:
+                self.assertIn('kindsdraft/robots.txt', z.namelist())
+            (d / 'robots.txt').unlink()
+            self.assertEqual(['search:robots'], check_draft(d)['failed'], 'kinds are declared after the robots.txt check')
+
+            d, fetcher = draft_for('', kinds=False)  # no robots.txt (404): saved as a comment, no restrictions
+            self.assertTrue(record(d, query=['scenery'], limit=1, fetcher=fetcher)['ok'])
+            saved = (d / 'robots.txt').read_text(encoding='utf-8')
+            self.assertTrue(saved.startswith('#') and 'HTTP 404' in saved, saved)
+            self.assertTrue(RobotsRules.parse(saved, 'Lustra').allows(f'{SITE}index.php?page=dapi&tags=user:x'))
 
 #
 #

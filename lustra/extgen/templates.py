@@ -42,25 +42,39 @@ E621_SYNTAX = {
     'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.]+?', 'sort': 'order:[^:]+(?:_(?:a|de)sc)?', 'fav': 'favorited_by:[^:]+?',
     'pool': '(?:pool|set):[^:]+?',
 }
-MOEBOORU_SYNTAX = {
+MOEBOORU_SYNTAX = {  # favorites: 'favorited_by:<name>', the site's 'vote:3:<name>' (_query_tags)
     'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'maxTags': 6, 'localPositiveOverflow': True,
-    'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.,]+?', 'sort': 'order:[a-z_]+', 'fav': 'vote:3:[^:]+?', 'pool': 'pool:[^:]+?',
+    'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.,]+?', 'sort': 'order:[a-z_]+', 'fav': 'favorited_by:[^:]+?', 'pool': 'pool:[^:]+?',
 }
-PHILOMENA_SYNTAX = {  # tags joined with ',' and '_' sent as ' ' by the downloader (_query_tags)
+PHILOMENA_SYNTAX = {  # tags joined with ',' and '_' sent as ' ' by the downloader (_query_tags); favorites: the site's 'faved_by:'
     'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'metaCount': '(?:\\.(?:gt|gte|lt|lte))?:[a-z\\d\\-_.]+?',
-    'sort': '', 'fav': 'faved_by:[^:]+?', 'pool': '',
+    'sort': '', 'fav': 'favorited_by:[^:]+?', 'pool': '',
 }
-SZURUBOORU_SYNTAX = {
+SZURUBOORU_SYNTAX = {  # favorites: the site's 'fav:<name>' (_query_tags)
     'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'metaCount': ':[a-z\\d\\-_.,]+?', 'sort': 'sort:[a-z\\-_]+',
-    'fav': 'fav:[^:]+?', 'pool': 'pool:\\d+?',
+    'fav': 'favorited_by:[^:]+?', 'pool': 'pool:\\d+?',
 }
 SHIMMIE_SYNTAX = {
     'concat': ' ', 'idSep': '=', 'maxTagsStringLen': 1000, 'metaCount': '(?:[<>]=?|=)[a-z\\d\\-_]+?',
     'sort': 'order=(?:id|score)_(?:a|de)sc', 'fav': 'favorited_by=[^:=]+?', 'pool': '',
 }
+CUSTOM_SYNTAX = {
+    'concat': '+', 'idSep': ':', 'maxTagsStringLen': 3300, 'metaCount': ':(?:[<>]=?|!)?[a-z\\d\\-_.,]+?',
+    'sort': '', 'fav': '', 'pool': '',
+}
+'''an engine without a template ('custom'): no favorites, pool or sort syntax until the author sets the site's own (and its
+_query_tags) from what the site really answers. A fav / pool / sort regex the downloader does not handle is worse than none:
+the query is accepted, then sent in a form the site does not know'''
 SYNTAX_BY_ENGINE = {'gelbooru_dapi': GELBOORU_SYNTAX, 'danbooru_json': DANBOORU_SYNTAX, 'e621_json': E621_SYNTAX,
                     'moebooru_json': MOEBOORU_SYNTAX, 'philomena_json': PHILOMENA_SYNTAX, 'szurubooru_json': SZURUBOORU_SYNTAX,
-                    'shimmie_api': SHIMMIE_SYNTAX}
+                    'shimmie_api': SHIMMIE_SYNTAX, 'shimmie': SHIMMIE_SYNTAX}
+ENGINE_NOTES = {
+    'moebooru_json': ('Tag type 5 is not the same on every Moebooru site: an artist group ("circle") on some, "meta" on others. '
+                      'The engine\'s tag list (lustra/tags_updater.py MOEBOORU_TYPES) reads 5 as artist: check the legend of the '
+                      'site\'s tag page; if 5 is not an artist group there, give the extension its own tags.py (manifest tagUpdate, '
+                      'SDK 1.1) with the site\'s map.'),
+}
+'''notes written into specs.md for drafts of an engine (scaffold.create_draft)'''
 TEMPLATE_ENGINES = ('gelbooru_dapi', 'danbooru_json', 'e621_json', 'moebooru_json', 'philomena_json', 'szurubooru_json', 'shimmie_api')
 
 
@@ -137,7 +151,7 @@ def make_manifest(*, ext_id: str, abbr: str, name: str, site: str, engine: str, 
         'site': site, 'media': [x for x in media if x in ('image', 'video', 'audio')] or ['image', 'video'],
         **({'tagList': f'{abbr}_tags.json'} if engine in ENGINE_TAG_SOURCES else {}),
         'entry': f'downloader.py:{class_name(abbr)}', 'minSdkVersion': SDK_VERSION, 'description': description[:300],
-        'syntax': syntax if syntax is not None else SYNTAX_BY_ENGINE.get(engine, DANBOORU_SYNTAX),
+        'syntax': syntax if syntax is not None else SYNTAX_BY_ENGINE.get(engine, CUSTOM_SYNTAX),
         '$generator': {'tool': 'lustra.extgen', 'toolVersion': APP_VERSION, 'engine': engine, 'sourceUrl': site,
                        'createdAt': datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ'), **(generator or {})},
     }
@@ -270,13 +284,13 @@ class {cls}(DownloaderDb):
 _JSON = _HEADER + '''
 {imports}from typing import final
 
-from lustra.sdk import DownloaderJsonApi, JsonPost, ModuleCaps
+from lustra.sdk import DownloaderJsonApi, JsonPost, ModuleCaps{sdk_names}
 
 __all__ = ('{cls}',)
 
 SITENAME = {site_lit}
 MODULE_ABBR = {abbr_lit}
-
+{helpers}
 
 @final
 class {cls}(DownloaderJsonApi):
@@ -295,10 +309,26 @@ class {cls}(DownloaderJsonApi):
 #########################################
 '''
 
+_FAV_HELPER = '''
+
+def _site_fav(tag: str, token: str, space: str = '_') -> str:
+    """'favorited_by:<name>' (the core's favorites syntax, manifest syntax.fav; a leading '-' kept) as the site's '<token><name>',
+    '' for any other tag"""
+    neg = '-' if tag.startswith('-') else ''
+    m = re_favorited_by_tag.fullmatch(tag[len(neg):])
+    return f'{neg}{token}{m.group(1).replace("_", space)}' if m else ''
+'''
+'''module level helper of the json templates whose site names favorites its own way (inserted as is, not formatted)'''
+_FAV = {'sdk_names': ', re_favorited_by_tag', 'helpers': _FAV_HELPER}
+
 _JSON_ENGINES = {
     'e621_json': {
         'doc': 'e621 / e926 compatible API (posts.json -> {{"posts": [...]}})', 'per_page': 320, 'max_pages': 750, 'interval': 1.0,
-        'imports': '', 'body': '''
+        'imports': '', **_FAV, 'body': '''
+    def _query_tags(self, tags: str) -> str:
+        # favorites: the core's 'favorited_by:<name>' (manifest syntax.fav) is the site's 'fav:<name>'
+        return self.TAGS_CONCAT.join(_site_fav(t, 'fav:') or t for t in tags.split(self.TAGS_CONCAT))
+
     def _search_url(self, tags: str, page: int, limit: int) -> str:
         return f'{{SITENAME}}posts.json?tags={{tags}}&limit={{limit}}&page={{page + 1}}'
 
@@ -328,7 +358,11 @@ _JSON_ENGINES = {
 '''},
     'moebooru_json': {
         'doc': 'Moebooru API (post.json, count from post.xml)', 'per_page': 100, 'max_pages': 1000, 'interval': 1.0,
-        'imports': 'import re\n', 'body': '''
+        'imports': 'import re\n', **_FAV, 'body': '''
+    def _query_tags(self, tags: str) -> str:
+        # favorites: the core's 'favorited_by:<name>' (manifest syntax.fav) is the site's 'vote:3:<name>' (3: favorite)
+        return self.TAGS_CONCAT.join(_site_fav(t, 'vote:3:') or t for t in tags.split(self.TAGS_CONCAT))
+
     def _search_url(self, tags: str, page: int, limit: int) -> str:
         return f'{{SITENAME}}post.json?tags={{tags}}&limit={{limit}}&page={{page + 1}}'
 
@@ -356,9 +390,11 @@ _JSON_ENGINES = {
 '''},
     'philomena_json': {
         'doc': 'Philomena API (api/v1/json/search/images)', 'per_page': 50, 'max_pages': 1000, 'interval': 1.0,
-        'imports': '', 'body': '''
+        'imports': '', **_FAV, 'body': '''
     def _query_tags(self, tags: str) -> str:
-        return tags.replace('+', ',').replace('_', ' ')  # philomena: tags joined with commas, spaces in tag names
+        # philomena: tags joined with commas, spaces in tag names. Favorites: the core's 'favorited_by:<name>' (manifest
+        # syntax.fav) is the site's 'faved_by:<name>' (a field name: its own '_' stays)
+        return ','.join(_site_fav(t, 'faved_by:', ' ') or t.replace('_', ' ') for t in tags.split('+'))
 
     def _search_url(self, tags: str, page: int, limit: int) -> str:
         return f'{{SITENAME}}api/v1/json/search/images?q={{tags or "*"}}&per_page={{limit}}&page={{page + 1}}'
@@ -387,7 +423,11 @@ _JSON_ENGINES = {
 '''},
     'szurubooru_json': {
         'doc': 'Szurubooru API (api/posts/, Accept: application/json)', 'per_page': 100, 'max_pages': 1000, 'interval': 1.0,
-        'imports': '', 'body': '''
+        'imports': '', **_FAV, 'body': '''
+    def _query_tags(self, tags: str) -> str:
+        # favorites: the core's 'favorited_by:<name>' (manifest syntax.fav) is the site's 'fav:<name>'
+        return self.TAGS_CONCAT.join(_site_fav(t, 'fav:') or t for t in tags.split(self.TAGS_CONCAT))
+
     def _search_url(self, tags: str, page: int, limit: int) -> str:
         return f'{{SITENAME}}api/posts/?query={{tags}}&offset={{page * limit}}&limit={{limit}}'
 
@@ -513,7 +553,8 @@ def render_downloader(engine: str, *, ext_id: str, abbr: str, site: str, api_key
     if engine in _JSON_ENGINES:
         e = _JSON_ENGINES[engine]
         values.update(doc=e['doc'], per_page=e['per_page'], max_pages=e['max_pages'], interval=float(max(e['interval'], interval)),
-                      imports=e['imports'], body=e['body'].format(**values))
+                      imports=e['imports'], sdk_names=e.get('sdk_names', ''), helpers=e.get('helpers', ''),
+                      body=e['body'].format(**values))
         return _JSON.format(**values)
     return (_GELBOORU if engine == 'gelbooru_dapi' else _DANBOORU).format(**values)
 

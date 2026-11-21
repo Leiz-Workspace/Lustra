@@ -15,7 +15,15 @@ from lustra.tags_updater import ENGINE_TAG_SOURCES
 
 from .engines import ENGINES, detect_engine
 from .fetch import FetchPolicyError, SafeFetcher, check_denied, host_of, normalize_site
-from .templates import TEMPLATE_ENGINES, existing_extensions, make_manifest, render_downloader, suggest_names, validate_names
+from .templates import (
+    ENGINE_NOTES,
+    TEMPLATE_ENGINES,
+    existing_extensions,
+    make_manifest,
+    render_downloader,
+    suggest_names,
+    validate_names,
+)
 
 __all__ = ('create_draft', 'fetcher_for', 'survey')
 
@@ -38,6 +46,7 @@ SPECS_TEMPLATE = '''# {name} ({abbr}) — extension specs
 - [ ] no login, cookie or challenge bypass; only public data (or the user's own API key)
 - [ ] request interval is polite (>= 0.5 s for an API, more if the site asks)
 - [ ] file urls come from the site's own fields (no urls built for posts the site hides)
+- [ ] search kinds (manifest 'search', Lustra 2.0.11) only after the robots.txt / terms check of each kind's route (`search:<id>`)
 - [ ] test run (`python -m lustra.extgen check <folder>`) passes
 '''
 
@@ -87,7 +96,7 @@ def create_draft(base_dir: pathlib.Path, survey_result: dict, *, ext_id: str = '
         (draft / 'downloader.py').write_text(render_downloader(engine, ext_id=ext_id, abbr=abbr, site=site, api_key=api_key),
                                              encoding='utf-8')
     evidence = '\n'.join(f'- `{e["url"]}` → {e["status"]} {e["type"]}' for e in eng.get('evidence', [])) or '- none'
-    notes = '\n'.join(f'- {n}' for n in eng.get('notes', [])) or '- none'
+    notes = '\n'.join(f'- {n}' for n in [*eng.get('notes', []), *([ENGINE_NOTES[engine]] if engine in ENGINE_NOTES else [])]) or '- none'
     robots = survey_result.get('robots', {})
     (draft / 'specs.md').write_text(SPECS_TEMPLATE.format(
         name=name, abbr=abbr, site=site, engine=engine, engine_desc=ENGINES[engine]['description'], confidence=eng['confidence'],
