@@ -8,14 +8,28 @@ without a type (or '(unknown)') get one; rows that have a type, every posts coun
 stay as they are. The first --ref that gives a name one of the assigned types wins: a reference row of another type (or untyped, or
 under --min-ref-posts, or used --max-count-ratio times less than the list's row) gives no answer, so a later reference may still
 type that name.
+--retype TYPES: rows of these types may get another type of --types too, the rest stays as above. Only for a newer list of the
+same site as the reference (another site's type would replace the site's own): a list whose source typed its artists 'general'.
 Usage:
   python tools/type_tag_list.py --list <untyped list> --ref <typed list> [--ref <second> ...] --out <file>
                                 [--types artist,character,copyright] [--min-ref-posts N] [--max-count-ratio R]
-                                [--conflicts first|skip]
+                                [--conflicts first|skip] [--retype general]
   python tools/type_tag_list.py --evaluate <typed list> --ref <typed list> [...] [--types ...] [--min-ref-posts N]
                                 [--max-count-ratio R]
     hides the types of that list, infers them from the references and prints precision / recall per type (all rows, >= 20 posts)
+  python tools/type_tag_list.py --list 2tags/rx_tags.json --ref <newer Rule34 list, artist types> --out 2tags/rx_tags.json
+                                --types artist --retype general
+    how 2tags/rx_tags.json and xb_tags.json got their artist types on 2026-11-21, each with the same site's list the tag updater
+    wrote as the only --ref: 186,454 and 53,988 general rows became artists; posts, order and every other line stayed (putting
+    'general' back gives the old files). Artists only: the same lists would also turn general rows into characters, series or
+    metadata (5,753 on Rule34, 217 on Xbooru: 'girlfriend' a series, 'side_view' metadata; e621 and Xbooru disagree for most of
+    them), and they call 1,796 of the old Rule34 characters artists ('night_fury', 'chi-chi'; e621 calls 76% of those it knows
+    characters): rows typed character / copyright / metadata are kept, as --retype general only retypes general rows.
 
+The measurements below were made before that, with the committed Rule34 and Xbooru lists typing their artists 'general'. With the
+retyped 2tags/rx_tags.json in place of the old one (then db), >= 20 posts: Xbooru artists 97.4/42.0 -> 95.2/87.6, overall
+96.7/69.8 -> 96.2/83.9; Hypnohub artists 97.1/20.2 -> 98.1/50.8, overall 97.5/51.2 -> 97.7/61.0. As the third reference of the 7bf
+recipe (--conflicts skip, below) either file gives byte for byte the same rp_tags.json and rn_tags.json.
 Measured 2026-11-21 (--evaluate, --ref 2tags/rx_tags.json --ref 2tags/db_tags.json, default types): precision / recall in %, all
 rows | rows with >= 20 posts. Most low count misses are the evaluated site's own gaps (a rarely used tag keeps the default 'general'
 there: tenshinhan, ushiwakamaru_(swimsuit_assassin)_(fate) on Xbooru), so the >= 20 posts column is the better estimate.
@@ -25,14 +39,14 @@ there: tenshinhan, ushiwakamaru_(swimsuit_assassin)_(fate) on Xbooru), so the >=
   Rule34.world            100/41.6   99.2/97.5  99.3/97.9  99.4/71.0  | 100/42.1   99.2/98.9  99.3/98.8  99.4/71.8
   Hypnohub                98.3/24.5  96.7/47.3  94.0/61.5  96.8/38.0  | 97.1/20.2  98.4/63.5  95.4/73.4  97.5/51.2
   Zerochan (>= 20 only)   97.2/41.1  93.9/69.1  85.0/61.2  93.1/57.9  |
-  2tags/xb_tags.json gives the same character / copyright figures (96.9/84.9, 96.1/77.0 >= 20) but types its artists 'general', as
-  2tags/rx_tags.json does. TBIB 53.8/87.6 and Safebooru 30.8/69.7 (58.2/85.9 >= 20) type most of their artists, characters and series
+  2tags/xb_tags.json gave the same character / copyright figures (96.9/84.9, 96.1/77.0 >= 20) but typed its artists 'general' then,
+  as 2tags/rx_tags.json did. TBIB 53.8/87.6 and Safebooru 30.8/69.7 (58.2/85.9 >= 20) type most of their artists, characters and series
   'general' (blue_archive, hololive on TBIB, mochi_au_lait on Safebooru), Realbooru (photos) shares few names: 62.0/10.7 (86.6/18.5).
 Decisions from these numbers:
 - default types artist, character, copyright. 'general' is wrong wherever the first reference calls its artists 'general' (the
-  committed Rule34 list: 10.7% precise on Rule34.xyz, 12.3% Rule34.world, 13.6% Hypnohub, 62.6% Xbooru); with a Rule34 list that has
+  committed Rule34 list then: 10.7% precise on Rule34.xyz, 12.3% Rule34.world, 13.6% Hypnohub, 62.6% Xbooru); with a Rule34 list that has
   artist types it is 86-99% (Hypnohub 44%), --types adds it then. 'metadata' is 5-65% precise everywhere: never by default.
-- a second reference helps: Danbooru after Rule34 brings the artists the committed Rule34 list lacks, overall >= 20 posts recall
+- a second reference helps: Danbooru after Rule34 brings the artists the committed Rule34 list lacked, overall >= 20 posts recall
   55.1 -> 69.8 (Xbooru), 48.4 -> 68.2 (Rule34.xyz), 43.4 -> 51.2 (Hypnohub), 34.2 -> 57.9 (Zerochan) for at most 0.2 points of
   precision. Rule34 first: Danbooru first is 0-0.3 points less precise.
 - a reference row of a type not assigned gives no answer: if the Rule34 'general' of an artist kept Danbooru out, Xbooru artist
@@ -165,12 +179,14 @@ def load_references(paths: Iterable[pathlib.Path], wanted: Mapping[str, int] | s
     return References(result, won, len(disputed))
 
 
-def untyped_names(path: pathlib.Path) -> dict[str, int]:
-    """{name: posts} of the rows of a list that have no type (or 'unknown'), the last line of a name counts"""
+def untyped_names(path: pathlib.Path, retype: Iterable[str] = ()) -> dict[str, int]:
+    """{name: posts} of the rows of a list that have no type (or 'unknown'), or a type of retype (canonical names: 'tag' is
+    'general'), the last line of a name counts"""
+    again = frozenset(retype)
     names: dict[str, int] = {}
     with open(path, 'rb') as f:
         for raw in f:
-            if (m := re_row.fullmatch(raw)) and m['type'] in _UNTYPED:
+            if (m := re_row.fullmatch(raw)) and (m['type'] in _UNTYPED or _CANON_B.get(m['type']) in again):
                 try:
                     names[_name(m['key'])] = int(m['posts'])
                 except ValueError:
@@ -182,21 +198,28 @@ class TypingResult(NamedTuple):
     rows: int
     '''tag lines'''
     typed_before: int
-    '''tag lines that had a type (kept as they are)'''
+    '''tag lines that had a type (kept as they are; the retyped ones are not counted here)'''
     typed: Counter
     '''{type: lines typed now}'''
     left: int
     '''untyped lines that stay untyped'''
     other: int
     '''lines that are not tag lines (braces and blank lines not counted), kept as they are'''
+    retyped: Counter
+    '''{(type before, type now): lines of a retype type given another type}'''
 
 
-def type_list(src: pathlib.Path, out: pathlib.Path, refs: dict[str, str], types: Iterable[str]) -> TypingResult:
+def type_list(src: pathlib.Path, out: pathlib.Path, refs: dict[str, str], types: Iterable[str],
+              retype: Iterable[str] = ()) -> TypingResult:
     """Copies src to out (atomic replace), giving the untyped rows whose name refs types (one of types) that type.
+    retype: rows of these types (canonical names) get the type refs gives them too when it is one of types and another one; meant
+    for a reference of the same site only (its newer list), as another site's type would replace the site's own.
     Every other line is copied byte for byte; a typed line differs only by ' (type)' after its posts count"""
     allowed = frozenset(types)
+    again = frozenset(retype)
     rows = typed_before = left = other = 0
     typed: Counter = Counter()
+    retyped: Counter = Counter()
     tmp = out.with_name(f'.{out.name}.{os.getpid():d}.tmp')
     try:
         with open(src, 'rb') as fin, open(tmp, 'wb') as fout:
@@ -207,7 +230,8 @@ def type_list(src: pathlib.Path, out: pathlib.Path, refs: dict[str, str], types:
                     fout.write(raw)
                     continue
                 rows += 1
-                if m['type'] not in _UNTYPED:
+                before = None if m['type'] in _UNTYPED else _CANON_B.get(m['type'])
+                if m['type'] not in _UNTYPED and before not in again:
                     typed_before += 1
                     fout.write(raw)
                     continue
@@ -215,18 +239,25 @@ def type_list(src: pathlib.Path, out: pathlib.Path, refs: dict[str, str], types:
                     ttype = refs.get(_name(m['key']))
                 except ValueError:
                     ttype = None
-                if ttype is None or ttype not in allowed:
+                if before is not None:  # a row of a retype type: another assigned type, or the line as it is
+                    if ttype is None or ttype not in allowed or ttype == before:
+                        typed_before += 1
+                        fout.write(raw)
+                        continue
+                    retyped[before, ttype] += 1
+                elif ttype is None or ttype not in allowed:
                     left += 1
                     fout.write(raw)
                     continue
-                typed[ttype] += 1
+                else:
+                    typed[ttype] += 1
                 fout.write(b'%s%s: "%s posts (%s)"%s' % (m['pre'], m['key'], m['posts'], ttype.encode(), m['post']))
             fout.flush()
             os.fsync(fout.fileno())
         os.replace(tmp, out)
     finally:
         tmp.unlink(missing_ok=True)
-    return TypingResult(rows, typed_before, typed, left, other)
+    return TypingResult(rows, typed_before, typed, left, other, retyped)
 
 
 class Evaluation(NamedTuple):
@@ -331,6 +362,9 @@ def main(argv: list[str] | None = None) -> int:
                     help='two references type a name differently: the first one wins (default), or skip: the name stays untyped')
     ap.add_argument('--max-count-ratio', type=int, default=DEFAULT_MAX_COUNT_RATIO, metavar='R',
                     help=f'ignore a reference row used R times less than the list\'s row (0: no limit, default: {DEFAULT_MAX_COUNT_RATIO:d})')
+    ap.add_argument('--retype', type=_types_arg, default=(), metavar='TYPES',
+                    help='rows of these types get another type of --types too (with --list; only with a newer list of the same site '
+                         'as the reference: e.g. general, for a list that typed its artists general)')
     args = ap.parse_args(argv)
     if args.max_count_ratio < 0 or args.min_ref_posts < 0:
         ap.error('--min-ref-posts and --max-count-ratio take 0 or more')
@@ -340,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f'--out is a folder: {args.out}')
     if args.out is not None and args.evaluate is not None:
         ap.error('--out is not used with --evaluate')
+    if args.retype and args.evaluate is not None:
+        ap.error('--retype is not used with --evaluate')
     if args.out is not None and not args.out.resolve().parent.is_dir():
         ap.error(f'no such folder: {args.out.resolve().parent}')
     for path in [*args.ref, args.list or args.evaluate]:
@@ -355,14 +391,19 @@ def main(argv: list[str] | None = None) -> int:
               f'names typed per ref: {", ".join(map(str, refs.won))}; disputed, left untyped: {refs.conflicts:d})')
         print(format_evaluation(evs, cuts, args.types))
         return 0
-    refs = load_references(args.ref, untyped_names(args.list), args.min_ref_posts, args.types, args.max_count_ratio, args.conflicts)
-    res = type_list(args.list, args.out, refs.types, args.types)
+    refs = load_references(args.ref, untyped_names(args.list, args.retype), args.min_ref_posts, args.types, args.max_count_ratio,
+                           args.conflicts)
+    res = type_list(args.list, args.out, refs.types, args.types, args.retype)
     untyped = sum(res.typed.values()) + res.left
-    print(f'{args.list.name}: {res.rows:d} rows, {res.typed_before:d} typed already (kept), {untyped:d} untyped')
+    retyped = sum(res.retyped.values())
+    print(f'{args.list.name}: {res.rows:d} rows, {res.typed_before:d} typed already (kept), '
+          + (f'{retyped:d} retyped ({",".join(args.retype)}), ' if args.retype else '') + f'{untyped:d} untyped')
     print(f'refs {refs_text}: names typed per ref {", ".join(map(str, refs.won))}'
           + (f'; disputed, left untyped: {refs.conflicts:d}' if args.conflicts == 'skip' else ''))
     print('typed now: ' + (', '.join(f'{t} {n:d}' for t, n in sorted(res.typed.items(), key=lambda x: -x[1])) or 'none') +
           f' (total {sum(res.typed.values()):d})')
+    if args.retype:
+        print('retyped: ' + (', '.join(f'{a} -> {b} {n:d}' for (a, b), n in res.retyped.most_common()) or 'none') + f' (total {retyped:d})')
     print(f'left untyped: {res.left:d}' + (f'; lines kept as they are (not tag rows): {res.other:d}' if res.other else ''))
     print(f'-> {args.out}')
     return 0

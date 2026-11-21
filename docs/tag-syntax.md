@@ -137,7 +137,7 @@ Lustra normally allows most symbols for tags search, there are some specifics th
 
 Truy vấn vẫn là một chuỗi tag. Ô **Tìm theo** của app (cạnh ô nhập tag) chỉ giúp điền chuỗi đó: chọn kiểu, gõ giá trị, Enter. Dòng lệnh gõ thẳng tag tương ứng.
 
-**Nghệ sĩ, Nhân vật, Series**: có ở mọi module khi danh sách tag đang dùng có tag loại `artist`, `character`, `copyright`. Giá trị là một tag thường (`some_artist`); app chỉ gợi ý tag loại đó và đổi dấu cách thành `_`. Danh sách không ghi loại (học từ post, Paheal, Rule34Hentai) thì không có các kiểu này; danh sách `2tags/` đi kèm của Rule34 và Xbooru ghi nghệ sĩ là `general` cho tới khi cập nhật.
+**Nghệ sĩ, Nhân vật, Series**: có ở mọi module khi danh sách tag đang dùng có tag loại `artist`, `character`, `copyright`. Giá trị là một tag thường (`some_artist`); app chỉ gợi ý tag loại đó và đổi dấu cách thành `_`. Danh sách không ghi loại (học từ post; Paheal tới 1.0.3, Rule34Hentai tới 1.0.2) thì không có các kiểu này. Danh sách `2tags/` của Rule34 và Xbooru (khi chạy từ mã nguồn) có loại `artist` từ 2026-11-21; trước đó chúng ghi nghệ sĩ là `general`, nên chỉ có Nhân vật và Series cho tới khi cập nhật.
 
 **Kiểu có token**: tag `<token><giá trị>`. Giá trị được kiểm bằng regex của kiểu (manifest `search.kinds[].value`), không bằng ký tự tag của lõi, nên được chữ hoa và dấu chấm khi regex cho phép. Kiểu của hai module có sẵn:
 
